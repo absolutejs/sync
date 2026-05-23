@@ -1,0 +1,122 @@
+# @absolutejs/sync — roadmap
+
+The bet: a **reactive data / sync layer that stays on your own database and ORM**
+(Postgres, MySQL, SQLite, Turso, Neon… via Drizzle _or_ Prisma), running on
+Bun + Elysia — no proprietary backend, no lock-in. The thing Convex/Zero/Electric
+can't offer because they own or replicate the database; the thing TanStack DB proves
+is achievable as a _library_ rather than a backend.
+
+## Positioning
+
+| Engine | Owns/replicates storage? | Reactivity | BYO database |
+| --- | --- | --- | --- |
+| Convex | Yes (proprietary backend) | auto read-set, row-level | No |
+| Zero | Yes (Postgres replica `zero-cache`) | IVM, row-level | Postgres only |
+| ElectricSQL | Yes (Postgres logical replication) | shapes, CRDT | Postgres only |
+| TanStack DB | No (client lib) | differential-dataflow IVM | Yes (BYO writes) |
+| LiveStore | Client SQLite + event log | event-sourced/materializers | event-log |
+| **@absolutejs/sync** | **No — your DB via the ORM** | **explicit → table → row (staged)** | **Yes, any DB Drizzle/Prisma support** |
+
+We sit closest to TanStack DB (a library, BYO backend) but server-first on
+Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the existing
+`createVoiceConnection`/SSE transport.
+
+## Tier ladder (status)
+
+- **Tier 1 — explicit topics — DONE.** `createReactiveHub` (topic pub/sub, prefix
+  wildcards) + `live` Elysia SSE plugin + `createSyncSubscriber` browser client +
+  `createWriteBehindCache` (in-memory hot path, write-behind persistence). You name
+  the topics; mutations publish; subscribers refetch. Kills polling today.
+- **Tier 2 — ORM auto-reactivity — NEXT (biggest near-term win).** Drizzle/Prisma
+  adapters that _derive_ topics automatically: inspect a read query to subscribe it
+  to `table` (and, when the filter is a simple key/range, `table:key`); intercept
+  writes to publish the matching topics. Coarse (table/key) granularity — over-
+  invalidates a little, which is fine for ~95% of dashboards and is DB-agnostic. Ship
+  as `@absolutejs/sync-adapters` (mirrors `rag`/`queue` adapter convention) plus a
+  client `useLiveQuery` / `createLiveQuery` that wraps fetch + subscription.
+- **Tier 3 — sync engine MVP — PLANNED (this doc).** Row-level reactive query
+  results, optimistic mutations, offline. See below.
+
+## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
+
+The achievable MVP, learning from Zero ("hydrate once, then push diffs") and TanStack
+DB (differential-dataflow IVM in a client store):
+
+### Components
+
+1. **View syncer (server).** Per subscribed query: `hydrate` once from the durable
+   store (via Drizzle/Prisma — any DB), then maintain the result set incrementally as
+   changes arrive. Hold the materialized view in memory or in a per-connection
+   `bun:sqlite` table (Bun's native SQLite makes server-side materialization cheap).
+2. **IVM core.** Start with **predicate matching** for single-table filtered queries:
+   on each changed row, evaluate the query's WHERE to decide enter/leave/update, then
+   push a diff (`{added, removed, changed}`) — covers the large majority of real app
+   queries. Graduate to **differential dataflow** (à la TanStack DB) for joins/
+   aggregations later; keep the operator set explicit and small.
+3. **Change source — two pluggable strategies:**
+   - **Route mutations through us (MVP).** All writes go through a mutation API that
+     applies to the durable store and emits the change feed. Works on _any_ DB
+     immediately; misses out-of-band writes.
+   - **CDC adapters (later).** Postgres logical replication / `LISTEN/NOTIFY`, MySQL
+     binlog, SQLite update hooks — catch external writes too. One per DB, in the
+     adapters package. This is the only DB-specific surface.
+4. **Client store.** Normalized in-memory collections + the IVM engine for
+   next-frame local query results; optional persistence to IndexedDB / WASM-SQLite
+   for offline reads.
+5. **Optimistic mutations + reconciliation.** Client applies a mutation locally
+   against its store immediately, queues it, and reconciles when the server confirms
+   (roll back the local delta if the authoritative result diverges) — Convex's
+   server-reconciliation model, our transport.
+6. **Offline queue.** Persist the pending-mutation queue; replay on reconnect.
+7. **Transport.** Reuse the Tier 1 hub + SSE/WS; add a binary/JSON diff frame format.
+
+### Consistency & conflicts
+
+Server-authoritative with per-mutation ordering (a monotonic change-feed sequence);
+optimistic rollback on divergence. CRDT / event-ordering (LiveStore-style) stays
+optional and out of the MVP. No attempt at cross-table serializable transactions in
+the MVP — that's where owning storage wins and we don't.
+
+### Access control
+
+Sync must respect authorization: each synced query/collection declares a server-side
+projection + row filter (à la Convex's programmable sync tables) so we never leak
+rows a user can't read. This is mandatory for Tier 3, not optional.
+
+## Biggest-win sequencing
+
+- **M1 (done):** Tier 1 primitives + voice flagship (replace voice's polling widgets
+  with reactive push; the polling is what exhausted the first Neon project).
+- **M2:** Tier 2 Drizzle adapter (auto table/key topics) + client `createLiveQuery`.
+  Prove on the voice example's dashboards. Then Prisma adapter.
+- **M3:** Tier 3 read path — view syncer + predicate-matching IVM + diff frames +
+  client store; one demo collection end to end.
+- **M4:** Tier 3 write path — optimistic mutations + reconciliation + offline queue.
+- **M5:** CDC change-source adapters (Postgres first) for out-of-band writes;
+  differential-dataflow IVM for joins/aggregations.
+
+## Risks / open questions
+
+- **Granularity vs cost:** how far to push predicate matching before it's cheaper to
+  just refetch (Tier 2 table-level) — measure.
+- **Joins/aggregations:** differential dataflow is the answer but is the complex part;
+  keep it behind M5 and a small operator set.
+- **Memory:** server-held materialized views per connection — bound them, evict cold
+  subscriptions, consider `bun:sqlite` spill.
+- **Fan-out:** many subscribers to a hot query — share one materialization, push the
+  same diff (Zero dedupes object updates this way).
+- **Multi-instance:** the hub is in-process; horizontal scale needs a shared
+  change-feed (Redis stream / Postgres `LISTEN`) — an adapter, not core.
+
+## Prior art
+
+- Convex sync engine — read-set tracking, OCC/MVCC, transaction log.
+  https://stack.convex.dev/how-convex-works
+- Zero (Rocicorp) — IVM "hydrate once, push diffs", Postgres replica.
+  https://zero.rocicorp.dev/
+- TanStack DB — client differential-dataflow IVM, BYO backend.
+  https://tanstack.com/blog/tanstack-db-0.5-query-driven-sync
+- ElectricSQL — Postgres logical replication, shapes.
+  https://electric-sql.com/
+- LiveStore — event-sourced SQLite-on-client.
+- Triplit — batteries-included sync + offline.
