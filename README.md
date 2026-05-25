@@ -34,9 +34,10 @@ top-N ordering are maintained incrementally through a composable operator graph
 > and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
 > mutations + offline queue, a local-first client cache, declarative row-level
 > permissions, schema validation + lazy migrations, live full-text + vector
-> search, scheduled functions, a live devtools dashboard, CDC for
-> Postgres/MySQL/SQLite, incremental aggregations + joins, and a declarative
-> operator graph) are in place. Everything ships as subpaths of this one package.
+> search, scheduled functions, a live devtools dashboard, conflict-free
+> collaborative editing (CRDTs), CDC for Postgres/MySQL/SQLite, incremental
+> aggregations + joins, and a declarative operator graph) are in place.
+> Everything ships as subpaths of this one package.
 
 ## Install
 
@@ -408,6 +409,18 @@ mutate({
 | `createTextIndex({ key, fields, tokenize?, stopwords?, k1?, b? })`                       | Incremental BM25 full-text index (keyword search). Implements `SearchIndex`; usable standalone or inside a search collection.                                                                                          |
 | `createVectorIndex({ key, embedding, metric? })`                                         | Incremental vector index (cosine/dot/euclidean exact k-NN) for semantic search — pairs with `@absolutejs/ai` / `@absolutejs/rag` for RAG retrieval on your own data.                                                   |
 | `defineSchedule({ name, pattern, run })` + `registerSchedule` / `runSchedule`            | Scheduled function: `run({ db, actions })` fires on a cron `pattern`; its writes go live through the change feed. Wire triggers with the `scheduled` plugin (or call `runSchedule(name)` on demand).                   |
+
+### `@absolutejs/sync/crdt`
+
+Conflict-free replicated data types — pure, **zero-dependency**, and isomorphic (same code client and server). They merge concurrent edits from different tabs/devices without a server round-trip per keystroke and without clobbering: every `merge` is commutative, associative, and idempotent, so replicas converge no matter the order. They ride the existing engine with no engine changes — store the CRDT state as a row field and have a mutation `merge` the incoming state into the stored one.
+
+| Export                                       | What it is                                                                                                                                                                                                                         |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `counter`                                    | PN-counter: `create/value/increment/decrement/merge`. Concurrent increments and decrements across replicas all survive.                                                                                                            |
+| `lww`                                        | Last-write-wins register: `create/set/merge`. The latest timestamp wins (replica id breaks ties) — for "just take the newest value" fields.                                                                                        |
+| `createTextCrdt(replica, initial?)`          | Collaborative text (an RGA sequence CRDT): `text/insert/delete/setText/merge/state`. Drive it from an input via `setText`; broadcast `state()`; apply remote state via `merge` — concurrent edits merge and converge.              |
+| `textOf(state)` / `mergeTextState(a, b)`     | Pure helpers for the text state — use them server-side (e.g. a merge-on-write mutation) with no live instance.                                                                                                                     |
+| `CrdtText<State>` / `TextCrdtAdapter<State>` | The pluggable collaborative-text contract. `rgaText` is the first-party (zero-dep) backend; swap in an adapter from the `sync-adapters` repo (e.g. `@absolutejs/sync-yjs`, which wraps the Yjs staple) behind the same call sites. |
 
 ### `@absolutejs/sync/postgres`
 

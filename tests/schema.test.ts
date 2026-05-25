@@ -158,7 +158,9 @@ describe('schema migration (lazy upcast on read)', () => {
 		sub.unsubscribe();
 
 		// engine.migrate exposes the same upcast for reads the engine doesn't own.
-		expect(engine.migrate('tasks', { id: 2, title: 'x' })).toEqual({
+		const migrated: { id: number; title: string; done?: boolean } =
+			engine.migrate('tasks', { id: 2, title: 'x' });
+		expect(migrated).toEqual({
 			id: 2,
 			title: 'x',
 			done: false
