@@ -51,6 +51,13 @@ export { createPollingChangeSource, parseOutboxRow } from './pollingSource';
 export type { OutboxRow, PollingChangeSourceOptions } from './pollingSource';
 export { createInMemoryClusterBus } from './cluster';
 export type { ClusterBus, ClusterChange, ClusterMessage } from './cluster';
+export { createPresenceHub } from './presence';
+export type {
+	PresenceDiff,
+	PresenceHandle,
+	PresenceHub,
+	PresenceMember
+} from './presence';
 
 export { defineCollection, defineJoinCollection } from './collection';
 export type {

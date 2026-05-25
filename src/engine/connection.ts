@@ -1,3 +1,4 @@
+import type { PresenceHandle, PresenceHub, PresenceMember } from './presence';
 import type { Subscription, SyncEngine } from './syncEngine';
 
 /**
@@ -16,7 +17,10 @@ export type ClientFrame =
 			since?: number;
 	  }
 	| { type: 'unsubscribe'; id: string }
-	| { type: 'mutate'; mutationId: number; name: string; args?: unknown };
+	| { type: 'mutate'; mutationId: number; name: string; args?: unknown }
+	| { type: 'presence-join'; room: string; memberId: string; state: unknown }
+	| { type: 'presence-set'; room: string; state: unknown }
+	| { type: 'presence-leave'; room: string };
 
 /** One subscription's delta within a {@link ServerFrame} `frame`. */
 export type FrameDiff<T = unknown> = {
@@ -45,6 +49,14 @@ export type ServerFrame<T = unknown> =
 			version?: number;
 			diffs: FrameDiff<T>[];
 	  }
+	| {
+			// A presence room changed: members joined, updated state, or left.
+			type: 'presence';
+			room: string;
+			joined: PresenceMember<T>[];
+			updated: PresenceMember<T>[];
+			left: string[];
+	  }
 	| { type: 'error'; id?: string; message: string }
 	| { type: 'ack'; mutationId: number; result?: unknown }
 	| { type: 'reject'; mutationId: number; message: string };
@@ -55,6 +67,8 @@ export type SyncConnectionOptions = {
 	ctx: unknown;
 	/** Send a frame to the client (the transport serializes it). */
 	send: (frame: ServerFrame) => void;
+	/** Optional presence hub; enables the `presence-*` frames (see createPresenceHub). */
+	presence?: PresenceHub;
 };
 
 export type SyncConnection = {
@@ -85,6 +99,9 @@ const parseFrame = (raw: unknown): ClientFrame | undefined => {
 		mutationId?: unknown;
 		name?: unknown;
 		args?: unknown;
+		room?: unknown;
+		memberId?: unknown;
+		state?: unknown;
 	};
 	if (frame.type === 'subscribe') {
 		return typeof frame.id === 'string' &&
@@ -117,6 +134,27 @@ const parseFrame = (raw: unknown): ClientFrame | undefined => {
 				}
 			: undefined;
 	}
+	if (frame.type === 'presence-join') {
+		return typeof frame.room === 'string' &&
+			typeof frame.memberId === 'string'
+			? {
+					type: 'presence-join',
+					room: frame.room,
+					memberId: frame.memberId,
+					state: frame.state
+				}
+			: undefined;
+	}
+	if (frame.type === 'presence-set') {
+		return typeof frame.room === 'string'
+			? { type: 'presence-set', room: frame.room, state: frame.state }
+			: undefined;
+	}
+	if (frame.type === 'presence-leave') {
+		return typeof frame.room === 'string'
+			? { type: 'presence-leave', room: frame.room }
+			: undefined;
+	}
 	return undefined;
 };
 
@@ -132,9 +170,12 @@ const parseFrame = (raw: unknown): ClientFrame | undefined => {
 export const createSyncConnection = ({
 	engine,
 	ctx,
-	send
+	send,
+	presence
 }: SyncConnectionOptions): SyncConnection => {
 	const subscriptions = new Map<string, Subscription<unknown>>();
+	// This connection's presence memberships (one per room), torn down on close.
+	const presenceRooms = new Map<string, PresenceHandle<unknown>>();
 
 	// Diffs from one atomic batch (a mutation, or a single applyChange) arrive via
 	// onDiff synchronously and share a version. Buffer them and flush as one
@@ -223,6 +264,50 @@ export const createSyncConnection = ({
 			return;
 		}
 
+		if (frame.type === 'presence-join') {
+			if (presence === undefined) {
+				send({ type: 'error', message: 'Presence is not enabled' });
+				return;
+			}
+			// A re-join replaces the prior membership for this room.
+			presenceRooms.get(frame.room)?.leave();
+			const handle = presence.join(
+				frame.room,
+				frame.memberId,
+				frame.state,
+				(diff) => {
+					send({
+						type: 'presence',
+						room: frame.room,
+						joined: diff.joined,
+						updated: diff.updated,
+						left: diff.left
+					});
+				}
+			);
+			presenceRooms.set(frame.room, handle);
+			// Initial snapshot to the joiner (peers got a `joined` diff instead).
+			send({
+				type: 'presence',
+				room: frame.room,
+				joined: handle.members,
+				updated: [],
+				left: []
+			});
+			return;
+		}
+
+		if (frame.type === 'presence-set') {
+			presenceRooms.get(frame.room)?.set(frame.state);
+			return;
+		}
+
+		if (frame.type === 'presence-leave') {
+			presenceRooms.get(frame.room)?.leave();
+			presenceRooms.delete(frame.room);
+			return;
+		}
+
 		if (subscriptions.has(frame.id)) {
 			send({
 				type: 'error',
@@ -285,6 +370,11 @@ export const createSyncConnection = ({
 			subscription.unsubscribe();
 		}
 		subscriptions.clear();
+		// Drop this connection's presence so peers see it leave (auto-cleanup).
+		for (const handle of presenceRooms.values()) {
+			handle.leave();
+		}
+		presenceRooms.clear();
 	};
 
 	return { handle, close };

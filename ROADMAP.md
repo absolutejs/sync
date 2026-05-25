@@ -76,8 +76,11 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   pluggable `ClusterBus` (`engine.connectCluster`) fans every instance's committed
   changes out to its peers (BYO Redis stream / Postgres `LISTEN`, with an
   in-memory bus for dev), so subscribers stay live across a load-balanced fleet.
-  The Tier 3 engine frontier is now closed end to end; remaining work is ecosystem
-  validation (voice flagship + a standalone sync example).
+  Plus **presence** (`createPresenceHub` + `syncSocket({ presence })`): ephemeral,
+  room-scoped state over the same socket (who's online, who's typing, cursors) —
+  not persisted, auto-removed when a connection drops, peers notified. The Tier 3
+  engine frontier is now closed end to end; remaining work is ecosystem validation
+  (voice flagship + a standalone sync example).
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 

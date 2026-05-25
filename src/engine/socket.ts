@@ -1,6 +1,7 @@
 import { Elysia } from 'elysia';
 import { createSyncConnection } from './connection';
 import type { SyncConnection } from './connection';
+import type { PresenceHub } from './presence';
 import type { SyncEngine } from './syncEngine';
 
 export type SyncSocketOptions = {
@@ -8,6 +9,8 @@ export type SyncSocketOptions = {
 	engine: SyncEngine;
 	/** WebSocket route. Defaults to `/sync/ws`. */
 	path?: string;
+	/** Optional presence hub; enables `presence-*` frames on this socket. */
+	presence?: PresenceHub;
 	/**
 	 * Build the per-connection auth context from the upgrade request data
 	 * (`ws.data`: query, headers, cookies, and anything you `derive`d/`resolve`d
@@ -33,7 +36,8 @@ export type SyncSocketOptions = {
 export const syncSocket = ({
 	engine,
 	path = '/sync/ws',
-	resolveContext
+	resolveContext,
+	presence
 }: SyncSocketOptions) => {
 	const connections = new Map<string, SyncConnection>();
 
@@ -47,6 +51,7 @@ export const syncSocket = ({
 				createSyncConnection({
 					engine,
 					ctx,
+					presence,
 					send: (frame) => {
 						ws.send(frame);
 					}

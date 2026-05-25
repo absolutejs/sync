@@ -13,3 +13,10 @@ export { sync } from './plugin';
 export type { SyncPluginOptions, SyncRequestContext } from './plugin';
 export { syncSocket } from './engine/socket';
 export type { SyncSocketOptions } from './engine/socket';
+export { createPresenceHub } from './engine/presence';
+export type {
+	PresenceDiff,
+	PresenceHandle,
+	PresenceHub,
+	PresenceMember
+} from './engine/presence';
