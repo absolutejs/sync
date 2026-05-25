@@ -22,14 +22,22 @@
 			"types": "./dist/client/index.d.ts",
 			"import": "./dist/client/index.js",
 			"default": "./dist/client/index.js"
+		},
+		"./drizzle": {
+			"types": "./dist/adapters/drizzle/index.d.ts",
+			"import": "./dist/adapters/drizzle/index.js",
+			"default": "./dist/adapters/drizzle/index.js"
 		}
 	},
-	"files": ["dist", "README.md"],
+	"files": [
+		"dist",
+		"README.md"
+	],
 	"publishConfig": {
 		"access": "public"
 	},
 	"scripts": {
-		"build": "rm -rf dist && bun build src/index.ts --outdir dist --sourcemap --target=bun --external elysia && bun build src/client/index.ts --outdir dist/client --sourcemap --target=browser --format=esm && tsc --project tsconfig.build.json",
+		"build": "rm -rf dist && bun build src/index.ts --outdir dist --sourcemap --target=bun --external elysia && bun build src/client/index.ts --outdir dist/client --sourcemap --target=browser --format=esm && bun build src/adapters/drizzle/index.ts --outdir dist/adapters/drizzle --sourcemap --target=bun --external drizzle-orm && tsc --project tsconfig.build.json",
 		"test": "bun test",
 		"typecheck": "tsc --noEmit",
 		"format": "prettier --write \"./**/*.{ts,json,md}\"",
@@ -43,18 +51,24 @@
 		"realtime",
 		"write-behind",
 		"cache",
-		"sync"
+		"sync",
+		"drizzle"
 	],
 	"peerDependencies": {
+		"drizzle-orm": ">= 0.44.0",
 		"elysia": ">= 1.4.26"
 	},
 	"peerDependenciesMeta": {
+		"drizzle-orm": {
+			"optional": true
+		},
 		"elysia": {
 			"optional": true
 		}
 	},
 	"devDependencies": {
 		"@types/bun": "latest",
+		"drizzle-orm": "^0.45.2",
 		"elysia": "latest",
 		"prettier": "latest",
 		"typescript": "latest"
