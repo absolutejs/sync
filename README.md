@@ -33,10 +33,10 @@ top-N ordering are maintained incrementally through a composable operator graph
 > write-behind cache), Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`),
 > and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
 > mutations + offline queue, a local-first client cache, declarative row-level
-> permissions, live full-text + vector search, scheduled functions, a live
-> devtools dashboard, CDC for Postgres/MySQL/SQLite, incremental aggregations +
-> joins, and a declarative operator graph) are in place. Everything ships as
-> subpaths of this one package.
+> permissions, schema validation + lazy migrations, live full-text + vector
+> search, scheduled functions, a live devtools dashboard, CDC for
+> Postgres/MySQL/SQLite, incremental aggregations + joins, and a declarative
+> operator graph) are in place. Everything ships as subpaths of this one package.
 
 ## Install
 
@@ -403,6 +403,7 @@ mutate({
 | `defineGraphCollection({ name, query, key, authorize? })`                                | Run a `query` as a live collection.                                                                                                                                                                                    |
 | `defineReactiveQuery({ name, run, key })` + `registerReactive` / `registerReader`        | Read-set-tracked query: `run(ctx)` reads via `ctx.db` (`all`/`get`/`where`) and re-runs only when the rows/ranges it read change — no `match`, no manual emit.                                                         |
 | `definePermissions({ [table]: { read?, insert?, update?, delete?, write? } })`           | Declarative row-level access control. Pass as `createSyncEngine({ permissions })` or `registerPermissions(table, rules)`. Read rules filter every row emitted; write rules gate `actions.insert/update/delete`.        |
+| `defineSchema({ [table]: { fields, version?, migrate? } })` + `field` kit                | Declarative row schema. Pass as `createSyncEngine({ schemas })` or `registerSchema(table, schema)`. Writes are validated (bad write → `SchemaError`); `migrate` lazily upcasts rows on read (no DB migration needed).  |
 | `defineSearchCollection({ name, table, index, source, key, limit? })` + `registerSearch` | Live search collection: the subscription's `params` are the query (string/vector), the ranked top-K stream back as a normal collection, re-ranked as rows change. Each row carries its score under `_score`.           |
 | `createTextIndex({ key, fields, tokenize?, stopwords?, k1?, b? })`                       | Incremental BM25 full-text index (keyword search). Implements `SearchIndex`; usable standalone or inside a search collection.                                                                                          |
 | `createVectorIndex({ key, embedding, metric? })`                                         | Incremental vector index (cosine/dot/euclidean exact k-NN) for semantic search — pairs with `@absolutejs/ai` / `@absolutejs/rag` for RAG retrieval on your own data.                                                   |

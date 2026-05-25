@@ -33,6 +33,7 @@ import type {
 	EngineActivity,
 	EngineInspection
 } from './devtools';
+import type { SchemaDefinition, TableSchema } from './schema';
 import type { ClusterBus } from './cluster';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
@@ -44,6 +45,17 @@ export class UnauthorizedError extends Error {
 	constructor(subject: string) {
 		super(`Not authorized: ${subject}`);
 		this.name = 'UnauthorizedError';
+	}
+}
+
+/**
+ * Thrown when a mutation's write fails its table's schema (see
+ * {@link defineSchema}). The message names the offending field.
+ */
+export class SchemaError extends Error {
+	constructor(table: string, fieldName: string) {
+		super(`Schema violation on "${table}": invalid field "${fieldName}"`);
+		this.name = 'SchemaError';
 	}
 }
 
@@ -189,6 +201,23 @@ export type SyncEngine = {
 		rules: TablePermissions<Row, Ctx>
 	) => void;
 	/**
+	 * Register a `table`'s schema (see {@link defineSchema}): writes are validated
+	 * against it (a bad write rejects the mutation with {@link SchemaError}), and
+	 * its `migrate` lazily upcasts rows on read. Equivalent to a `schemas` entry
+	 * on {@link createSyncEngine}.
+	 */
+	registerSchema: <Row = unknown>(
+		table: string,
+		schema: TableSchema<Row>
+	) => void;
+	/**
+	 * Apply a table's schema `migrate` to a raw/stored row (identity when there's
+	 * no schema or migration). Use it wherever you read raw rows the engine
+	 * doesn't (e.g. a search collection's `source`); the engine already migrates
+	 * reactive `ctx.db` reads, view hydrates, and the one-shot hydrate.
+	 */
+	migrate: <Row = unknown>(table: string, row: Row) => Row;
+	/**
 	 * Run a registered mutation: authorize, invoke its handler (which writes and
 	 * emits changes via `applyChange`), and resolve with the handler's result.
 	 * Rejects with {@link UnauthorizedError} on deny, or an error for an unknown
@@ -318,6 +347,12 @@ export type SyncEngineOptions = {
 	 * (it threads `ctx` untyped to your rules).
 	 */
 	permissions?: PermissionsDefinition<any>;
+	/**
+	 * Declarative row schemas keyed by table (see {@link defineSchema}): writes
+	 * are validated against them, and `migrate` lazily upcasts rows on read. Add
+	 * more later with {@link SyncEngine.registerSchema}.
+	 */
+	schemas?: SchemaDefinition;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -415,6 +450,38 @@ export const createSyncEngine = (
 	): WriteRule<unknown, unknown> | undefined => {
 		const rules = permissions.get(table);
 		return rules?.[op] ?? rules?.write;
+	};
+	// Declarative row schemas, keyed by table.
+	const schemas = new Map<string, TableSchema<unknown>>();
+	for (const [table, schema] of Object.entries(options.schemas ?? {})) {
+		schemas.set(table, schema as TableSchema<unknown>);
+	}
+	// Validate a write against its table's schema: every field on insert; only
+	// the supplied fields on update. Throws SchemaError naming the bad field.
+	const validateWrite = (
+		table: string,
+		op: 'insert' | 'update',
+		row: unknown
+	) => {
+		const schema = schemas.get(table);
+		if (schema === undefined || typeof row !== 'object' || row === null) {
+			return;
+		}
+		const record = row as Record<string, unknown>;
+		for (const [fieldName, validate] of Object.entries(schema.fields)) {
+			const present = fieldName in record;
+			if (op === 'update' && !present) {
+				continue;
+			}
+			if (!validate(record[fieldName])) {
+				throw new SchemaError(table, fieldName);
+			}
+		}
+	};
+	// Lazily upcast a stored/raw row to the current shape (identity if no migrate).
+	const migrateRow = (table: string, row: unknown): unknown => {
+		const migrate = schemas.get(table)?.migrate;
+		return migrate ? migrate(row) : row;
 	};
 	// Reactive (read-set-tracked) subscriptions, scanned on each change since
 	// their dependencies (the tables they read) are dynamic, not in tableIndex.
@@ -644,7 +711,10 @@ export const createSyncEngine = (
 		return {
 			all: async (table) => {
 				readTables.add(table);
-				const rows = [...(await readerFor(table).all(ctx))];
+				// Migrate raw rows to the current shape, then scope by read rule.
+				const rows = [...(await readerFor(table).all(ctx))].map((row) =>
+					migrateRow(table, row)
+				);
 				const rule = ruleFor(table);
 				return (
 					rule ? rows.filter((row) => rule(ctx, row)) : rows
@@ -662,7 +732,9 @@ export const createSyncEngine = (
 				} else {
 					readTables.add(table);
 				}
-				const row = await reader.get(key, ctx);
+				const raw = await reader.get(key, ctx);
+				const row =
+					raw === undefined ? undefined : migrateRow(table, raw);
 				const rule = ruleFor(table);
 				// A row the caller can't read reads as absent.
 				return (
@@ -683,7 +755,9 @@ export const createSyncEngine = (
 								rule(ctx, row)
 						: (predicate as (row: unknown) => boolean)
 				) as (row: unknown) => boolean;
-				const matched = [...(await reader.all(ctx))].filter(effective);
+				const matched = [...(await reader.all(ctx))]
+					.map((row) => migrateRow(table, row))
+					.filter(effective);
 				if (reader.key !== undefined) {
 					// Remember which rows matched, so an update/delete that pulls a
 					// row out of the range still re-runs (it's in this key set).
@@ -762,6 +836,8 @@ export const createSyncEngine = (
 				return Promise.resolve();
 			},
 			insert: async (table, data) => {
+				// Schema is data integrity — validated for trusted schedules too.
+				validateWrite(table, 'insert', data);
 				if (enforce) {
 					await authorizeWrite(table, 'insert', data, ctx);
 				}
@@ -770,6 +846,7 @@ export const createSyncEngine = (
 				return row;
 			},
 			update: async (table, data) => {
+				validateWrite(table, 'update', data);
 				if (enforce) {
 					await authorizeWrite(table, 'update', data, ctx);
 				}
@@ -1420,19 +1497,27 @@ export const createSyncEngine = (
 			const key = definition.key ?? defaultKey;
 			const match = definition.match;
 			const tables = definition.tables ?? [collection];
-			// Declarative read rule applies to single-table collections (its rows
-			// are that table's rows); join/aggregate collections scope via match.
+			// Declarative read rule + schema migration apply to single-table
+			// collections (their rows are that table's rows); join/aggregate
+			// collections scope via match.
+			const scopedTable = tables.length === 1 ? tables[0]! : undefined;
 			const readRule =
-				tables.length === 1 ? readRuleFor(tables[0]!) : undefined;
-			// Filter the DB result through the read rule, so the initial snapshot
-			// and the refetch fallback never include a row the caller can't see —
-			// regardless of what hydrate returns.
-			const rehydrate = readRule
-				? async () =>
-						[...(await definition.hydrate(params, ctx))].filter(
-							(row) => readRule(ctx, row)
-						)
-				: async () => definition.hydrate(params, ctx);
+				scopedTable !== undefined
+					? readRuleFor(scopedTable)
+					: undefined;
+			// Migrate the DB result to the current shape, then filter it through the
+			// read rule — so the initial snapshot and the refetch fallback are
+			// always current-shape and never include a row the caller can't see.
+			const rehydrate = async () => {
+				const raw = [...(await definition.hydrate(params, ctx))];
+				const rows =
+					scopedTable !== undefined
+						? raw.map((row) => migrateRow(scopedTable, row))
+						: raw;
+				return readRule
+					? rows.filter((row) => readRule(ctx, row))
+					: rows;
+			};
 			// Incremental matching only applies to single-table collections; a
 			// join/aggregate spanning tables can't match a single row, so it uses
 			// the refetch fallback.
@@ -1506,10 +1591,17 @@ export const createSyncEngine = (
 					);
 				}
 			}
-			const rows = [...(await definition.hydrate(params, ctx))];
+			const raw = [...(await definition.hydrate(params, ctx))];
 			const tables = definition.tables ?? [collection];
+			const scopedTable = tables.length === 1 ? tables[0]! : undefined;
+			const rows =
+				scopedTable !== undefined
+					? raw.map((row) => migrateRow(scopedTable, row))
+					: raw;
 			const readRule =
-				tables.length === 1 ? readRuleFor(tables[0]!) : undefined;
+				scopedTable !== undefined
+					? readRuleFor(scopedTable)
+					: undefined;
 			return readRule ? rows.filter((row) => readRule(ctx, row)) : rows;
 		},
 
@@ -1570,6 +1662,12 @@ export const createSyncEngine = (
 		registerPermissions: (table, rules) => {
 			permissions.set(table, rules as TablePermissions<unknown, unknown>);
 		},
+
+		registerSchema: (table, schema) => {
+			schemas.set(table, schema as TableSchema<unknown>);
+		},
+
+		migrate: (table, row) => migrateRow(table, row) as typeof row,
 
 		runMutation: async (name, args, ctx) => {
 			const mutation = mutations.get(name);

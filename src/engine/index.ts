@@ -115,8 +115,10 @@ export type {
 	TransactionRunner
 } from './mutation';
 
-export { createSyncEngine, UnauthorizedError } from './syncEngine';
+export { createSyncEngine, SchemaError, UnauthorizedError } from './syncEngine';
 export type { SubscribeArgs, Subscription, SyncEngine } from './syncEngine';
+export { defineSchema, field } from './schema';
+export type { FieldValidator, SchemaDefinition, TableSchema } from './schema';
 export type {
 	CollectionInspection,
 	CollectionKind,
