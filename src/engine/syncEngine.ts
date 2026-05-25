@@ -8,7 +8,11 @@ import type { EquiJoin } from './equiJoin';
 import type { GraphCollectionDefinition, GraphInstance } from './graph';
 import { createMaterializedView, isEmptyViewDiff } from './materializedView';
 import type { MaterializedView } from './materializedView';
-import type { MutationDefinition } from './mutation';
+import type {
+	MutationActions,
+	MutationDefinition,
+	TableWriter
+} from './mutation';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
 /**
@@ -99,6 +103,15 @@ export type SyncEngine = {
 	/** Register a mutation definition (see {@link defineMutation}). */
 	registerMutation: <Args, Ctx = CollectionContext, Result = unknown>(
 		mutation: MutationDefinition<Args, Ctx, Result>
+	) => void;
+	/**
+	 * Register how to persist a `table` (any ORM), so a mutation's
+	 * `actions.insert/update/delete` write to your store and emit the live change
+	 * in one step — you can't write without going live. See {@link TableWriter}.
+	 */
+	registerWriter: <Row = unknown, Ctx = CollectionContext>(
+		table: string,
+		writer: TableWriter<Row, Ctx>
 	) => void;
 	/**
 	 * Run a registered mutation: authorize, invoke its handler (which writes and
@@ -192,6 +205,7 @@ export const createSyncEngine = (
 		| GraphCollectionDefinition<any, any, any>
 	>();
 	const mutations = new Map<string, MutationDefinition<any, any, any>>();
+	const writers = new Map<string, TableWriter>();
 	const active = new Map<string, Set<ActiveSubscription>>();
 	// Which collections read each table — so a table change fans to all of them.
 	const tableIndex = new Map<string, Set<string>>();
@@ -724,6 +738,10 @@ export const createSyncEngine = (
 			mutations.set(mutation.name, mutation);
 		},
 
+		registerWriter: (table, writer) => {
+			writers.set(table, writer as TableWriter);
+		},
+
 		runMutation: async (name, args, ctx) => {
 			const mutation = mutations.get(name);
 			if (mutation === undefined) {
@@ -740,15 +758,39 @@ export const createSyncEngine = (
 			// torn intermediate state. A throwing handler commits nothing.
 			const buffered: { table: string; change: RowChange<unknown> }[] =
 				[];
-			const result = await mutation.handler(args, ctx, {
+			const writerFor = (table: string): TableWriter => {
+				const writer = writers.get(table);
+				if (writer === undefined) {
+					throw new Error(
+						`No writer registered for table "${table}" — register one with engine.registerWriter, or use actions.change`
+					);
+				}
+				return writer;
+			};
+			const actions: MutationActions = {
 				change: (collection, change) => {
 					buffered.push({
 						table: collection,
 						change: change as RowChange<unknown>
 					});
 					return Promise.resolve();
+				},
+				insert: async (table, data) => {
+					const row = await writerFor(table).insert(data, ctx);
+					buffered.push({ table, change: { op: 'insert', row } });
+					return row;
+				},
+				update: async (table, data) => {
+					const row = await writerFor(table).update(data, ctx);
+					buffered.push({ table, change: { op: 'update', row } });
+					return row;
+				},
+				delete: async (table, row) => {
+					await writerFor(table).delete(row, ctx);
+					buffered.push({ table, change: { op: 'delete', row } });
 				}
-			});
+			};
+			const result = await mutation.handler(args, ctx, actions);
 			await applyChangeBatch(buffered);
 			return result;
 		}

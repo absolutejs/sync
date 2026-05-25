@@ -42,7 +42,11 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   diff transport (`syncSocket`), a client live-collection store
   (`createSyncCollection`), write-once predicate inference (Prisma), and
   optimistic mutations with reconciliation + offline queue (replay-on-reconnect +
-  durable cross-reload storage). Plus CDC for out-of-band writes across **every
+  durable cross-reload storage). Mutations **commit atomically** (one version, one
+  net-merged diff per subscriber — no torn frames) and write through registered
+  table writers (`registerWriter` + `actions.insert/update/delete`) that persist
+  and emit in one step, so a write **can't go un-live** — Convex's "you never wire
+  invalidation", on your own DB. Plus CDC for out-of-band writes across **every
   target database** (Postgres `LISTEN/NOTIFY`, MySQL binlog or changelog poll,
   SQLite changelog poll — all behind one `ChangeSource` seam),
   incremental aggregations (`createAggregate`) and **incremental equi-joins**

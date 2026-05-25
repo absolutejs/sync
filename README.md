@@ -291,16 +291,17 @@ mutate({
 
 ### `@absolutejs/sync/engine`
 
-| Export                                                                      | What it is                                                                                                          |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `createSyncEngine()`                                                        | Registry + view syncer: `register`, `subscribe`, `applyChange`, `connectSource`, `registerMutation`, `runMutation`. |
-| `defineCollection({ name, hydrate, key?, match?, authorize?, tables? })`    | Define a syncable collection.                                                                                       |
-| `defineMutation({ name, handler, authorize? })`                             | Define a server mutation that emits changes.                                                                        |
-| `createAggregate({ key, groupBy?, value? })`                                | Incremental count/sum/avg/min/max by group.                                                                         |
-| `createMaterializedView({ key, match, equals? })`                           | The predicate-matching IVM primitive (`apply`/`reset` → diffs).                                                     |
-| `createPollingChangeSource({ poll, intervalMs?, startSeq?, onProcessed? })` | DB-agnostic CDC `ChangeSource` that tails a changelog (outbox) table.                                               |
-| `query(source).filter().map().join().leftJoin().groupBy().orderBy()`        | Declarative incremental query builder (the operator graph).                                                         |
-| `defineGraphCollection({ name, query, key, authorize? })`                   | Run a `query` as a live collection.                                                                                 |
+| Export                                                                      | What it is                                                                                                                                                                                                             |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createSyncEngine()`                                                        | Registry + view syncer: `register`, `subscribe`, `applyChange`, `connectSource`, `registerMutation`, `registerWriter`, `runMutation`.                                                                                  |
+| `defineCollection({ name, hydrate, key?, match?, authorize?, tables? })`    | Define a syncable collection.                                                                                                                                                                                          |
+| `defineMutation({ name, handler, authorize? })`                             | Define a server mutation. Its `handler` gets `actions.insert/update/delete` (write through a registered `TableWriter` → persists + emits in one step) plus `actions.change` (escape hatch). Changes commit atomically. |
+| `registerWriter(table, { insert, update, delete })`                         | Teach the engine how to persist a table (any ORM), so writes auto-emit — you can't write without going live.                                                                                                           |
+| `createAggregate({ key, groupBy?, value? })`                                | Incremental count/sum/avg/min/max by group.                                                                                                                                                                            |
+| `createMaterializedView({ key, match, equals? })`                           | The predicate-matching IVM primitive (`apply`/`reset` → diffs).                                                                                                                                                        |
+| `createPollingChangeSource({ poll, intervalMs?, startSeq?, onProcessed? })` | DB-agnostic CDC `ChangeSource` that tails a changelog (outbox) table.                                                                                                                                                  |
+| `query(source).filter().map().join().leftJoin().groupBy().orderBy()`        | Declarative incremental query builder (the operator graph).                                                                                                                                                            |
+| `defineGraphCollection({ name, query, key, authorize? })`                   | Run a `query` as a live collection.                                                                                                                                                                                    |
 
 ### `@absolutejs/sync/postgres`
 

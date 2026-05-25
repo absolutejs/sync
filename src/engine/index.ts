@@ -72,7 +72,8 @@ export { defineMutation } from './mutation';
 export type {
 	MutationActions,
 	MutationDefinition,
-	MutationHandler
+	MutationHandler,
+	TableWriter
 } from './mutation';
 
 export { createSyncEngine, UnauthorizedError } from './syncEngine';
