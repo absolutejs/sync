@@ -20,6 +20,7 @@ export type { Aggregate, AggregateGroup, AggregateOptions } from './aggregate';
 export { createEquiJoin } from './equiJoin';
 export type { EquiJoin, EquiJoinOptions } from './equiJoin';
 export {
+	aggregateOp,
 	chain,
 	filterOp,
 	fromRowChange,
@@ -28,6 +29,7 @@ export {
 	materialize
 } from './dataflow';
 export type {
+	AggregateOpOptions,
 	Change,
 	JoinNode,
 	JoinNodeOptions,

@@ -1,3 +1,5 @@
+import { createAggregate } from './aggregate';
+import type { AggregateGroup } from './aggregate';
 import { createEquiJoin } from './equiJoin';
 import type { RowChange, RowKey, ViewDiff } from './types';
 
@@ -94,6 +96,74 @@ export const chain = <A, B, C>(
 ): Operator<A, C> => ({
 	push: (changes) => b.push(a.push(changes))
 });
+
+export type AggregateOpOptions<In> = {
+	/** Input row identity (to track each row's contribution across updates). */
+	key: (row: In) => RowKey;
+	/** Group rows by this key (omit for one `''` group). */
+	groupBy?: (row: In) => RowKey;
+	/** Numeric value for sum/avg/min/max (omit for a count-only aggregate). */
+	value?: (row: In) => number;
+};
+
+/**
+ * Aggregate a change stream into a stream of group summaries — `count`/`sum`/
+ * `avg`/`min`/`max` per group, maintained incrementally (wraps
+ * {@link createAggregate}). Emits an `upsert` of the group summary for each group
+ * a batch touched, or a `delete` when a group empties. Output is keyed by group,
+ * so it composes downstream like any other operator (e.g. after a join).
+ */
+export const aggregateOp = <In>(
+	options: AggregateOpOptions<In>
+): Operator<In, AggregateGroup> => {
+	const aggregate = createAggregate<In>(options);
+	const groupOf = new Map<RowKey, RowKey>();
+
+	return {
+		push: (changes) => {
+			const affected = new Set<RowKey>();
+			for (const change of changes) {
+				const inputKey = options.key(change.row);
+				const previousGroup = groupOf.get(inputKey);
+				if (previousGroup !== undefined) {
+					affected.add(previousGroup);
+				}
+				if (change.op === 'delete') {
+					aggregate.apply({ op: 'delete', row: change.row });
+					groupOf.delete(inputKey);
+				} else {
+					const group = options.groupBy
+						? options.groupBy(change.row)
+						: '';
+					affected.add(group);
+					aggregate.apply({ op: 'update', row: change.row });
+					groupOf.set(inputKey, group);
+				}
+			}
+			const out: Change<AggregateGroup>[] = [];
+			for (const group of affected) {
+				const summary = aggregate.group(group);
+				if (summary === undefined) {
+					out.push({
+						op: 'delete',
+						key: group,
+						row: {
+							group,
+							count: 0,
+							sum: 0,
+							avg: 0,
+							min: undefined,
+							max: undefined
+						}
+					});
+				} else {
+					out.push({ op: 'upsert', key: group, row: summary });
+				}
+			}
+			return out;
+		}
+	};
+};
 
 /** A two-input incremental equi-join node. */
 export type JoinNode<L, R, Out> = {
