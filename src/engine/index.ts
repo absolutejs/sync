@@ -15,7 +15,14 @@ export type {
 	MaterializedView,
 	MaterializedViewOptions
 } from './materializedView';
-export type { RowChange, RowKey, RowOp, ViewDiff } from './types';
+export type {
+	ChangeSource,
+	EmitChange,
+	RowChange,
+	RowKey,
+	RowOp,
+	ViewDiff
+} from './types';
 
 export { defineCollection } from './collection';
 export type { CollectionContext, CollectionDefinition } from './collection';

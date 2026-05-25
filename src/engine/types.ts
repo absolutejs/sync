@@ -30,3 +30,20 @@ export type ViewDiff<T> = {
 	removed: T[];
 	changed: T[];
 };
+
+/** Report a committed row change on `table` into the engine. */
+export type EmitChange = (
+	table: string,
+	change: RowChange<unknown>
+) => void | Promise<void>;
+
+/**
+ * A pluggable source of committed row changes — the seam for catching writes the
+ * mutation API didn't make (CDC: Postgres LISTEN/NOTIFY or logical replication,
+ * MySQL binlog, SQLite update hooks). `start` begins emitting via the supplied
+ * callback; `stop` tears it down. Wire one with {@link SyncEngine.connectSource}.
+ */
+export type ChangeSource = {
+	start: (emit: EmitChange) => void | Promise<void>;
+	stop: () => void | Promise<void>;
+};

@@ -8,8 +8,15 @@ import type { RowKey } from './types';
 export type CollectionContext = Record<string, unknown>;
 
 export type CollectionDefinition<T, P = void, Ctx = CollectionContext> = {
-	/** Collection name — the change-feed key and topic root (e.g. `orders`). */
+	/** Collection name — its identity for subscribe (e.g. `orders`). */
 	name: string;
+	/**
+	 * Source tables this collection reads. A committed change to any of them
+	 * updates the collection. Defaults to `[name]`. List several for a join /
+	 * aggregate collection — which uses the refetch fallback, since a single
+	 * table's row can't be matched into a multi-table result.
+	 */
+	tables?: string[];
 	/**
 	 * Fetch the initial result set from your database (any ORM). Receives the
 	 * subscription's params and context so it can filter to the caller.

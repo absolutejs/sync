@@ -2,7 +2,7 @@ import type { CollectionContext, CollectionDefinition } from './collection';
 import { createMaterializedView, isEmptyViewDiff } from './materializedView';
 import type { MaterializedView } from './materializedView';
 import type { MutationDefinition } from './mutation';
-import type { RowChange, RowKey, ViewDiff } from './types';
+import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
 /**
  * Thrown when `authorize` denies a subscribe or a mutation. The message names
@@ -46,12 +46,18 @@ export type SyncEngine = {
 		args: SubscribeArgs<T, P, Ctx>
 	) => Promise<Subscription<T>>;
 	/**
-	 * Feed a committed change into the engine, fanning the resulting diff to every
-	 * live subscription of that collection. Call after a mutation (or from a CDC
-	 * source). Incremental subscriptions diff the single row; refetch-fallback
-	 * subscriptions re-hydrate.
+	 * Feed a committed change to `table` into the engine, fanning the resulting
+	 * diff to every live subscription of every collection that reads that table.
+	 * Call after a mutation, or wire a {@link ChangeSource} via `connectSource`.
+	 * Single-table subscriptions diff the row; multi-table / refetch ones
+	 * re-hydrate.
 	 */
-	applyChange: <T>(collection: string, change: RowChange<T>) => Promise<void>;
+	applyChange: <T>(table: string, change: RowChange<T>) => Promise<void>;
+	/**
+	 * Connect a change source (e.g. a CDC adapter): its emitted changes flow into
+	 * `applyChange`. Resolves to a disconnect function that stops the source.
+	 */
+	connectSource: (source: ChangeSource) => Promise<() => Promise<void>>;
 	/** Active subscription count, optionally for one collection. */
 	subscriptionCount: (collection?: string) => number;
 	/** Register a mutation definition (see {@link defineMutation}). */
@@ -100,6 +106,8 @@ export const createSyncEngine = (): SyncEngine => {
 	const registry = new Map<string, CollectionDefinition<any, any, any>>();
 	const mutations = new Map<string, MutationDefinition<any, any, any>>();
 	const active = new Map<string, Set<ActiveSubscription>>();
+	// Which collections read each table — so a table change fans to all of them.
+	const tableIndex = new Map<string, Set<string>>();
 
 	const subsFor = (collection: string) => {
 		let set = active.get(collection);
@@ -110,32 +118,40 @@ export const createSyncEngine = (): SyncEngine => {
 		return set;
 	};
 
-	const applyChange = async (
-		collection: string,
+	const applyToSubscription = async (
+		subscription: ActiveSubscription,
 		change: RowChange<unknown>
 	) => {
-		const set = active.get(collection);
-		if (set === undefined || set.size === 0) {
-			return;
-		}
-		for (const subscription of set) {
-			let diff;
-			if (subscription.incremental) {
-				try {
-					diff = subscription.view.apply(change);
-				} catch {
-					// The predicate couldn't decide this change (e.g. an operator
-					// the inferred matcher doesn't support) — degrade to a correct
-					// refetch rather than a wrong diff.
-					diff = subscription.view.reset(
-						await subscription.rehydrate()
-					);
-				}
-			} else {
+		let diff;
+		if (subscription.incremental) {
+			try {
+				diff = subscription.view.apply(change);
+			} catch {
+				// The predicate couldn't decide this change (e.g. an operator the
+				// inferred matcher doesn't support) — degrade to a correct refetch
+				// rather than a wrong diff.
 				diff = subscription.view.reset(await subscription.rehydrate());
 			}
-			if (!isEmptyViewDiff(diff)) {
-				subscription.onDiff(diff);
+		} else {
+			diff = subscription.view.reset(await subscription.rehydrate());
+		}
+		if (!isEmptyViewDiff(diff)) {
+			subscription.onDiff(diff);
+		}
+	};
+
+	const applyChange = async (table: string, change: RowChange<unknown>) => {
+		const collectionNames = tableIndex.get(table);
+		if (collectionNames === undefined) {
+			return;
+		}
+		for (const name of collectionNames) {
+			const set = active.get(name);
+			if (set === undefined || set.size === 0) {
+				continue;
+			}
+			for (const subscription of set) {
+				await applyToSubscription(subscription, change);
 			}
 		}
 	};
@@ -143,6 +159,15 @@ export const createSyncEngine = (): SyncEngine => {
 	return {
 		register: (collection) => {
 			registry.set(collection.name, collection);
+			const tables = collection.tables ?? [collection.name];
+			for (const table of tables) {
+				let set = tableIndex.get(table);
+				if (set === undefined) {
+					set = new Set();
+					tableIndex.set(table, set);
+				}
+				set.add(collection.name);
+			}
 		},
 
 		subscribe: async ({ collection, params, ctx, onDiff }) => {
@@ -165,7 +190,11 @@ export const createSyncEngine = (): SyncEngine => {
 			const key = definition.key ?? defaultKey;
 			const rehydrate = async () => definition.hydrate(params, ctx);
 			const match = definition.match;
-			const incremental = match !== undefined;
+			const tables = definition.tables ?? [collection];
+			// Incremental matching only applies to single-table collections; a
+			// join/aggregate spanning tables can't match a single row, so it uses
+			// the refetch fallback.
+			const incremental = match !== undefined && tables.length === 1;
 			const view = createMaterializedView<unknown>({
 				key,
 				match: incremental
@@ -196,8 +225,15 @@ export const createSyncEngine = (): SyncEngine => {
 			};
 		},
 
-		applyChange: (collection, change) =>
-			applyChange(collection, change as RowChange<unknown>),
+		applyChange: (table, change) =>
+			applyChange(table, change as RowChange<unknown>),
+
+		connectSource: async (source) => {
+			await source.start((table, change) => applyChange(table, change));
+			return async () => {
+				await source.stop();
+			};
+		},
 
 		subscriptionCount: (collection) => {
 			if (collection !== undefined) {
