@@ -19,6 +19,21 @@ export { createAggregate } from './aggregate';
 export type { Aggregate, AggregateGroup, AggregateOptions } from './aggregate';
 export { createEquiJoin } from './equiJoin';
 export type { EquiJoin, EquiJoinOptions } from './equiJoin';
+export {
+	chain,
+	filterOp,
+	fromRowChange,
+	joinNode,
+	mapOp,
+	materialize
+} from './dataflow';
+export type {
+	Change,
+	JoinNode,
+	JoinNodeOptions,
+	Materializer,
+	Operator
+} from './dataflow';
 export type {
 	ChangeSource,
 	EmitChange,
