@@ -48,8 +48,12 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   the affected pairs, with per-side access scoping), an end-to-end typed client via
   Eden + TypeBox (`hydrateRoute`/`mutateRoute` + `syncStore`), and a **version
   cursor** for resumable reconnects (catch-up diffs from a bounded change log).
-  Remaining frontier: multi-way joins / aggregations-over-joins (a general
-  differential-dataflow graph) and CDC for databases other than Postgres.
+  Plus a **general operator graph**: composable incremental operators
+  (`filter`/`map`/`join`/`aggregate` over a keyed change stream) and a declarative
+  `query(...).filter().map().join().groupBy()` builder, run as live engine
+  collections via `defineGraphCollection`. Remaining frontier: joining two derived
+  subqueries (a join's right input is currently a base table), windowed
+  ORDER BY/LIMIT, and CDC for databases other than Postgres.
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 
@@ -111,11 +115,12 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
   `runMutation`) + optimistic mutations, reconciliation (ack/reject), and
   replay-on-reconnect. (Cross-reload persistence: small follow-up.)
 - **M5 (mostly done):** Postgres CDC change source (`LISTEN/NOTIFY`) via the
-  `ChangeSource` seam + `connectSource`; incremental aggregations
-  (`createAggregate`); **incremental equi-joins** (`createEquiJoin` +
-  `defineJoinCollection`, with per-side access scoping). Remaining: a general
-  differential-dataflow graph (multi-way joins, aggregations-over-joins) and CDC
-  for databases other than Postgres.
+  `ChangeSource` seam + `connectSource`; incremental aggregations; incremental
+  equi-joins; and a **general operator graph** — composable `filter`/`map`/`join`/
+  `aggregate` operators + a declarative `query` builder run as live collections
+  (`defineGraphCollection`), covering filter → multi-join → group-by pipelines.
+  Remaining: joining two derived subqueries, windowed ORDER BY/LIMIT, and CDC for
+  databases other than Postgres.
 
 ## Risks / open questions
 

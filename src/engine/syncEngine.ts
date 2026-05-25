@@ -5,6 +5,7 @@ import type {
 } from './collection';
 import { createEquiJoin } from './equiJoin';
 import type { EquiJoin } from './equiJoin';
+import type { GraphCollectionDefinition, GraphInstance } from './graph';
 import { createMaterializedView, isEmptyViewDiff } from './materializedView';
 import type { MaterializedView } from './materializedView';
 import type { MutationDefinition } from './mutation';
@@ -58,6 +59,10 @@ export type SyncEngine = {
 	/** Register an incremental join collection (see {@link defineJoinCollection}). */
 	registerJoin: <L, R, Out, P = void, Ctx = CollectionContext>(
 		collection: JoinCollectionDefinition<L, R, Out, P, Ctx>
+	) => void;
+	/** Register an operator-graph collection (see {@link defineGraphCollection}). */
+	registerGraph: <Out, P = void, Ctx = CollectionContext>(
+		collection: GraphCollectionDefinition<Out, P, Ctx>
 	) => void;
 	/**
 	 * Open a live subscription: authorize, hydrate the initial set, and stream
@@ -135,6 +140,12 @@ type ActiveSubscription =
 			collection: string;
 			join: JoinState;
 			onDiff: OnDiff;
+	  }
+	| {
+			kind: 'graph';
+			collection: string;
+			instance: GraphInstance<unknown>;
+			onDiff: OnDiff;
 	  };
 
 type LoggedChange = {
@@ -174,6 +185,7 @@ export const createSyncEngine = (
 		string,
 		| CollectionDefinition<any, any, any>
 		| JoinCollectionDefinition<any, any, any, any, any>
+		| GraphCollectionDefinition<any, any, any>
 	>();
 	const mutations = new Map<string, MutationDefinition<any, any, any>>();
 	const active = new Map<string, Set<ActiveSubscription>>();
@@ -220,7 +232,9 @@ export const createSyncEngine = (
 		changeVersion: number
 	) => {
 		let diff: ViewDiff<unknown>;
-		if (subscription.kind === 'join') {
+		if (subscription.kind === 'graph') {
+			diff = subscription.instance.applyChange(table, change);
+		} else if (subscription.kind === 'join') {
 			const js = subscription.join;
 			if (table === js.leftTable) {
 				diff = js.op.applyLeft(sideChange(change, js.leftMatch));
@@ -381,6 +395,41 @@ export const createSyncEngine = (
 		};
 	};
 
+	const subscribeGraph = async (
+		collection: string,
+		definition: GraphCollectionDefinition<unknown, unknown, unknown>,
+		params: unknown,
+		ctx: unknown,
+		onDiff: OnDiff,
+		set: Set<ActiveSubscription>
+	): Promise<Subscription<unknown>> => {
+		if (definition.authorize !== undefined) {
+			const allowed = await definition.authorize(params, ctx);
+			if (!allowed) {
+				throw new UnauthorizedError(
+					`subscribe to collection "${collection}"`
+				);
+			}
+		}
+		const instance = definition.query.instantiate(params, ctx);
+		const initial = await instance.hydrate();
+		const atVersion = version;
+		const subscription: ActiveSubscription = {
+			kind: 'graph',
+			collection,
+			instance,
+			onDiff
+		};
+		set.add(subscription);
+		return {
+			initial,
+			version: atVersion,
+			unsubscribe: () => {
+				set.delete(subscription);
+			}
+		};
+	};
+
 	return {
 		register: (collection) => {
 			registry.set(collection.name, collection);
@@ -395,6 +444,13 @@ export const createSyncEngine = (
 			addTableIndex(collection.right.table, collection.name);
 		},
 
+		registerGraph: (collection) => {
+			registry.set(collection.name, collection);
+			for (const table of collection.query.tables()) {
+				addTableIndex(table, collection.name);
+			}
+		},
+
 		subscribe: async ({ collection, params, ctx, onDiff, since }) => {
 			const registered = registry.get(collection);
 			if (registered === undefined) {
@@ -404,7 +460,8 @@ export const createSyncEngine = (
 			const typedOnDiff = onDiff as OnDiff;
 			const subscribeSet = subsFor(collection);
 
-			if ((registered as { kind?: string }).kind === 'join') {
+			const registeredKind = (registered as { kind?: string }).kind;
+			if (registeredKind === 'join') {
 				const joined = await subscribeJoin(
 					collection,
 					registered as JoinCollectionDefinition<
@@ -420,6 +477,21 @@ export const createSyncEngine = (
 					subscribeSet
 				);
 				return joined as Subscription<never>;
+			}
+			if (registeredKind === 'graph') {
+				const graphed = await subscribeGraph(
+					collection,
+					registered as GraphCollectionDefinition<
+						unknown,
+						unknown,
+						unknown
+					>,
+					params,
+					ctx,
+					typedOnDiff,
+					subscribeSet
+				);
+				return graphed as Subscription<never>;
 			}
 			const definition = registered as CollectionDefinition<
 				unknown,

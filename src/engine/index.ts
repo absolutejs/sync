@@ -52,6 +52,15 @@ export type {
 	JoinCollectionDefinition,
 	JoinSide
 } from './collection';
+export { defineGraphCollection, query } from './graph';
+export type {
+	GraphCollectionDefinition,
+	GraphInstance,
+	GraphSource,
+	GroupByOptions,
+	JoinOptions,
+	Query
+} from './graph';
 
 export { defineMutation } from './mutation';
 export type {
