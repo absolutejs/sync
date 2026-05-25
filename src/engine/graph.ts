@@ -34,6 +34,11 @@ export type JoinOptions<Left, Right, Out> = {
 	rightOn: (right: Right) => RowKey;
 	/** Combine a matched pair. */
 	select: (left: Left, right: Right) => Out;
+	/**
+	 * Provide to make this a LEFT join: output for a left row with no matching
+	 * right (e.g. a user with zero orders). Omit for an inner join.
+	 */
+	selectUnmatched?: (left: Left) => Out;
 	/** Output row identity (unique per pair). */
 	key: (out: Out) => RowKey;
 };
@@ -107,6 +112,16 @@ export type Query<Row, P = void, Ctx = CollectionContext> = {
 		right: GraphSource<Right, P, Ctx> | Query<Right, P, Ctx>,
 		options: JoinOptions<Row, Right, Out>
 	) => Query<Out, P, Ctx>;
+	/**
+	 * LEFT join: like {@link join} but keeps left rows with no match, emitting
+	 * `selectUnmatched(left)` for them (required, so the intent is explicit).
+	 */
+	leftJoin: <Right, Out>(
+		right: GraphSource<Right, P, Ctx> | Query<Right, P, Ctx>,
+		options: JoinOptions<Row, Right, Out> & {
+			selectUnmatched: (left: Row) => Out;
+		}
+	) => Query<Out, P, Ctx>;
 	groupBy: (options: GroupByOptions<Row>) => Query<AggregateGroup, P, Ctx>;
 	orderBy: (options: OrderByQueryOptions<Row>) => Query<Row, P, Ctx>;
 	/** Source tables this query reads. */
@@ -171,6 +186,7 @@ const instantiateStream = (
 					leftOn: step.on,
 					rightOn: step.rightOn,
 					select: step.select,
+					selectUnmatched: step.selectUnmatched,
 					key: step.key
 				}),
 				right
@@ -330,22 +346,28 @@ const makeQuery = <Row, P, Ctx>(
 	source: AnySource,
 	steps: AnyStep[]
 ): Query<Row, P, Ctx> => {
+	// `right` is a base source or a sub-Query; normalize to a plan, then append a
+	// join step (inner or left — `selectUnmatched` in `options` decides).
+	const addJoin = <Right, Out>(
+		right: GraphSource<Right, P, Ctx> | Query<Right, P, Ctx>,
+		options: JoinOptions<Row, Right, Out>
+	): Query<Out, P, Ctx> => {
+		const rightPlan = PLANS.get(right as object) ?? {
+			source: right as AnySource,
+			steps: []
+		};
+		return makeQuery(source, [
+			...steps,
+			{ kind: 'join', rightPlan, ...options }
+		]);
+	};
 	const queryInstance: Query<Row, P, Ctx> = {
 		filter: (predicate) =>
 			makeQuery(source, [...steps, { kind: 'filter', predicate }]),
 		map: (transform, rekey) =>
 			makeQuery(source, [...steps, { kind: 'map', transform, rekey }]),
-		join: (right, options) => {
-			// `right` is a base source or a sub-Query; normalize to a plan.
-			const rightPlan = PLANS.get(right as object) ?? {
-				source: right as AnySource,
-				steps: []
-			};
-			return makeQuery(source, [
-				...steps,
-				{ kind: 'join', rightPlan, ...options }
-			]);
-		},
+		join: (right, options) => addJoin(right, options),
+		leftJoin: (right, options) => addJoin(right, options),
 		groupBy: (options) =>
 			makeQuery(source, [...steps, { kind: 'aggregate', ...options }]),
 		orderBy: (options) =>

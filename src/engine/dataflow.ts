@@ -238,6 +238,8 @@ export type JoinNodeOptions<L, R, Out> = {
 	leftOn: (left: L) => RowKey;
 	rightOn: (right: R) => RowKey;
 	select: (left: L, right: R) => Out;
+	/** Provide for a LEFT join: output for a left row with no match. */
+	selectUnmatched?: (left: L) => Out;
 	/** Output row identity (unique per emitted pair). */
 	key: (out: Out) => RowKey;
 };

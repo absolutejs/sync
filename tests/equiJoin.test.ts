@@ -137,3 +137,87 @@ describe('createEquiJoin', () => {
 		expect(j.rows().every((r) => r.userName === 'Zoe')).toBe(true);
 	});
 });
+
+// LEFT join: users (left) ⋈ orders (right), keeping users with zero orders.
+type UserOrder = { userId: number; userName: string; orderId: number | null };
+
+const leftJoin = () =>
+	createEquiJoin<User, Order, UserOrder>({
+		leftKey: (u) => u.id,
+		rightKey: (o) => o.id,
+		leftOn: (u) => u.id,
+		rightOn: (o) => o.userId,
+		select: (u, o) => ({
+			userId: u.id,
+			userName: u.name,
+			orderId: o.id
+		}),
+		selectUnmatched: (u) => ({
+			userId: u.id,
+			userName: u.name,
+			orderId: null
+		})
+	});
+
+describe('createEquiJoin — left join (selectUnmatched)', () => {
+	test('hydrate keeps a left row with no match (as unmatched)', () => {
+		const j = leftJoin();
+		j.hydrate(
+			[user(5, 'Ada'), user(9, 'Bob')], // Bob has no orders
+			[order(1, 5)]
+		);
+		expect(j.size()).toBe(2);
+		const bob = j.rows().find((r) => r.userId === 9);
+		expect(bob).toEqual({ userId: 9, userName: 'Bob', orderId: null });
+		const ada = j.rows().find((r) => r.userId === 5);
+		expect(ada?.orderId).toBe(1);
+	});
+
+	test('first matching right replaces the unmatched row', () => {
+		const j = leftJoin();
+		j.hydrate([user(5, 'Ada')], []); // Ada starts unmatched
+		expect(j.rows()).toEqual([
+			{ userId: 5, userName: 'Ada', orderId: null }
+		]);
+		const diff = j.applyRight({ op: 'insert', row: order(1, 5) });
+		expect(diff.removed).toEqual([
+			{ userId: 5, userName: 'Ada', orderId: null }
+		]);
+		expect(diff.added).toEqual([
+			{ userId: 5, userName: 'Ada', orderId: 1 }
+		]);
+		expect(j.size()).toBe(1);
+	});
+
+	test('deleting the last match reverts to the unmatched row', () => {
+		const j = leftJoin();
+		j.hydrate([user(5, 'Ada')], [order(1, 5)]);
+		const diff = j.applyRight({ op: 'delete', row: order(1, 5) });
+		expect(diff.removed).toEqual([
+			{ userId: 5, userName: 'Ada', orderId: 1 }
+		]);
+		expect(diff.added).toEqual([
+			{ userId: 5, userName: 'Ada', orderId: null }
+		]);
+	});
+
+	test('a second match does not re-emit an unmatched row', () => {
+		const j = leftJoin();
+		j.hydrate([user(5, 'Ada')], [order(1, 5)]);
+		const diff = j.applyRight({ op: 'insert', row: order(2, 5) });
+		expect(diff.added).toEqual([
+			{ userId: 5, userName: 'Ada', orderId: 2 }
+		]);
+		expect(diff.removed).toEqual([]);
+		expect(j.size()).toBe(2); // two matched rows, no unmatched placeholder
+	});
+
+	test('inserting an unmatched left emits its placeholder row', () => {
+		const j = leftJoin();
+		j.hydrate([], [order(1, 5)]);
+		const diff = j.applyLeft({ op: 'insert', row: user(9, 'Bob') });
+		expect(diff.added).toEqual([
+			{ userId: 9, userName: 'Bob', orderId: null }
+		]);
+	});
+});
