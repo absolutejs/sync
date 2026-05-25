@@ -19,6 +19,12 @@ import type {
 	ReadHandle,
 	TableReader
 } from './reactive';
+import type {
+	PermissionsDefinition,
+	ReadRule,
+	TablePermissions,
+	WriteRule
+} from './permissions';
 import type { ClusterBus } from './cluster';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
@@ -143,6 +149,16 @@ export type SyncEngine = {
 		reader: TableReader<Ctx>
 	) => void;
 	/**
+	 * Register declarative, row-level permissions for a `table` (see
+	 * {@link definePermissions}). Read rules filter every row the engine emits for
+	 * the table; write rules gate `actions.insert/update/delete`. Equivalent to a
+	 * `permissions` entry on {@link createSyncEngine}.
+	 */
+	registerPermissions: <Row = unknown, Ctx = CollectionContext>(
+		table: string,
+		rules: TablePermissions<Row, Ctx>
+	) => void;
+	/**
 	 * Run a registered mutation: authorize, invoke its handler (which writes and
 	 * emits changes via `applyChange`), and resolve with the handler's result.
 	 * Rejects with {@link UnauthorizedError} on deny, or an error for an unknown
@@ -242,6 +258,15 @@ export type SyncEngineOptions = {
 	 * mutations without a transaction (each writer call is its own DB op).
 	 */
 	transaction?: TransactionRunner;
+	/**
+	 * Declarative, row-level permissions keyed by table (see
+	 * {@link definePermissions}). Read rules filter every row the engine emits;
+	 * write rules gate `actions.insert/update/delete`. Add more later with
+	 * {@link SyncEngine.registerPermissions}. Type the rules at the
+	 * `definePermissions<YourCtx>(...)` call site; the engine accepts any context
+	 * (it threads `ctx` untyped to your rules).
+	 */
+	permissions?: PermissionsDefinition<any>;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -296,6 +321,23 @@ export const createSyncEngine = (
 	const mutations = new Map<string, MutationDefinition<any, any, any>>();
 	const writers = new Map<string, TableWriter>();
 	const readers = new Map<string, TableReader>();
+	// Declarative row-level permissions, keyed by table. Stored with an `unknown`
+	// context — the engine threads ctx untyped — while the public
+	// `definePermissions`/`registerPermissions` surface stays fully typed.
+	const permissions = new Map<string, TablePermissions<unknown, unknown>>();
+	for (const [table, rules] of Object.entries(options.permissions ?? {})) {
+		permissions.set(table, rules as TablePermissions<unknown, unknown>);
+	}
+	const readRuleFor = (
+		table: string
+	): ReadRule<unknown, unknown> | undefined => permissions.get(table)?.read;
+	const writeRuleFor = (
+		table: string,
+		op: 'insert' | 'update' | 'delete'
+	): WriteRule<unknown, unknown> | undefined => {
+		const rules = permissions.get(table);
+		return rules?.[op] ?? rules?.write;
+	};
 	// Reactive (read-set-tracked) subscriptions, scanned on each change since
 	// their dependencies (the tables they read) are dynamic, not in tableIndex.
 	const reactiveSubs = new Set<
@@ -495,7 +537,11 @@ export const createSyncEngine = (
 		return {
 			all: async (table) => {
 				readTables.add(table);
-				return [...(await readerFor(table).all(ctx))] as never[];
+				const rows = [...(await readerFor(table).all(ctx))];
+				const rule = readRuleFor(table);
+				return (
+					rule ? rows.filter((row) => rule(ctx, row)) : rows
+				) as never[];
 			},
 			get: async (table, key) => {
 				const reader = readerFor(table);
@@ -509,20 +555,35 @@ export const createSyncEngine = (
 				} else {
 					readTables.add(table);
 				}
-				return (await reader.get(key, ctx)) as never;
+				const row = await reader.get(key, ctx);
+				const rule = readRuleFor(table);
+				// A row the caller can't read reads as absent.
+				return (
+					rule && row !== undefined && !rule(ctx, row)
+						? undefined
+						: row
+				) as never;
 			},
 			where: async (table, predicate) => {
 				const reader = readerFor(table);
-				const matched = [...(await reader.all(ctx))].filter(
-					predicate as (row: unknown) => boolean
-				);
+				const rule = readRuleFor(table);
+				// Fold the read rule into the range predicate, so an unreadable row
+				// never matches and a visibility flip still re-runs the query.
+				const effective = (
+					rule
+						? (row: unknown) =>
+								(predicate as (r: unknown) => boolean)(row) &&
+								rule(ctx, row)
+						: (predicate as (row: unknown) => boolean)
+				) as (row: unknown) => boolean;
+				const matched = [...(await reader.all(ctx))].filter(effective);
 				if (reader.key !== undefined) {
 					// Remember which rows matched, so an update/delete that pulls a
 					// row out of the range still re-runs (it's in this key set).
 					const key = reader.key;
 					rangeDeps.push({
 						table,
-						predicate: predicate as (row: unknown) => boolean,
+						predicate: effective,
 						keys: new Set(matched.map(key))
 					});
 				} else {
@@ -1001,15 +1062,31 @@ export const createSyncEngine = (
 			}
 
 			const key = definition.key ?? defaultKey;
-			const rehydrate = async () => definition.hydrate(params, ctx);
 			const match = definition.match;
 			const tables = definition.tables ?? [collection];
+			// Declarative read rule applies to single-table collections (its rows
+			// are that table's rows); join/aggregate collections scope via match.
+			const readRule =
+				tables.length === 1 ? readRuleFor(tables[0]!) : undefined;
+			// Filter the DB result through the read rule, so the initial snapshot
+			// and the refetch fallback never include a row the caller can't see —
+			// regardless of what hydrate returns.
+			const rehydrate = readRule
+				? async () =>
+						[...(await definition.hydrate(params, ctx))].filter(
+							(row) => readRule(ctx, row)
+						)
+				: async () => definition.hydrate(params, ctx);
 			// Incremental matching only applies to single-table collections; a
 			// join/aggregate spanning tables can't match a single row, so it uses
 			// the refetch fallback.
 			const incremental = match !== undefined && tables.length === 1;
+			// Fold the read rule into the incremental predicate (also used by the
+			// catch-up builder), so an unreadable row never enters the view.
 			const boundMatch = incremental
-				? (row: unknown) => match(row, params, ctx)
+				? (row: unknown) =>
+						match(row, params, ctx) &&
+						(readRule ? readRule(ctx, row) : true)
 				: () => true;
 			const view = createMaterializedView<unknown>({
 				key,
@@ -1073,7 +1150,11 @@ export const createSyncEngine = (
 					);
 				}
 			}
-			return [...(await definition.hydrate(params, ctx))];
+			const rows = [...(await definition.hydrate(params, ctx))];
+			const tables = definition.tables ?? [collection];
+			const readRule =
+				tables.length === 1 ? readRuleFor(tables[0]!) : undefined;
+			return readRule ? rows.filter((row) => readRule(ctx, row)) : rows;
 		},
 
 		applyChange: (table, change) =>
@@ -1130,6 +1211,10 @@ export const createSyncEngine = (
 			readers.set(table, reader as TableReader);
 		},
 
+		registerPermissions: (table, rules) => {
+			permissions.set(table, rules as TablePermissions<unknown, unknown>);
+		},
+
 		runMutation: async (name, args, ctx) => {
 			const mutation = mutations.get(name);
 			if (mutation === undefined) {
@@ -1151,6 +1236,39 @@ export const createSyncEngine = (
 				return writer;
 			};
 
+			// Enforce the table's declarative write rule before the writer runs (so
+			// a deny rolls the transaction back). For update/delete, evaluate the
+			// rule against the *existing* row when a reader can load it — so the
+			// check reflects committed state, not a client-supplied payload.
+			const authorizeWrite = async (
+				table: string,
+				op: 'insert' | 'update' | 'delete',
+				value: unknown
+			) => {
+				const rule = writeRuleFor(table, op);
+				if (rule === undefined) {
+					return;
+				}
+				let subject = value;
+				if (op !== 'insert') {
+					const reader = readers.get(table);
+					if (reader?.get !== undefined) {
+						const id = reader.key
+							? reader.key(value)
+							: (value as { id?: RowKey }).id;
+						if (id !== undefined) {
+							const existing = await reader.get(id, ctx);
+							if (existing !== undefined) {
+								subject = existing;
+							}
+						}
+					}
+				}
+				if (!rule(ctx, subject)) {
+					throw new UnauthorizedError(`${op} on table "${table}"`);
+				}
+			};
+
 			// Run the handler (optionally inside the DB transaction), collecting its
 			// changes into a fresh buffer per attempt — so a transaction that retries
 			// or rolls back never double-emits or leaks a half-applied batch. The
@@ -1169,6 +1287,7 @@ export const createSyncEngine = (
 						return Promise.resolve();
 					},
 					insert: async (table, data) => {
+						await authorizeWrite(table, 'insert', data);
 						const row = await writerFor(table).insert(
 							data,
 							ctx,
@@ -1178,6 +1297,7 @@ export const createSyncEngine = (
 						return row;
 					},
 					update: async (table, data) => {
+						await authorizeWrite(table, 'update', data);
 						const row = await writerFor(table).update(
 							data,
 							ctx,
@@ -1187,6 +1307,7 @@ export const createSyncEngine = (
 						return row;
 					},
 					delete: async (table, row) => {
+						await authorizeWrite(table, 'delete', row);
 						await writerFor(table).delete(row, ctx, tx);
 						buffered.push({ table, change: { op: 'delete', row } });
 					}

@@ -32,8 +32,9 @@ top-N ordering are maintained incrementally through a composable operator graph
 > Status: early (`0.0.1`). Tier 1 (hub, SSE plugin, browser subscriber,
 > write-behind cache), Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`),
 > and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
-> mutations + offline queue, CDC for Postgres/MySQL/SQLite, incremental
-> aggregations + joins, and a declarative operator graph) are in place.
+> mutations + offline queue, a local-first client cache, declarative row-level
+> permissions, CDC for Postgres/MySQL/SQLite, incremental aggregations + joins,
+> and a declarative operator graph) are in place.
 > Everything ships as subpaths of this one package.
 
 ## Install
@@ -229,6 +230,24 @@ await orders.mutate({
   server's changelog still covers it, a fresh snapshot otherwise).
 - **Access control is mandatory.** Each collection's `authorize` gates subscribe and
   its filter scopes rows, so a change to a row a caller can't see never reaches them.
+- **Declarative permissions.** Instead of restating a row filter across `authorize`,
+  `hydrate`, and `match`, register row-level rules once with `definePermissions` and
+  the engine enforces them: `read` rules filter every row emitted (initial snapshot,
+  incremental diff, catch-up, one-shot hydrate, and a reactive query's `ctx.db`
+  reads); `insert`/`update`/`delete`/`write` rules gate the mutation actions. For
+  `update`/`delete` the rule is checked against the _existing_ row (loaded via the
+  table's reader), so it can't be spoofed by the client payload.
+
+    ```ts
+    const engine = createSyncEngine({
+    	permissions: definePermissions<{ userId: number }>({
+    		tasks: {
+    			read: (ctx, row) => row.userId === ctx.userId, // see only your rows
+    			write: (ctx, row) => row.userId === ctx.userId // touch only your rows
+    		}
+    	})
+    });
+    ```
 
 ## Write-behind cache — keep a remote store off your hot path
 
@@ -323,6 +342,7 @@ mutate({
 | `query(source).filter().map().join().leftJoin().groupBy().orderBy()`              | Declarative incremental query builder (the operator graph).                                                                                                                                                            |
 | `defineGraphCollection({ name, query, key, authorize? })`                         | Run a `query` as a live collection.                                                                                                                                                                                    |
 | `defineReactiveQuery({ name, run, key })` + `registerReactive` / `registerReader` | Read-set-tracked query: `run(ctx)` reads via `ctx.db` (`all`/`get`/`where`) and re-runs only when the rows/ranges it read change — no `match`, no manual emit.                                                         |
+| `definePermissions({ [table]: { read?, insert?, update?, delete?, write? } })`    | Declarative row-level access control. Pass as `createSyncEngine({ permissions })` or `registerPermissions(table, rules)`. Read rules filter every row emitted; write rules gate `actions.insert/update/delete`.        |
 
 ### `@absolutejs/sync/postgres`
 

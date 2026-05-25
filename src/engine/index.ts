@@ -84,6 +84,14 @@ export type {
 	Query
 } from './graph';
 
+export { definePermissions } from './permissions';
+export type {
+	PermissionsDefinition,
+	ReadRule,
+	TablePermissions,
+	WriteRule
+} from './permissions';
+
 export { defineMutation } from './mutation';
 export type {
 	MutationActions,
