@@ -8,6 +8,8 @@ export type { LiveQuery, LiveQueryOptions, LiveQueryState } from './liveQuery';
 
 export { createSyncCollection } from './syncCollection';
 export type {
+	MutateOptions,
+	OptimisticDraft,
 	SyncCollection,
 	SyncCollectionOptions,
 	SyncCollectionState,

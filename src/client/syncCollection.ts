@@ -6,12 +6,33 @@ export type { ServerFrame } from '../engine/connection';
 export type SyncCollectionStatus = 'connecting' | 'ready' | 'closed';
 
 export type SyncCollectionState<T> = {
-	/** Current rows of the collection (insertion order; not sorted). */
+	/** Visible rows: the server state with pending optimistic mutations applied. */
 	data: T[];
 	/** Connection/sync status. */
 	status: SyncCollectionStatus;
 	/** Last error message from the server, or `undefined`. */
 	error: unknown;
+};
+
+/** A working set a mutation's optimistic effect edits in place. */
+export type OptimisticDraft<T> = {
+	/** Insert or replace a row by key. */
+	set: (row: T) => void;
+	/** Remove a row by key. */
+	delete: (key: RowKey) => void;
+};
+
+export type MutateOptions<T> = {
+	/** Registered server mutation name. */
+	name: string;
+	/** Arguments forwarded to the mutation handler. */
+	args?: unknown;
+	/**
+	 * Apply this mutation's effect to the local set immediately for instant UI.
+	 * Reverted automatically if the server rejects it. Omit for a non-optimistic
+	 * mutation (UI updates only once the authoritative diff arrives).
+	 */
+	optimistic?: (draft: OptimisticDraft<T>) => void;
 };
 
 export type SyncCollectionOptions<T> = {
@@ -21,7 +42,7 @@ export type SyncCollectionOptions<T> = {
 	collection: string;
 	/** Query params forwarded to the server collection's hydrate/match/authorize. */
 	params?: unknown;
-	/** Row identity, used to apply diffs. Defaults to `row.id`. */
+	/** Row identity, used to apply diffs and optimistic edits. Defaults to `row.id`. */
 	key?: (row: T) => RowKey;
 	/** WebSocket implementation; defaults to the global one (pass for tests/SSR). */
 	webSocketImpl?: typeof WebSocket;
@@ -43,6 +64,12 @@ export type SyncCollection<T> = {
 	subscribe: (
 		listener: (state: SyncCollectionState<T>) => void
 	) => () => void;
+	/**
+	 * Run a server mutation, optionally applying it optimistically. Resolves with
+	 * the server's result on ack, rejects (and rolls back) on reject. Pending
+	 * mutations are replayed when the socket reconnects, so they survive a drop.
+	 */
+	mutate: <R = unknown>(options: MutateOptions<T>) => Promise<R>;
 	/** Unsubscribe on the server, close the socket, and stop reconnecting. */
 	close: () => void;
 };
@@ -50,14 +77,25 @@ export type SyncCollection<T> = {
 // One store subscribes to exactly one collection, so a fixed frame id suffices.
 const SUBSCRIPTION_ID = 's';
 
+type PendingMutation<T> = {
+	mutationId: number;
+	name: string;
+	args: unknown;
+	optimistic?: (draft: OptimisticDraft<T>) => void;
+	resolve: (result: unknown) => void;
+	reject: (error: unknown) => void;
+};
+
 /**
- * A live collection backed by the WebSocket sync engine: connect, subscribe,
- * apply the server's snapshot then its diffs into a local set, and re-sync on
- * reconnect. Framework-agnostic (`get` + `subscribe`, for `useSyncExternalStore`
- * or any equivalent).
+ * A live collection backed by the WebSocket sync engine. Reads: connect,
+ * subscribe, apply the server's snapshot then row-level diffs, re-sync on
+ * reconnect. Writes: {@link SyncCollection.mutate} applies an optimistic overlay
+ * immediately, sends the mutation, and reconciles on ack (drop the overlay — the
+ * authoritative diff already arrived) or reject (roll back). Framework-agnostic
+ * (`get` + `subscribe`).
  *
- * Unlike {@link createLiveQuery} (Tier 2 — refetch on a topic), this maintains
- * the result set from row-level diffs, so a change moves only the affected rows.
+ * Mutations are replayed on reconnect, so make server mutations idempotent —
+ * delivery is at-least-once if an ack is lost across a drop.
  */
 export const createSyncCollection = <T>(
 	options: SyncCollectionOptions<T>
@@ -72,7 +110,11 @@ export const createSyncCollection = <T>(
 		);
 	}
 
-	const rows = new Map<RowKey, T>();
+	// Server-authoritative rows; `pending` is the optimistic overlay on top.
+	const confirmed = new Map<RowKey, T>();
+	const pending: PendingMutation<T>[] = [];
+	let mutationSeq = 0;
+
 	let state: SyncCollectionState<T> = {
 		data: [],
 		status: 'connecting',
@@ -85,41 +127,87 @@ export const createSyncCollection = <T>(
 			listener(state);
 		}
 	};
-	const commitRows = () =>
-		setState({
-			data: [...rows.values()],
-			status: 'ready',
-			error: undefined
-		});
+
+	/** Recompute visible rows = confirmed + pending optimistic effects. */
+	const recompute = (patch: Partial<SyncCollectionState<T>> = {}) => {
+		const working = new Map(confirmed);
+		const draft: OptimisticDraft<T> = {
+			set: (row) => working.set(key(row), row),
+			delete: (rowKey) => working.delete(rowKey)
+		};
+		for (const mutation of pending) {
+			mutation.optimistic?.(draft);
+		}
+		setState({ ...patch, data: [...working.values()] });
+	};
 
 	let socket: WebSocket | undefined;
+	let connected = false;
 	let closed = false;
 	let attempt = 0;
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
+	const settlePending = (mutationId: number) => {
+		const index = pending.findIndex(
+			(mutation) => mutation.mutationId === mutationId
+		);
+		if (index === -1) {
+			return undefined;
+		}
+		const [mutation] = pending.splice(index, 1);
+		return mutation;
+	};
+
 	const applyFrame = (frame: ServerFrame<T>) => {
 		if (frame.type === 'snapshot') {
-			rows.clear();
+			confirmed.clear();
 			for (const row of frame.rows) {
-				rows.set(key(row), row);
+				confirmed.set(key(row), row);
 			}
-			commitRows();
+			recompute({ status: 'ready', error: undefined });
 		} else if (frame.type === 'diff') {
 			for (const row of frame.removed) {
-				rows.delete(key(row));
+				confirmed.delete(key(row));
 			}
 			for (const row of frame.added) {
-				rows.set(key(row), row);
+				confirmed.set(key(row), row);
 			}
 			for (const row of frame.changed) {
-				rows.set(key(row), row);
+				confirmed.set(key(row), row);
 			}
-			commitRows();
+			recompute();
 		} else if (frame.type === 'error') {
 			setState({ error: frame.message });
 			options.onError?.(frame.message);
+		} else if (frame.type === 'ack') {
+			// The authoritative diff already arrived (ordered before the ack), so
+			// dropping the overlay leaves the confirmed row in place — no flicker.
+			const mutation = settlePending(frame.mutationId);
+			if (mutation !== undefined) {
+				recompute();
+				mutation.resolve(frame.result);
+			}
+		} else {
+			// reject — roll the optimistic overlay back.
+			const mutation = settlePending(frame.mutationId);
+			if (mutation !== undefined) {
+				recompute();
+				mutation.reject(new Error(String(frame.message)));
+			}
 		}
-		// ack/reject are handled by the mutation layer.
+	};
+
+	const sendMutate = (mutation: PendingMutation<T>) => {
+		if (connected) {
+			socket?.send(
+				JSON.stringify({
+					type: 'mutate',
+					mutationId: mutation.mutationId,
+					name: mutation.name,
+					args: mutation.args
+				})
+			);
+		}
 	};
 
 	const connect = () => {
@@ -131,6 +219,7 @@ export const createSyncCollection = <T>(
 		socket = ws;
 		ws.onopen = () => {
 			attempt = 0;
+			connected = true;
 			ws.send(
 				JSON.stringify({
 					type: 'subscribe',
@@ -139,6 +228,10 @@ export const createSyncCollection = <T>(
 					params: options.params
 				})
 			);
+			// Replay anything still pending across the (re)connect.
+			for (const mutation of pending) {
+				sendMutate(mutation);
+			}
 		};
 		ws.onmessage = (event) => {
 			try {
@@ -148,6 +241,7 @@ export const createSyncCollection = <T>(
 			}
 		};
 		ws.onclose = () => {
+			connected = false;
 			if (closed || reconnectMs <= 0) {
 				return;
 			}
@@ -167,11 +261,26 @@ export const createSyncCollection = <T>(
 				listeners.delete(listener);
 			};
 		},
+		mutate: <R = unknown>(mutateOptions: MutateOptions<T>) =>
+			new Promise<R>((resolve, reject) => {
+				const mutation: PendingMutation<T> = {
+					mutationId: (mutationSeq += 1),
+					name: mutateOptions.name,
+					args: mutateOptions.args,
+					optimistic: mutateOptions.optimistic,
+					resolve: (result) => resolve(result as R),
+					reject
+				};
+				pending.push(mutation);
+				recompute(); // apply the optimistic overlay immediately
+				sendMutate(mutation);
+			}),
 		close: () => {
 			if (closed) {
 				return;
 			}
 			closed = true;
+			connected = false;
 			if (reconnectTimer !== undefined) {
 				clearTimeout(reconnectTimer);
 			}
@@ -182,6 +291,10 @@ export const createSyncCollection = <T>(
 				socket?.close();
 			} catch {
 				// socket already closing/closed
+			}
+			// Fail any still-pending mutations so their promises don't hang.
+			for (const mutation of pending.splice(0)) {
+				mutation.reject(new Error('sync collection closed'));
 			}
 			setState({ status: 'closed' });
 			listeners.clear();
