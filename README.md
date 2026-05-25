@@ -268,6 +268,7 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 | `jsonFetcher(url, init?)`                         | Default `fetcher`: GET + JSON parse, forwards the abort signal.                                                                                                    |
 | `createSyncCollection({ url, collection, ... })`  | Live diff-driven collection store with optimistic `mutate`.                                                                                                        |
 | `createSyncClient({ url })`                       | One socket, many collections (`client.collection(...)`). Applies a multi-collection mutation's diffs as one **consistent frame** — no torn cross-collection paint. |
+| `createPresence({ url, room, state })`            | Join a presence room: see who's online / typing (`get` + `subscribe`) and publish your own state (`set`).                                                          |
 | `localStorageMutationStorage(key)`                | `localStorage`-backed offline queue for `createSyncCollection`.                                                                                                    |
 
 ### Framework bindings — `@absolutejs/sync/{react,vue,svelte,angular}`

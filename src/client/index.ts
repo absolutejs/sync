@@ -21,6 +21,13 @@ export type {
 	SyncCollectionStatus
 } from './syncCollection';
 
+export { createPresence } from './presence';
+export type {
+	PresenceClient,
+	PresenceClientOptions,
+	PresenceMember
+} from './presence';
+
 export { createSyncClient } from './syncClient';
 export type {
 	SyncClient,
