@@ -34,8 +34,18 @@ import type {
 	EngineInspection
 } from './devtools';
 import type { SchemaDefinition, TableSchema } from './schema';
+import type { CrdtMergeable } from '../crdt';
 import type { ClusterBus } from './cluster';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
+
+/**
+ * Which fields of a `Row` are CRDT values, and the {@link CrdtMergeable} backend
+ * (e.g. `rgaText`, or `yjsText` from `@absolutejs/sync-yjs`) used to merge each.
+ * Pass to `engine.registerCrdt` so the engine merges those fields on write.
+ */
+export type CrdtFields<Row> = {
+	[Field in keyof Row]?: CrdtMergeable<Row[Field]>;
+};
 
 /**
  * Thrown when `authorize` denies a subscribe or a mutation. The message names
@@ -209,6 +219,20 @@ export type SyncEngine = {
 	registerSchema: <Row = unknown>(
 		table: string,
 		schema: TableSchema<Row>
+	) => void;
+	/**
+	 * Declare which fields on a `table` are CRDT values (see {@link CrdtMergeable}
+	 * — e.g. `rgaText` from `@absolutejs/sync/crdt`, or `yjsText` from
+	 * `@absolutejs/sync-yjs`). The engine then MERGES those fields on
+	 * `actions.insert/update` instead of overwriting them, so concurrent writers
+	 * converge with no clobbering — conflict-free collaborative editing with no
+	 * merge code in your mutation. It also registers a ready-made
+	 * `"<table>:merge"` mutation that upserts a row patch, so a client (e.g. the
+	 * `useCollaborativeText` framework hooks) needs no custom server mutation.
+	 */
+	registerCrdt: <Row = Record<string, unknown>>(
+		table: string,
+		fields: CrdtFields<Row>
 	) => void;
 	/**
 	 * Apply a table's schema `migrate` to a raw/stored row (identity when there's
@@ -456,6 +480,12 @@ export const createSyncEngine = (
 	for (const [table, schema] of Object.entries(options.schemas ?? {})) {
 		schemas.set(table, schema as TableSchema<unknown>);
 	}
+	// CRDT fields, keyed by table: field name -> mergeable backend. Set via
+	// registerCrdt; consulted in makeActions to merge (not overwrite) on write.
+	const crdtFields = new Map<
+		string,
+		Record<string, CrdtMergeable<unknown>>
+	>();
 	// Validate a write against its table's schema: every field on insert; only
 	// the supplied fields on update. Throws SchemaError naming the bad field.
 	const validateWrite = (
@@ -785,6 +815,23 @@ export const createSyncEngine = (
 		return writer;
 	};
 
+	// Load the committed row a write targets (by the table's reader), if any — so
+	// authorization and CRDT merge both reflect committed state, not the payload.
+	const readExisting = async (
+		table: string,
+		value: unknown,
+		ctx: unknown
+	): Promise<unknown> => {
+		const reader = readers.get(table);
+		if (reader?.get === undefined) {
+			return undefined;
+		}
+		const id = reader.key
+			? reader.key(value)
+			: (value as { id?: RowKey }).id;
+		return id === undefined ? undefined : reader.get(id, ctx);
+	};
+
 	// Enforce a table's declarative write rule before the writer runs (so a deny
 	// rolls the transaction back). For update/delete, evaluate the rule against the
 	// *existing* row when a reader can load it — so the check reflects committed
@@ -801,22 +848,48 @@ export const createSyncEngine = (
 		}
 		let subject = value;
 		if (op !== 'insert') {
-			const reader = readers.get(table);
-			if (reader?.get !== undefined) {
-				const id = reader.key
-					? reader.key(value)
-					: (value as { id?: RowKey }).id;
-				if (id !== undefined) {
-					const existing = await reader.get(id, ctx);
-					if (existing !== undefined) {
-						subject = existing;
-					}
-				}
+			const existing = await readExisting(table, value, ctx);
+			if (existing !== undefined) {
+				subject = existing;
 			}
 		}
 		if (!rule(ctx, subject)) {
 			throw new UnauthorizedError(`${op} on table "${table}"`);
 		}
+	};
+
+	// Merge a write's CRDT fields into the committed row (so concurrent writers
+	// converge) instead of overwriting them. A no-op for tables without CRDT
+	// fields. On insert the base is the empty state; on update it's the stored
+	// field value. Returns the row patch the writer should persist.
+	const mergeCrdtFields = async (
+		table: string,
+		op: 'insert' | 'update',
+		data: unknown,
+		ctx: unknown
+	): Promise<unknown> => {
+		const fields = crdtFields.get(table);
+		if (fields === undefined || data === null || typeof data !== 'object') {
+			return data;
+		}
+		const incoming = data as Record<string, unknown>;
+		const existing =
+			op === 'update' ? await readExisting(table, data, ctx) : undefined;
+		const base =
+			existing !== null && typeof existing === 'object'
+				? (existing as Record<string, unknown>)
+				: undefined;
+		const merged: Record<string, unknown> = { ...incoming };
+		for (const [field, adapter] of Object.entries(fields)) {
+			if (incoming[field] === undefined) {
+				continue;
+			}
+			merged[field] = adapter.merge(
+				base?.[field] ?? adapter.empty(),
+				incoming[field]
+			);
+		}
+		return merged;
 	};
 
 	/**
@@ -841,7 +914,13 @@ export const createSyncEngine = (
 				if (enforce) {
 					await authorizeWrite(table, 'insert', data, ctx);
 				}
-				const row = await writerFor(table).insert(data, ctx, tx);
+				const merged = await mergeCrdtFields(
+					table,
+					'insert',
+					data,
+					ctx
+				);
+				const row = await writerFor(table).insert(merged, ctx, tx);
 				buffered.push({ table, change: { op: 'insert', row } });
 				return row;
 			},
@@ -850,7 +929,13 @@ export const createSyncEngine = (
 				if (enforce) {
 					await authorizeWrite(table, 'update', data, ctx);
 				}
-				const row = await writerFor(table).update(data, ctx, tx);
+				const merged = await mergeCrdtFields(
+					table,
+					'update',
+					data,
+					ctx
+				);
+				const row = await writerFor(table).update(merged, ctx, tx);
 				buffered.push({ table, change: { op: 'update', row } });
 				return row;
 			},
@@ -1665,6 +1750,26 @@ export const createSyncEngine = (
 
 		registerSchema: (table, schema) => {
 			schemas.set(table, schema as TableSchema<unknown>);
+		},
+
+		registerCrdt: (table, fields) => {
+			crdtFields.set(
+				table,
+				fields as Record<string, CrdtMergeable<unknown>>
+			);
+			// A ready-made merge mutation so a client needs no custom server code:
+			// upsert the row patch — the CRDT auto-merge in makeActions folds the
+			// declared fields into the stored row. Named "<table>:merge".
+			const name = `${table}:merge`;
+			mutations.set(name, {
+				handler: async (args, ctx, actions) => {
+					const existing = await readExisting(table, args, ctx);
+					return existing === undefined
+						? actions.insert(table, args)
+						: actions.update(table, args);
+				},
+				name
+			} as MutationDefinition<unknown, unknown, unknown>);
 		},
 
 		migrate: (table, row) => migrateRow(table, row) as typeof row,

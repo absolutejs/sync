@@ -116,7 +116,13 @@ export type {
 } from './mutation';
 
 export { createSyncEngine, SchemaError, UnauthorizedError } from './syncEngine';
-export type { SubscribeArgs, Subscription, SyncEngine } from './syncEngine';
+export type {
+	CrdtFields,
+	SubscribeArgs,
+	Subscription,
+	SyncEngine
+} from './syncEngine';
+export type { CrdtMergeable } from '../crdt';
 export { defineSchema, field } from './schema';
 export type { FieldValidator, SchemaDefinition, TableSchema } from './schema';
 export type {

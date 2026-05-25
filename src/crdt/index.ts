@@ -119,16 +119,25 @@ export type CrdtText<State> = {
 };
 
 /**
+ * The minimal server-side surface the engine needs to auto-merge a CRDT field on
+ * write (see `engine.registerCrdt`): combine two states and produce an empty one.
+ * Both the first-party {@link rgaText} and `@absolutejs/sync-yjs`'s `yjsText`
+ * satisfy it, as does any {@link TextCrdtAdapter}.
+ */
+export type CrdtMergeable<State> = {
+	empty: () => State;
+	merge: (a: State, b: State) => State;
+};
+
+/**
  * A pluggable collaborative-text backend. `create` mints a live doc for a
  * replica; `merge` combines two persisted states server-side (no live instance
  * needed — for the merge-on-write mutation); `empty`/`textOf` are conveniences.
  * Swap the first-party {@link rgaText} for an adapter to get a different engine
  * (e.g. Yjs) behind the exact same call sites.
  */
-export type TextCrdtAdapter<State> = {
+export type TextCrdtAdapter<State> = CrdtMergeable<State> & {
 	create: (replica: string, initial?: State) => CrdtText<State>;
-	merge: (a: State, b: State) => State;
-	empty: () => State;
 	textOf: (state: State) => string;
 };
 

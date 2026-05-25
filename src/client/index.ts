@@ -25,6 +25,13 @@ export type {
 	SyncCollectionStatus
 } from './syncCollection';
 
+export { createCollaborativeText } from './collaborativeText';
+export type {
+	CollaborativeText,
+	CollaborativeTextOptions,
+	CollaborativeTextState
+} from './collaborativeText';
+
 export { createPresence } from './presence';
 export type {
 	PresenceClient,
