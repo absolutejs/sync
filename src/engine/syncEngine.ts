@@ -190,11 +190,12 @@ type ActiveSubscription =
 			kind: 'reactive';
 			collection: string;
 			key: (row: unknown) => RowKey;
-			/** Re-run; returns the new rows and the read set (tables + row keys). */
+			/** Re-run; returns the new rows and the read set (tables/keys/ranges). */
 			rerun: () => Promise<{
 				rows: unknown[];
 				readTables: Set<string>;
 				readKeys: Set<string>;
+				rangeDeps: RangeDep[];
 			}>;
 			/** Current result set, keyed (diffed against the next re-run). */
 			current: Map<RowKey, unknown>;
@@ -202,8 +203,17 @@ type ActiveSubscription =
 			readTables: Set<string>;
 			/** Row-level dependencies `table\0key` (from `db.get`). */
 			readKeys: Set<string>;
+			/** Range dependencies (from `db.where`) — predicate + matched keys. */
+			rangeDeps: RangeDep[];
 			onDiff: OnDiff;
 	  };
+
+/** A `db.where` dependency: the predicate plus the keys that matched at read. */
+type RangeDep = {
+	table: string;
+	predicate: (row: unknown) => boolean;
+	keys: Set<RowKey>;
+};
 
 type LoggedChange = {
 	version: number;
@@ -450,7 +460,8 @@ export const createSyncEngine = (
 	const makeReadHandle = (
 		ctx: unknown,
 		readTables: Set<string>,
-		readKeys: Set<string>
+		readKeys: Set<string>,
+		rangeDeps: RangeDep[]
 	): ReadHandle => {
 		const readerFor = (table: string): TableReader => {
 			const reader = readers.get(table);
@@ -480,6 +491,25 @@ export const createSyncEngine = (
 					readTables.add(table);
 				}
 				return (await reader.get(key, ctx)) as never;
+			},
+			where: async (table, predicate) => {
+				const reader = readerFor(table);
+				const matched = [...(await reader.all(ctx))].filter(
+					predicate as (row: unknown) => boolean
+				);
+				if (reader.key !== undefined) {
+					// Remember which rows matched, so an update/delete that pulls a
+					// row out of the range still re-runs (it's in this key set).
+					const key = reader.key;
+					rangeDeps.push({
+						table,
+						predicate: predicate as (row: unknown) => boolean,
+						keys: new Set(matched.map(key))
+					});
+				} else {
+					readTables.add(table);
+				}
+				return matched as never[];
 			}
 		};
 	};
@@ -514,29 +544,43 @@ export const createSyncEngine = (
 	};
 
 	/** Re-run every reactive query whose read set intersects the changed tables. */
-	/** Did this batch touch a table (full dep) or a row key the sub read? */
+	type ReactiveChange = {
+		table: string;
+		key: RowKey | undefined;
+		row: unknown;
+	};
+
+	/** Does a change fall in a range dep — matched now, or a member at last read? */
+	const inRange = (dep: RangeDep, change: ReactiveChange): boolean =>
+		dep.table === change.table &&
+		((change.key !== undefined && dep.keys.has(change.key)) ||
+			dep.predicate(change.row));
+
+	/** Did this batch touch a table, row key, or range the sub read? */
 	const isReactiveAffected = (
 		sub: ReactiveSub,
-		changes: { table: string; key: RowKey | undefined }[]
+		changes: ReactiveChange[]
 	): boolean =>
 		changes.some(
 			(change) =>
 				sub.readTables.has(change.table) ||
 				(change.key !== undefined &&
-					sub.readKeys.has(depKey(change.table, change.key)))
+					sub.readKeys.has(depKey(change.table, change.key))) ||
+				sub.rangeDeps.some((dep) => inRange(dep, change))
 		);
 
 	const reactivePairs = async (
-		changes: { table: string; key: RowKey | undefined }[]
+		changes: ReactiveChange[]
 	): Promise<[ActiveSubscription, ViewDiff<unknown>][]> => {
 		const pairs: [ActiveSubscription, ViewDiff<unknown>][] = [];
 		for (const sub of reactiveSubs) {
 			if (!isReactiveAffected(sub, changes)) {
 				continue;
 			}
-			const { rows, readTables, readKeys } = await sub.rerun();
+			const { rows, readTables, readKeys, rangeDeps } = await sub.rerun();
 			sub.readTables = readTables;
 			sub.readKeys = readKeys;
+			sub.rangeDeps = rangeDeps;
 			const diff = diffRerun(sub, rows);
 			if (!isEmptyViewDiff(diff)) {
 				pairs.push([sub, diff]);
@@ -568,7 +612,7 @@ export const createSyncEngine = (
 		}
 		emissions.push(
 			...(await reactivePairs([
-				{ table, key: changedKeyFor(table, change) }
+				{ table, key: changedKeyFor(table, change), row: change.row }
 			]))
 		);
 		for (const [subscription, diff] of emissions) {
@@ -593,11 +637,14 @@ export const createSyncEngine = (
 			ActiveSubscription,
 			ViewDiff<unknown>[]
 		>();
-		const reactiveChanges: { table: string; key: RowKey | undefined }[] =
-			[];
+		const reactiveChanges: ReactiveChange[] = [];
 		for (const { table, change } of changes) {
 			logChange(batchVersion, { version: batchVersion, table, change });
-			reactiveChanges.push({ table, key: changedKeyFor(table, change) });
+			reactiveChanges.push({
+				table,
+				key: changedKeyFor(table, change),
+				row: change.row
+			});
 			for (const subscription of subscriptionsForTable(table)) {
 				// Apply in order to keep operator state correct; collect to merge.
 				const diff = await subscriptionDiff(
@@ -796,9 +843,10 @@ export const createSyncEngine = (
 		const rerun = async () => {
 			const readTables = new Set<string>();
 			const readKeys = new Set<string>();
-			const db = makeReadHandle(ctx, readTables, readKeys);
+			const rangeDeps: RangeDep[] = [];
+			const db = makeReadHandle(ctx, readTables, readKeys, rangeDeps);
 			const rows = [...(await definition.run({ ctx, db, params }))];
-			return { readKeys, readTables, rows };
+			return { rangeDeps, readKeys, readTables, rows };
 		};
 		const first = await rerun();
 		const current = new Map<RowKey, unknown>();
@@ -814,6 +862,7 @@ export const createSyncEngine = (
 			current,
 			readTables: first.readTables,
 			readKeys: first.readKeys,
+			rangeDeps: first.rangeDeps,
 			onDiff
 		};
 		set.add(subscription);

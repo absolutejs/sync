@@ -313,7 +313,7 @@ mutate({
 | `createPollingChangeSource({ poll, intervalMs?, startSeq?, onProcessed? })`       | DB-agnostic CDC `ChangeSource` that tails a changelog (outbox) table.                                                                                                                                                  |
 | `query(source).filter().map().join().leftJoin().groupBy().orderBy()`              | Declarative incremental query builder (the operator graph).                                                                                                                                                            |
 | `defineGraphCollection({ name, query, key, authorize? })`                         | Run a `query` as a live collection.                                                                                                                                                                                    |
-| `defineReactiveQuery({ name, run, key })` + `registerReactive` / `registerReader` | Read-set-tracked query: `run(ctx)` reads via `ctx.db` and re-runs when any table it read changes — no `match`, no manual emit.                                                                                         |
+| `defineReactiveQuery({ name, run, key })` + `registerReactive` / `registerReader` | Read-set-tracked query: `run(ctx)` reads via `ctx.db` (`all`/`get`/`where`) and re-runs only when the rows/ranges it read change — no `match`, no manual emit.                                                         |
 
 ### `@absolutejs/sync/postgres`
 

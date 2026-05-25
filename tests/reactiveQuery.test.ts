@@ -281,6 +281,60 @@ describe('reactive queries (read-set tracking)', () => {
 		]);
 	});
 
+	test('range precision: db.where re-runs only for rows in (or leaving) its range', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()],
+			key: (row) => (row as Message).id
+		});
+		engine.registerReactive(
+			defineReactiveQuery<Message, { room: string }>({
+				name: 'roomMessages',
+				key: (message) => message.id,
+				run: ({ db, params }) =>
+					db.where<Message>(
+						'messages',
+						(message) => message.room === params.room
+					)
+			})
+		);
+
+		store.messages.set(1, { id: 1, room: 'a', text: 'hi' });
+		const { diffs, onDiff } = collect<Message>();
+		await engine.subscribe<Message, { room: string }>({
+			collection: 'roomMessages',
+			params: { room: 'a' },
+			ctx: {},
+			onDiff
+		});
+
+		// A message in room 'b' is outside the range → no re-run at all.
+		store.messages.set(2, { id: 2, room: 'b', text: 'other' });
+		await engine.applyChange('messages', {
+			op: 'insert',
+			row: { id: 2, room: 'b', text: 'other' }
+		});
+		expect(diffs).toHaveLength(0);
+
+		// A message entering room 'a' → re-runs, added.
+		store.messages.set(3, { id: 3, room: 'a', text: 'yo' });
+		await engine.applyChange('messages', {
+			op: 'insert',
+			row: { id: 3, room: 'a', text: 'yo' }
+		});
+		expect(diffs.at(-1)?.added).toEqual([{ id: 3, room: 'a', text: 'yo' }]);
+
+		// Message 1 LEAVES room 'a' (now room 'b'): it was a range member, so the
+		// query still re-runs even though the new row no longer matches → removed.
+		store.messages.set(1, { id: 1, room: 'b', text: 'hi' });
+		await engine.applyChange('messages', {
+			op: 'update',
+			row: { id: 1, room: 'b', text: 'hi' }
+		});
+		expect(diffs.at(-1)?.removed.map((row) => row.id)).toEqual([1]);
+	});
+
 	test('reading a table with no registered reader throws', async () => {
 		const engine = createSyncEngine();
 		engine.registerReactive(

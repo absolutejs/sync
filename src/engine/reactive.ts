@@ -32,10 +32,21 @@ export type TableReader<Ctx = unknown> = {
 
 /** The instrumented data handle passed to a reactive query — reads are tracked. */
 export type ReadHandle = {
-	/** Read all rows of `table` (records a dependency on it). */
+	/** Read all rows of `table` (records a full-table dependency). */
 	all: <T = unknown>(table: string) => Promise<T[]>;
-	/** Read one row of `table` by key (records a dependency on `table`). */
+	/** Read one row of `table` by key (records a row-key dependency). */
 	get: <T = unknown>(table: string, key: RowKey) => Promise<T | undefined>;
+	/**
+	 * Read the rows of `table` matching `predicate` (records a **range**
+	 * dependency): the query re-runs only when a change matches the predicate now
+	 * or was in the matched set before — not on every change to the table. Needs
+	 * the table's reader to declare a `key`; without one it falls back to a
+	 * full-table dependency. Prefer this over `all().filter(...)` for precision.
+	 */
+	where: <T = unknown>(
+		table: string,
+		predicate: (row: T) => boolean
+	) => Promise<T[]>;
 };
 
 export type ReactiveQueryContext<P, Ctx> = {
