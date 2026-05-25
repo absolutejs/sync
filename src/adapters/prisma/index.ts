@@ -27,3 +27,7 @@ export type {
 	PublishRowsOptions,
 	PublishWhereOptions
 } from './write';
+
+export { matchesWhere, UnsupportedFilterError } from './predicate';
+export { prismaCollection } from './collection';
+export type { PrismaCollectionOptions } from './collection';

@@ -150,9 +150,25 @@ export const createSyncEngine = (): SyncEngine => {
 				return;
 			}
 			for (const subscription of set) {
-				const diff = subscription.incremental
-					? subscription.view.apply(change as RowChange<unknown>)
-					: subscription.view.reset(await subscription.rehydrate());
+				let diff;
+				if (subscription.incremental) {
+					try {
+						diff = subscription.view.apply(
+							change as RowChange<unknown>
+						);
+					} catch {
+						// The predicate couldn't decide this change (e.g. an
+						// operator the inferred matcher doesn't support) — degrade
+						// to a correct refetch rather than a wrong diff.
+						diff = subscription.view.reset(
+							await subscription.rehydrate()
+						);
+					}
+				} else {
+					diff = subscription.view.reset(
+						await subscription.rehydrate()
+					);
+				}
 				if (!isEmptyViewDiff(diff)) {
 					subscription.onDiff(diff);
 				}
