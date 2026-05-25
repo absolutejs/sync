@@ -1,0 +1,253 @@
+import { describe, expect, test } from 'bun:test';
+import { defineMutation } from '../src/engine/mutation';
+import { defineReactiveQuery } from '../src/engine/reactive';
+import { createSyncEngine } from '../src/engine/syncEngine';
+import type { ViewDiff } from '../src/engine/types';
+
+type Message = { id: number; room: string; text: string };
+type User = { id: number; name: string };
+
+const makeStore = () => ({
+	messages: new Map<number, Message>(),
+	users: new Map<number, User>()
+});
+
+const collect = <T>() => {
+	const diffs: ViewDiff<T>[] = [];
+	return {
+		diffs,
+		onDiff: (diff: ViewDiff<T>) => {
+			diffs.push(diff);
+		}
+	};
+};
+
+describe('reactive queries (read-set tracking)', () => {
+	test('re-runs when a table it read changes, and diffs the result', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		engine.registerReactive(
+			defineReactiveQuery<Message, { room: string }>({
+				name: 'roomMessages',
+				key: (message) => message.id,
+				// A plain query: read the table, filter in JS. No `match`.
+				run: async ({ db, params }) => {
+					const all = await db.all<Message>('messages');
+					return all.filter(
+						(message) => message.room === params.room
+					);
+				}
+			})
+		);
+
+		store.messages.set(1, { id: 1, room: 'a', text: 'hi' });
+		store.messages.set(2, { id: 2, room: 'b', text: 'other' });
+
+		const { diffs, onDiff } = collect<Message>();
+		const sub = await engine.subscribe<Message, { room: string }>({
+			collection: 'roomMessages',
+			params: { room: 'a' },
+			ctx: {},
+			onDiff
+		});
+		expect(sub.initial).toEqual([{ id: 1, room: 'a', text: 'hi' }]);
+
+		// A new message in room 'a' lands in the store, then the change fires.
+		store.messages.set(3, { id: 3, room: 'a', text: 'yo' });
+		await engine.applyChange('messages', {
+			op: 'insert',
+			row: { id: 3, room: 'a', text: 'yo' }
+		});
+		expect(diffs.at(-1)?.added).toEqual([{ id: 3, room: 'a', text: 'yo' }]);
+
+		// A message in another room changes the table but not this query's result.
+		const before = diffs.length;
+		store.messages.set(4, { id: 4, room: 'b', text: 'nope' });
+		await engine.applyChange('messages', {
+			op: 'insert',
+			row: { id: 4, room: 'b', text: 'nope' }
+		});
+		expect(diffs.length).toBe(before); // re-ran, but the diff was empty
+
+		// Editing an existing message re-runs and reports a change.
+		store.messages.set(1, { id: 1, room: 'a', text: 'edited' });
+		await engine.applyChange('messages', {
+			op: 'update',
+			row: { id: 1, room: 'a', text: 'edited' }
+		});
+		expect(diffs.at(-1)?.changed).toEqual([
+			{ id: 1, room: 'a', text: 'edited' }
+		]);
+	});
+
+	test('does not re-run on a change to a table it never read', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		engine.registerReactive(
+			defineReactiveQuery<Message>({
+				name: 'allMessages',
+				key: (message) => message.id,
+				run: ({ db }) => db.all<Message>('messages')
+			})
+		);
+		const { diffs, onDiff } = collect<Message>();
+		await engine.subscribe<Message>({
+			collection: 'allMessages',
+			params: undefined,
+			ctx: {},
+			onDiff
+		});
+
+		await engine.applyChange('users', {
+			op: 'insert',
+			row: { id: 1, name: 'Ada' }
+		});
+		expect(diffs).toHaveLength(0);
+	});
+
+	test('tracks every table read, so a change to either re-runs (a join)', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		engine.registerReader('users', {
+			all: () => [...store.users.values()],
+			get: (key) => store.users.get(Number(key))
+		});
+		type Enriched = { id: number; text: string; author: string };
+		engine.registerReactive(
+			defineReactiveQuery<Enriched>({
+				name: 'messagesWithAuthor',
+				key: (row) => row.id,
+				run: async ({ db }) => {
+					const messages = await db.all<Message & { userId: number }>(
+						'messages'
+					);
+					return Promise.all(
+						messages.map(async (message) => {
+							const author = await db.get<User>(
+								'users',
+								message.userId
+							);
+							return {
+								id: message.id,
+								text: message.text,
+								author: author?.name ?? '?'
+							};
+						})
+					);
+				}
+			})
+		);
+
+		store.users.set(1, { id: 1, name: 'Ada' });
+		store.messages.set(1, {
+			id: 1,
+			room: 'a',
+			text: 'hi',
+			userId: 1
+		} as Message & { userId: number });
+
+		const { diffs, onDiff } = collect<Enriched>();
+		const sub = await engine.subscribe<Enriched>({
+			collection: 'messagesWithAuthor',
+			params: undefined,
+			ctx: {},
+			onDiff
+		});
+		expect(sub.initial).toEqual([{ id: 1, text: 'hi', author: 'Ada' }]);
+
+		// Renaming the USER re-runs even though only the users table changed.
+		store.users.set(1, { id: 1, name: 'Ada Lovelace' });
+		await engine.applyChange('users', {
+			op: 'update',
+			row: { id: 1, name: 'Ada Lovelace' }
+		});
+		expect(diffs.at(-1)?.changed).toEqual([
+			{ id: 1, text: 'hi', author: 'Ada Lovelace' }
+		]);
+	});
+
+	test('the full loop: write through a mutation, no match, no manual emit', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		engine.registerWriter('messages', {
+			insert: (data: Message) => {
+				store.messages.set(data.id, data);
+
+				return data;
+			},
+			update: (data: Message) => {
+				store.messages.set(data.id, data);
+
+				return data;
+			},
+			delete: (row: { id: number }) => {
+				store.messages.delete(row.id);
+			}
+		});
+		engine.registerReactive(
+			defineReactiveQuery<Message, { room: string }>({
+				name: 'roomMessages',
+				key: (message) => message.id,
+				run: async ({ db, params }) => {
+					const all = await db.all<Message>('messages');
+					return all.filter(
+						(message) => message.room === params.room
+					);
+				}
+			})
+		);
+		engine.registerMutation(
+			defineMutation({
+				name: 'post',
+				handler: (args: Message, _ctx, actions) =>
+					actions.insert('messages', args)
+			})
+		);
+
+		const { diffs, onDiff } = collect<Message>();
+		await engine.subscribe<Message, { room: string }>({
+			collection: 'roomMessages',
+			params: { room: 'a' },
+			ctx: {},
+			onDiff
+		});
+
+		await engine.runMutation('post', { id: 1, room: 'a', text: 'hi' }, {});
+
+		// The write persisted and the reactive query went live — with no `match`
+		// and no `actions.change`.
+		expect(store.messages.get(1)).toEqual({ id: 1, room: 'a', text: 'hi' });
+		expect(diffs.at(-1)?.added).toEqual([{ id: 1, room: 'a', text: 'hi' }]);
+	});
+
+	test('reading a table with no registered reader throws', async () => {
+		const engine = createSyncEngine();
+		engine.registerReactive(
+			defineReactiveQuery<Message>({
+				name: 'broken',
+				key: (message) => message.id,
+				run: ({ db }) => db.all<Message>('messages')
+			})
+		);
+		await expect(
+			engine.subscribe<Message>({
+				collection: 'broken',
+				params: undefined,
+				ctx: {},
+				onDiff: () => {}
+			})
+		).rejects.toThrow('No reader registered');
+	});
+});

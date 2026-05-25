@@ -57,6 +57,13 @@ export type {
 	JoinCollectionDefinition,
 	JoinSide
 } from './collection';
+export { defineReactiveQuery } from './reactive';
+export type {
+	ReactiveQueryContext,
+	ReactiveQueryDefinition,
+	ReadHandle,
+	TableReader
+} from './reactive';
 export { defineGraphCollection, query } from './graph';
 export type {
 	GraphCollectionDefinition,

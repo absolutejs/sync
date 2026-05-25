@@ -63,10 +63,15 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   run as live engine collections via `defineGraphCollection` — including live
   top-N, **left joins** (`selectUnmatched` / `query(...).leftJoin(...)`, keeping
   unmatched left rows and reverting when their last match leaves), and joining
-  derived subqueries (a join's right input can be another query). The Tier 3
-  engine frontier is now closed end to end; remaining work is ecosystem
-  validation (voice flagship + a standalone sync example) and horizontal scale
-  (a shared change-feed for multi-instance).
+  derived subqueries (a join's right input can be another query). Plus
+  **read-set-tracked reactive queries** (`defineReactiveQuery` + `registerReader`):
+  write a plain query function that reads through an instrumented `ctx.db`, and it
+  re-runs and re-pushes whenever any table it read changes — no `match`, no
+  operator graph, no manual change emission (Convex's "just write a query", on
+  your own DB; table-level granularity for now). The Tier 3 engine frontier is now
+  closed end to end; remaining work is ecosystem validation (voice flagship + a
+  standalone sync example) and horizontal scale (a shared change-feed for
+  multi-instance).
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 

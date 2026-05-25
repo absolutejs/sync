@@ -88,9 +88,17 @@ describe('createSyncConnection', () => {
 			row: open(7, 5)
 		});
 
-		const ids = frames
-			.filter((frame) => frame.type === 'diff')
-			.map((frame) => (frame.type === 'diff' ? frame.id : ''));
+		// One change touching both subs is delivered as one consistent frame
+		// (or, for a single sub, a plain diff) — collect ids from either form.
+		const ids = frames.flatMap((frame) => {
+			if (frame.type === 'diff') {
+				return [frame.id];
+			}
+			if (frame.type === 'frame') {
+				return frame.diffs.map((diff) => diff.id);
+			}
+			return [];
+		});
 		expect(ids.sort()).toEqual(['a', 'b']);
 	});
 
