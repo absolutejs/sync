@@ -28,6 +28,11 @@ import type {
 import type { SearchCollectionDefinition, SearchIndex } from './search';
 import { SEARCH_SCORE_FIELD } from './search';
 import type { ScheduleDefinition } from './schedule';
+import type {
+	CollectionKind,
+	EngineActivity,
+	EngineInspection
+} from './devtools';
 import type { ClusterBus } from './cluster';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
@@ -194,6 +199,17 @@ export type SyncEngine = {
 		args: unknown,
 		ctx: unknown
 	) => Promise<unknown>;
+	/**
+	 * A point-in-time snapshot of the engine for devtools: registered collections
+	 * (+ kind, tables, live subscription counts), mutations, schedules, readers,
+	 * writers, the change-feed version, and recent changes. See `syncDevtools`.
+	 */
+	inspect: () => EngineInspection;
+	/**
+	 * Subscribe to the live engine activity stream (changes, mutation outcomes,
+	 * subscribe/unsubscribe). Returns an unsubscribe. Powers the devtools feed.
+	 */
+	onActivity: (listener: (event: EngineActivity) => void) => () => void;
 };
 
 type OnDiff = (diff: ViewDiff<unknown>, version: number) => void;
@@ -427,6 +443,14 @@ export const createSyncEngine = (
 	const changeLogSize = options.changeLogSize ?? 1024;
 	const changeLog: LoggedChange[] = [];
 	let version = 0;
+	// Devtools activity stream — listeners are notified of changes, mutation
+	// outcomes, and subscribe/unsubscribe. Cheap (a no-op) when no one's watching.
+	const activityListeners = new Set<(event: EngineActivity) => void>();
+	const emitActivity = (event: EngineActivity) => {
+		for (const listener of activityListeners) {
+			listener(event);
+		}
+	};
 	const runInTransaction = options.transaction;
 	// Cluster fan-out: a unique id so we ignore our own broadcasts, and the bus
 	// (set by connectCluster) we publish locally-committed changes to.
@@ -917,6 +941,13 @@ export const createSyncEngine = (
 		version += 1;
 		const changeVersion = version;
 		logChange(changeVersion, { version: changeVersion, table, change });
+		emitActivity({
+			type: 'change',
+			at: Date.now(),
+			table,
+			op: change.op,
+			version: changeVersion
+		});
 		// Collect, then emit once at the end: reactive re-runs are async, and
 		// emitting before they finish would let the transport flush a partial frame.
 		const emissions: [ActiveSubscription, ViewDiff<unknown>][] = [];
@@ -961,6 +992,13 @@ export const createSyncEngine = (
 		const reactiveChanges: ReactiveChange[] = [];
 		for (const { table, change } of changes) {
 			logChange(batchVersion, { version: batchVersion, table, change });
+			emitActivity({
+				type: 'change',
+				at: Date.now(),
+				table,
+				op: change.op,
+				version: batchVersion
+			});
 			reactiveChanges.push({
 				table,
 				key: changedKeyFor(table, change),
@@ -1556,12 +1594,28 @@ export const createSyncEngine = (
 
 			// Emit only after the transaction commits, so subscribers never see a
 			// change that later rolls back.
-			const { buffered, result } =
-				runInTransaction !== undefined
-					? await runInTransaction((tx) => runHandler(tx))
-					: await runHandler(undefined);
-			await applyChangeBatch(buffered);
-			return result;
+			try {
+				const { buffered, result } =
+					runInTransaction !== undefined
+						? await runInTransaction((tx) => runHandler(tx))
+						: await runHandler(undefined);
+				await applyChangeBatch(buffered);
+				emitActivity({
+					type: 'mutation',
+					at: Date.now(),
+					name,
+					status: 'ok'
+				});
+				return result;
+			} catch (error) {
+				emitActivity({
+					type: 'mutation',
+					at: Date.now(),
+					name,
+					status: 'error'
+				});
+				throw error;
+			}
 		},
 
 		registerSchedule: (schedule) => {
@@ -1588,6 +1642,78 @@ export const createSyncEngine = (
 					? await runInTransaction((tx) => runHandler(tx))
 					: await runHandler(undefined);
 			await applyChangeBatch(buffered);
+		},
+
+		inspect: () => {
+			const collections = [...registry.entries()].map(([name, def]) => {
+				const kind = ((def as { kind?: CollectionKind }).kind ??
+					'view') as CollectionKind;
+				let tables: string[] = [];
+				if (kind === 'join') {
+					const join = def as JoinCollectionDefinition<
+						unknown,
+						unknown,
+						unknown,
+						unknown,
+						unknown
+					>;
+					tables = [join.left.table, join.right.table];
+				} else if (kind === 'graph') {
+					tables = (
+						def as GraphCollectionDefinition<
+							unknown,
+							unknown,
+							unknown
+						>
+					).query.tables();
+				} else if (kind === 'search') {
+					tables = [
+						(
+							def as SearchCollectionDefinition<
+								unknown,
+								unknown,
+								unknown
+							>
+						).table
+					];
+				} else if (kind === 'view') {
+					tables = (
+						def as CollectionDefinition<unknown, unknown, unknown>
+					).tables ?? [name];
+				}
+				return {
+					name,
+					kind,
+					tables,
+					subscriptions: active.get(name)?.size ?? 0
+				};
+			});
+			const DEVTOOLS_RECENT = 50;
+			return {
+				version,
+				collections,
+				mutations: [...mutations.keys()],
+				schedules: [...schedules.values()].map((schedule) => ({
+					name: schedule.name,
+					pattern: schedule.pattern
+				})),
+				readers: [...readers.keys()],
+				writers: [...writers.keys()],
+				recentChanges: changeLog
+					.slice(-DEVTOOLS_RECENT)
+					.map((entry) => ({
+						version: entry.version,
+						table: entry.table,
+						op: entry.change.op
+					}))
+			};
+		},
+
+		onActivity: (listener) => {
+			activityListeners.add(listener);
+			return () => {
+				activityListeners.delete(listener);
+			};
 		}
 	};
 };

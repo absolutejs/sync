@@ -117,6 +117,12 @@ export type {
 
 export { createSyncEngine, UnauthorizedError } from './syncEngine';
 export type { SubscribeArgs, Subscription, SyncEngine } from './syncEngine';
+export type {
+	CollectionInspection,
+	CollectionKind,
+	EngineActivity,
+	EngineInspection
+} from './devtools';
 
 export { hydrateRoute, mutateRoute } from './routes';
 export type { SyncRouteContext } from './routes';

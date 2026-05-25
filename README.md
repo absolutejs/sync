@@ -33,9 +33,10 @@ top-N ordering are maintained incrementally through a composable operator graph
 > write-behind cache), Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`),
 > and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
 > mutations + offline queue, a local-first client cache, declarative row-level
-> permissions, live full-text + vector search, scheduled functions, CDC for
-> Postgres/MySQL/SQLite, incremental aggregations + joins, and a declarative
-> operator graph) are in place. Everything ships as subpaths of this one package.
+> permissions, live full-text + vector search, scheduled functions, a live
+> devtools dashboard, CDC for Postgres/MySQL/SQLite, incremental aggregations +
+> joins, and a declarative operator graph) are in place. Everything ships as
+> subpaths of this one package.
 
 ## Install
 
@@ -332,13 +333,14 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 
 ### `@absolutejs/sync`
 
-| Export                                                                                     | What it is                                                                                                                                                       |
-| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `createReactiveHub()`                                                                      | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`).                                                                                             |
-| `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                       | Elysia plugin: SSE stream of hub events.                                                                                                                         |
-| `syncSocket({ engine, path?, resolveContext? })`                                           | Elysia WebSocket plugin for the sync engine.                                                                                                                     |
-| `scheduled({ engine, prefix?, onError? })` _(`/scheduled` subpath)_                        | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). Kept off the main entry so `syncSocket` needs no cron dep. |
-| `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })` | In-memory cache + write-behind persistence.                                                                                                                      |
+| Export                                                                                     | What it is                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `createReactiveHub()`                                                                      | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`).                                                                                                           |
+| `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                       | Elysia plugin: SSE stream of hub events.                                                                                                                                       |
+| `syncSocket({ engine, path?, resolveContext? })`                                           | Elysia WebSocket plugin for the sync engine.                                                                                                                                   |
+| `scheduled({ engine, prefix?, onError? })` _(`/scheduled` subpath)_                        | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). Kept off the main entry so `syncSocket` needs no cron dep.               |
+| `syncDevtools({ engine, path?, snapshotMs? })`                                             | Elysia plugin: a live devtools dashboard (collections, subscription counts, mutations, schedules, change feed) over SSE. Backed by `engine.inspect()` + `engine.onActivity()`. |
+| `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })` | In-memory cache + write-behind persistence.                                                                                                                                    |
 
 ### `@absolutejs/sync/client`
 
