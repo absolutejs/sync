@@ -66,9 +66,11 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   derived subqueries (a join's right input can be another query). Plus
   **read-set-tracked reactive queries** (`defineReactiveQuery` + `registerReader`):
   write a plain query function that reads through an instrumented `ctx.db`, and it
-  re-runs and re-pushes whenever any table it read changes — no `match`, no
+  re-runs and re-pushes whenever the data it read changes — no `match`, no
   operator graph, no manual change emission (Convex's "just write a query", on
-  your own DB; table-level granularity for now). The Tier 3 engine frontier is now
+  your own DB). **Key-level precision**: a query that `db.get`s specific rows
+  re-runs only when one of _those_ rows changes (matched via the reader's `key`);
+  `db.all` scans keep a table-level dependency. The Tier 3 engine frontier is now
   closed end to end; remaining work is ecosystem validation (voice flagship + a
   standalone sync example) and horizontal scale (a shared change-feed for
   multi-instance).

@@ -21,6 +21,13 @@ export type TableReader<Ctx = unknown> = {
 	all: (ctx: Ctx) => Promise<Iterable<unknown>> | Iterable<unknown>;
 	/** Optional point lookup by key. */
 	get?: (key: RowKey, ctx: Ctx) => Promise<unknown> | unknown;
+	/**
+	 * Row identity. Provide it to unlock **key-level** read tracking: a query that
+	 * only `db.get`s specific rows re-runs solely when one of *those* rows changes
+	 * (matched via this `key`), not on every change to the table. Omit and `get`
+	 * falls back to a table-level dependency (coarser, still correct).
+	 */
+	key?: (row: unknown) => RowKey;
 };
 
 /** The instrumented data handle passed to a reactive query — reads are tracked. */

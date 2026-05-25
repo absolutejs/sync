@@ -190,15 +190,18 @@ type ActiveSubscription =
 			kind: 'reactive';
 			collection: string;
 			key: (row: unknown) => RowKey;
-			/** Re-run the query; returns the new rows and the tables it read. */
+			/** Re-run; returns the new rows and the read set (tables + row keys). */
 			rerun: () => Promise<{
 				rows: unknown[];
 				readTables: Set<string>;
+				readKeys: Set<string>;
 			}>;
 			/** Current result set, keyed (diffed against the next re-run). */
 			current: Map<RowKey, unknown>;
-			/** Tables the last run read — its live dependencies. */
+			/** Full-table dependencies (from `db.all`). */
 			readTables: Set<string>;
+			/** Row-level dependencies `table\0key` (from `db.get`). */
+			readKeys: Set<string>;
 			onDiff: OnDiff;
 	  };
 
@@ -431,10 +434,23 @@ export const createSyncEngine = (
 
 	type ReactiveSub = Extract<ActiveSubscription, { kind: 'reactive' }>;
 
-	/** An instrumented read handle: every read records its table as a dependency. */
+	const depKey = (table: string, key: RowKey): string => `${table} ${key}`;
+
+	/** The key of a changed row under its table's reader key (if one is set). */
+	const changedKeyFor = (
+		table: string,
+		change: RowChange<unknown>
+	): RowKey | undefined => readers.get(table)?.key?.(change.row);
+
+	/**
+	 * An instrumented read handle: `all` records a full-table dependency; `get`
+	 * records a precise row-key dependency when the table's reader has a `key`
+	 * (else falls back to a table dependency).
+	 */
 	const makeReadHandle = (
 		ctx: unknown,
-		readTables: Set<string>
+		readTables: Set<string>,
+		readKeys: Set<string>
 	): ReadHandle => {
 		const readerFor = (table: string): TableReader => {
 			const reader = readers.get(table);
@@ -452,12 +468,16 @@ export const createSyncEngine = (
 				return [...(await readerFor(table).all(ctx))] as never[];
 			},
 			get: async (table, key) => {
-				readTables.add(table);
 				const reader = readerFor(table);
 				if (reader.get === undefined) {
 					throw new Error(
 						`Reader for table "${table}" has no get(); use db.all() or add get`
 					);
+				}
+				if (reader.key !== undefined) {
+					readKeys.add(depKey(table, key));
+				} else {
+					readTables.add(table);
 				}
 				return (await reader.get(key, ctx)) as never;
 			}
@@ -494,23 +514,29 @@ export const createSyncEngine = (
 	};
 
 	/** Re-run every reactive query whose read set intersects the changed tables. */
+	/** Did this batch touch a table (full dep) or a row key the sub read? */
+	const isReactiveAffected = (
+		sub: ReactiveSub,
+		changes: { table: string; key: RowKey | undefined }[]
+	): boolean =>
+		changes.some(
+			(change) =>
+				sub.readTables.has(change.table) ||
+				(change.key !== undefined &&
+					sub.readKeys.has(depKey(change.table, change.key)))
+		);
+
 	const reactivePairs = async (
-		changedTables: Set<string>
+		changes: { table: string; key: RowKey | undefined }[]
 	): Promise<[ActiveSubscription, ViewDiff<unknown>][]> => {
 		const pairs: [ActiveSubscription, ViewDiff<unknown>][] = [];
 		for (const sub of reactiveSubs) {
-			let affected = false;
-			for (const table of changedTables) {
-				if (sub.readTables.has(table)) {
-					affected = true;
-					break;
-				}
-			}
-			if (!affected) {
+			if (!isReactiveAffected(sub, changes)) {
 				continue;
 			}
-			const { rows, readTables } = await sub.rerun();
+			const { rows, readTables, readKeys } = await sub.rerun();
 			sub.readTables = readTables;
+			sub.readKeys = readKeys;
 			const diff = diffRerun(sub, rows);
 			if (!isEmptyViewDiff(diff)) {
 				pairs.push([sub, diff]);
@@ -540,7 +566,11 @@ export const createSyncEngine = (
 				emissions.push([subscription, diff]);
 			}
 		}
-		emissions.push(...(await reactivePairs(new Set([table]))));
+		emissions.push(
+			...(await reactivePairs([
+				{ table, key: changedKeyFor(table, change) }
+			]))
+		);
 		for (const [subscription, diff] of emissions) {
 			subscription.onDiff(diff, changeVersion);
 		}
@@ -563,10 +593,11 @@ export const createSyncEngine = (
 			ActiveSubscription,
 			ViewDiff<unknown>[]
 		>();
-		const changedTables = new Set<string>();
+		const reactiveChanges: { table: string; key: RowKey | undefined }[] =
+			[];
 		for (const { table, change } of changes) {
 			logChange(batchVersion, { version: batchVersion, table, change });
-			changedTables.add(table);
+			reactiveChanges.push({ table, key: changedKeyFor(table, change) });
 			for (const subscription of subscriptionsForTable(table)) {
 				// Apply in order to keep operator state correct; collect to merge.
 				const diff = await subscriptionDiff(
@@ -594,7 +625,7 @@ export const createSyncEngine = (
 				emissions.push([subscription, merged]);
 			}
 		}
-		emissions.push(...(await reactivePairs(changedTables)));
+		emissions.push(...(await reactivePairs(reactiveChanges)));
 		for (const [subscription, diff] of emissions) {
 			subscription.onDiff(diff, batchVersion);
 		}
@@ -761,12 +792,13 @@ export const createSyncEngine = (
 				);
 			}
 		}
-		// Each run gets a fresh read set; the handle records every table touched.
+		// Each run gets a fresh read set; the handle records tables + row keys read.
 		const rerun = async () => {
 			const readTables = new Set<string>();
-			const db = makeReadHandle(ctx, readTables);
+			const readKeys = new Set<string>();
+			const db = makeReadHandle(ctx, readTables, readKeys);
 			const rows = [...(await definition.run({ ctx, db, params }))];
-			return { readTables, rows };
+			return { readKeys, readTables, rows };
 		};
 		const first = await rerun();
 		const current = new Map<RowKey, unknown>();
@@ -781,6 +813,7 @@ export const createSyncEngine = (
 			rerun,
 			current,
 			readTables: first.readTables,
+			readKeys: first.readKeys,
 			onDiff
 		};
 		set.add(subscription);

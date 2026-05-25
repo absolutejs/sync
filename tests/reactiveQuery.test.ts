@@ -232,6 +232,55 @@ describe('reactive queries (read-set tracking)', () => {
 		expect(diffs.at(-1)?.added).toEqual([{ id: 1, room: 'a', text: 'hi' }]);
 	});
 
+	test('key-level precision: a get-only query re-runs only for the row it read', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('users', {
+			all: () => [...store.users.values()],
+			get: (key) => store.users.get(Number(key)),
+			key: (row) => (row as User).id
+		});
+		engine.registerReactive(
+			defineReactiveQuery<User, { id: number }>({
+				name: 'oneUser',
+				key: (user) => user.id,
+				run: async ({ db, params }) => {
+					const found = await db.get<User>('users', params.id);
+					return found ? [found] : [];
+				}
+			})
+		);
+
+		store.users.set(5, { id: 5, name: 'Ada' });
+		store.users.set(9, { id: 9, name: 'Bob' });
+
+		const { diffs, onDiff } = collect<User>();
+		await engine.subscribe<User, { id: number }>({
+			collection: 'oneUser',
+			params: { id: 5 },
+			ctx: {},
+			onDiff
+		});
+
+		// A change to a DIFFERENT row (user 9) must NOT re-run this query.
+		store.users.set(9, { id: 9, name: 'Bobby' });
+		await engine.applyChange('users', {
+			op: 'update',
+			row: { id: 9, name: 'Bobby' }
+		});
+		expect(diffs).toHaveLength(0);
+
+		// A change to the row it read (user 5) re-runs.
+		store.users.set(5, { id: 5, name: 'Ada Lovelace' });
+		await engine.applyChange('users', {
+			op: 'update',
+			row: { id: 5, name: 'Ada Lovelace' }
+		});
+		expect(diffs.at(-1)?.changed).toEqual([
+			{ id: 5, name: 'Ada Lovelace' }
+		]);
+	});
+
 	test('reading a table with no registered reader throws', async () => {
 		const engine = createSyncEngine();
 		engine.registerReactive(
