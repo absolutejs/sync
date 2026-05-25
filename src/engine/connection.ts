@@ -18,6 +18,14 @@ export type ClientFrame =
 	| { type: 'unsubscribe'; id: string }
 	| { type: 'mutate'; mutationId: number; name: string; args?: unknown };
 
+/** One subscription's delta within a {@link ServerFrame} `frame`. */
+export type FrameDiff<T = unknown> = {
+	id: string;
+	added: T[];
+	removed: T[];
+	changed: T[];
+};
+
 /** Server → client. `version` is the change-feed watermark this frame brings. */
 export type ServerFrame<T = unknown> =
 	| { type: 'snapshot'; id: string; rows: T[]; version?: number }
@@ -28,6 +36,14 @@ export type ServerFrame<T = unknown> =
 			removed: T[];
 			changed: T[];
 			version?: number;
+	  }
+	| {
+			// One atomic batch (e.g. a transactional mutation) that touched several
+			// subscriptions — bundled into one message so the client applies them in
+			// a single frame, never showing a torn cross-collection intermediate.
+			type: 'frame';
+			version?: number;
+			diffs: FrameDiff<T>[];
 	  }
 	| { type: 'error'; id?: string; message: string }
 	| { type: 'ack'; mutationId: number; result?: unknown }
@@ -120,6 +136,58 @@ export const createSyncConnection = ({
 }: SyncConnectionOptions): SyncConnection => {
 	const subscriptions = new Map<string, Subscription<unknown>>();
 
+	// Diffs from one atomic batch (a mutation, or a single applyChange) arrive via
+	// onDiff synchronously and share a version. Buffer them and flush as one
+	// message: a lone diff stays a plain `diff` (so single-collection clients are
+	// unchanged); several become one `frame` the client applies atomically.
+	let pending: FrameDiff[] = [];
+	let pendingVersion: number | undefined;
+	let flushScheduled = false;
+
+	const flush = () => {
+		if (pending.length === 0) {
+			return;
+		}
+		const diffs = pending;
+		const version = pendingVersion;
+		pending = [];
+		pendingVersion = undefined;
+		if (diffs.length === 1) {
+			const only = diffs[0]!;
+			send({
+				type: 'diff',
+				id: only.id,
+				added: only.added,
+				removed: only.removed,
+				changed: only.changed,
+				version
+			});
+		} else {
+			send({ type: 'frame', diffs, version });
+		}
+	};
+
+	const scheduleFlush = () => {
+		if (flushScheduled) {
+			return;
+		}
+		flushScheduled = true;
+		queueMicrotask(() => {
+			flushScheduled = false;
+			flush();
+		});
+	};
+
+	const bufferDiff = (diff: FrameDiff, diffVersion: number) => {
+		// A new version means a new batch — flush the previous one first.
+		if (pending.length > 0 && pendingVersion !== diffVersion) {
+			flush();
+		}
+		pending.push(diff);
+		pendingVersion = diffVersion;
+		scheduleFlush();
+	};
+
 	const handle = async (raw: unknown) => {
 		const frame = parseFrame(raw);
 		if (frame === undefined) {
@@ -134,8 +202,9 @@ export const createSyncConnection = ({
 					frame.args,
 					ctx
 				);
-				// The mutation's diffs were sent during runMutation (over the same
-				// ordered socket), so the ack arrives after them.
+				// The mutation's diffs were buffered during runMutation; flush them
+				// (as one frame) before the ack so the ack always arrives after.
+				flush();
 				send({ type: 'ack', mutationId: frame.mutationId, result });
 			} catch (error) {
 				send({
@@ -170,14 +239,15 @@ export const createSyncConnection = ({
 				ctx,
 				since: frame.since,
 				onDiff: (diff, diffVersion) => {
-					send({
-						type: 'diff',
-						id: frame.id,
-						added: diff.added,
-						removed: diff.removed,
-						changed: diff.changed,
-						version: diffVersion
-					});
+					bufferDiff(
+						{
+							id: frame.id,
+							added: diff.added,
+							removed: diff.removed,
+							changed: diff.changed
+						},
+						diffVersion
+					);
 				}
 			});
 			subscriptions.set(frame.id, subscription);

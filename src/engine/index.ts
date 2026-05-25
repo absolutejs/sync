@@ -86,6 +86,7 @@ export type { SyncRouteContext } from './routes';
 export { createSyncConnection } from './connection';
 export type {
 	ClientFrame,
+	FrameDiff,
 	ServerFrame,
 	SyncConnection,
 	SyncConnectionOptions

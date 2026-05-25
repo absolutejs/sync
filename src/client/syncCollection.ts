@@ -242,14 +242,16 @@ export const createSyncCollection = <T>(
 				recompute();
 				mutation.resolve(frame.result);
 			}
-		} else {
-			// reject — roll the optimistic overlay back.
+		} else if (frame.type === 'reject') {
+			// roll the optimistic overlay back.
 			const mutation = settlePending(frame.mutationId);
 			if (mutation !== undefined) {
 				recompute();
 				mutation.reject(new Error(String(frame.message)));
 			}
 		}
+		// A `frame` (multi-collection batch) never reaches a single-collection
+		// store — that's the multiplexed createSyncClient's job — so ignore it.
 	};
 
 	const sendMutate = (mutation: PendingMutation<T>) => {

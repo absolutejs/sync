@@ -115,8 +115,13 @@ runs each mutation's writes inside it (threading the `tx` to every
 so subscribers get an all-or-nothing update at the isolation level your database
 already enforces (serializable if you ask for it), and a rollback emits nothing.
 Convex gives you this by owning the store; we give you the same guarantee on the
-Postgres/MySQL/SQLite you already run. Multi-writer offline merge (CRDT /
-event-ordering, LiveStore-style) is the next frontier to take — not a ceiling.
+Postgres/MySQL/SQLite you already run. And the coherence reaches the **client**: a
+batch that touches several subscriptions is bundled into one `frame` message, and
+the multiplexed `createSyncClient` applies every collection's diff before
+notifying any listener — so a view reading multiple collections never paints a
+torn intermediate where one moved and the other hasn't. Multi-writer offline
+merge (CRDT / event-ordering, LiveStore-style) is the next frontier to take — not
+a ceiling.
 
 ### Access control
 

@@ -21,6 +21,14 @@ export type {
 	SyncCollectionStatus
 } from './syncCollection';
 
+export { createSyncClient } from './syncClient';
+export type {
+	SyncClient,
+	SyncClientOptions,
+	SyncCollectionHandle,
+	SyncCollectionHandleOptions
+} from './syncClient';
+
 export { syncStore, unwrapEden } from './syncStore';
 export type {
 	MutationMap,
