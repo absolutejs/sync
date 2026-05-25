@@ -32,6 +32,11 @@
 			"types": "./dist/adapters/prisma/index.d.ts",
 			"import": "./dist/adapters/prisma/index.js",
 			"default": "./dist/adapters/prisma/index.js"
+		},
+		"./engine": {
+			"types": "./dist/engine/index.d.ts",
+			"import": "./dist/engine/index.js",
+			"default": "./dist/engine/index.js"
 		}
 	},
 	"files": [
@@ -42,7 +47,7 @@
 		"access": "public"
 	},
 	"scripts": {
-		"build": "rm -rf dist && bun build src/index.ts --outdir dist --sourcemap --target=bun --external elysia && bun build src/client/index.ts --outdir dist/client --sourcemap --target=browser --format=esm && bun build src/adapters/drizzle/index.ts --outdir dist/adapters/drizzle --sourcemap --target=bun --external drizzle-orm && bun build src/adapters/prisma/index.ts --outdir dist/adapters/prisma --sourcemap --target=bun && tsc --project tsconfig.build.json",
+		"build": "rm -rf dist && bun build src/index.ts --outdir dist --sourcemap --target=bun --external elysia && bun build src/client/index.ts --outdir dist/client --sourcemap --target=browser --format=esm && bun build src/adapters/drizzle/index.ts --outdir dist/adapters/drizzle --sourcemap --target=bun --external drizzle-orm && bun build src/adapters/prisma/index.ts --outdir dist/adapters/prisma --sourcemap --target=bun && bun build src/engine/index.ts --outdir dist/engine --sourcemap --target=bun && tsc --project tsconfig.build.json",
 		"test": "bun test",
 		"typecheck": "tsc --noEmit",
 		"format": "prettier --write \"./**/*.{ts,json,md}\"",
