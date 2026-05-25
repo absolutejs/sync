@@ -22,3 +22,11 @@ export type { CollectionContext, CollectionDefinition } from './collection';
 
 export { createSyncEngine, UnauthorizedError } from './syncEngine';
 export type { SubscribeArgs, Subscription, SyncEngine } from './syncEngine';
+
+export { createSyncConnection } from './connection';
+export type {
+	ClientFrame,
+	ServerFrame,
+	SyncConnection,
+	SyncConnectionOptions
+} from './connection';

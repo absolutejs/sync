@@ -11,3 +11,5 @@ export type {
 } from './reactiveHub';
 export { sync } from './plugin';
 export type { SyncPluginOptions, SyncRequestContext } from './plugin';
+export { syncSocket } from './engine/socket';
+export type { SyncSocketOptions } from './engine/socket';
