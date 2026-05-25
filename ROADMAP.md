@@ -8,14 +8,14 @@ is achievable as a _library_ rather than a backend.
 
 ## Positioning
 
-| Engine | Owns/replicates storage? | Reactivity | BYO database |
-| --- | --- | --- | --- |
-| Convex | Yes (proprietary backend) | auto read-set, row-level | No |
-| Zero | Yes (Postgres replica `zero-cache`) | IVM, row-level | Postgres only |
-| ElectricSQL | Yes (Postgres logical replication) | shapes, CRDT | Postgres only |
-| TanStack DB | No (client lib) | differential-dataflow IVM | Yes (BYO writes) |
-| LiveStore | Client SQLite + event log | event-sourced/materializers | event-log |
-| **@absolutejs/sync** | **No — your DB via the ORM** | **explicit → table → row (staged)** | **Yes, any DB Drizzle/Prisma support** |
+| Engine               | Owns/replicates storage?            | Reactivity                          | BYO database                           |
+| -------------------- | ----------------------------------- | ----------------------------------- | -------------------------------------- |
+| Convex               | Yes (proprietary backend)           | auto read-set, row-level            | No                                     |
+| Zero                 | Yes (Postgres replica `zero-cache`) | IVM, row-level                      | Postgres only                          |
+| ElectricSQL          | Yes (Postgres logical replication)  | shapes, CRDT                        | Postgres only                          |
+| TanStack DB          | No (client lib)                     | differential-dataflow IVM           | Yes (BYO writes)                       |
+| LiveStore            | Client SQLite + event log           | event-sourced/materializers         | event-log                              |
+| **@absolutejs/sync** | **No — your DB via the ORM**        | **explicit → table → row (staged)** | **Yes, any DB Drizzle/Prisma support** |
 
 We sit closest to TanStack DB (a library, BYO backend) but server-first on
 Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the existing
@@ -27,13 +27,16 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   wildcards) + `live` Elysia SSE plugin + `createSyncSubscriber` browser client +
   `createWriteBehindCache` (in-memory hot path, write-behind persistence). You name
   the topics; mutations publish; subscribers refetch. Kills polling today.
-- **Tier 2 — ORM auto-reactivity — NEXT (biggest near-term win).** Drizzle/Prisma
-  adapters that _derive_ topics automatically: inspect a read query to subscribe it
-  to `table` (and, when the filter is a simple key/range, `table:key`); intercept
-  writes to publish the matching topics. Coarse (table/key) granularity — over-
-  invalidates a little, which is fine for ~95% of dashboards and is DB-agnostic. Ship
-  as `@absolutejs/sync-adapters` (mirrors `rag`/`queue` adapter convention) plus a
-  client `useLiveQuery` / `createLiveQuery` that wraps fetch + subscription.
+- **Tier 2 — ORM auto-reactivity — DONE (library); voice validation pending.**
+  Drizzle and Prisma adapters that _derive_ topics automatically: a read maps to
+  `table` (or `table:key` for a simple primary-key equality); `publishChange` /
+  `publishRows` / `publishWhere` publish the matching topics from a mutation. Coarse
+  (table/key) granularity — over-invalidates a little, fine for ~95% of dashboards,
+  DB-agnostic. Shipped as **subpaths** (`@absolutejs/sync/drizzle`,
+  `@absolutejs/sync/prisma`) rather than a separate `-adapters` package — one repo,
+  one version, extractable later. Client `createLiveQuery` wraps fetch + subscription
+  (hydrate-once, refetch-on-event, supersede/reconnect/SSR-seed). Remaining: prove on
+  the voice example's dashboards.
 - **Tier 3 — sync engine MVP — PLANNED (this doc).** Row-level reactive query
   results, optimistic mutations, offline. See below.
 
@@ -54,12 +57,12 @@ DB (differential-dataflow IVM in a client store):
    queries. Graduate to **differential dataflow** (à la TanStack DB) for joins/
    aggregations later; keep the operator set explicit and small.
 3. **Change source — two pluggable strategies:**
-   - **Route mutations through us (MVP).** All writes go through a mutation API that
-     applies to the durable store and emits the change feed. Works on _any_ DB
-     immediately; misses out-of-band writes.
-   - **CDC adapters (later).** Postgres logical replication / `LISTEN/NOTIFY`, MySQL
-     binlog, SQLite update hooks — catch external writes too. One per DB, in the
-     adapters package. This is the only DB-specific surface.
+    - **Route mutations through us (MVP).** All writes go through a mutation API that
+      applies to the durable store and emits the change feed. Works on _any_ DB
+      immediately; misses out-of-band writes.
+    - **CDC adapters (later).** Postgres logical replication / `LISTEN/NOTIFY`, MySQL
+      binlog, SQLite update hooks — catch external writes too. One per DB, in the
+      adapters package. This is the only DB-specific surface.
 4. **Client store.** Normalized in-memory collections + the IVM engine for
    next-frame local query results; optional persistence to IndexedDB / WASM-SQLite
    for offline reads.
@@ -87,8 +90,9 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
 
 - **M1 (done):** Tier 1 primitives + voice flagship (replace voice's polling widgets
   with reactive push; the polling is what exhausted the first Neon project).
-- **M2:** Tier 2 Drizzle adapter (auto table/key topics) + client `createLiveQuery`.
-  Prove on the voice example's dashboards. Then Prisma adapter.
+- **M2 (library done):** Drizzle + Prisma topic adapters (auto table/key topics) +
+  client `createLiveQuery`, shipped as subpaths. Remaining: prove on the voice
+  example's dashboards.
 - **M3:** Tier 3 read path — view syncer + predicate-matching IVM + diff frames +
   client store; one demo collection end to end.
 - **M4:** Tier 3 write path — optimistic mutations + reconciliation + offline queue.
