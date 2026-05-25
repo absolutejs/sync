@@ -1,0 +1,57 @@
+import { $ } from 'bun';
+import { rm } from 'node:fs/promises';
+
+const DIST = 'dist';
+
+await rm(DIST, { force: true, recursive: true });
+
+// Server / Node-target entries (engine + adapters). Peer deps stay external.
+const serverBuild = await Bun.build({
+	entrypoints: [
+		'src/index.ts',
+		'src/engine/index.ts',
+		'src/adapters/drizzle/index.ts',
+		'src/adapters/prisma/index.ts',
+		'src/adapters/postgres/index.ts',
+		'src/adapters/mysql/index.ts',
+		'src/adapters/sqlite/index.ts'
+	],
+	external: ['elysia', 'drizzle-orm'],
+	outdir: DIST,
+	root: 'src',
+	sourcemap: 'linked',
+	target: 'bun'
+});
+
+if (!serverBuild.success) {
+	for (const log of serverBuild.logs) {
+		console.error(log);
+	}
+	process.exit(1);
+}
+
+// Browser-target entries (client store + framework primitives). Frameworks stay
+// external so each app brings its own copy.
+const browserBuild = await Bun.build({
+	entrypoints: [
+		'src/client/index.ts',
+		'src/react/index.ts',
+		'src/vue/index.ts',
+		'src/svelte/index.ts',
+		'src/angular/index.ts'
+	],
+	external: ['react', 'vue', 'svelte', '@angular/core'],
+	outdir: DIST,
+	root: 'src',
+	sourcemap: 'linked',
+	target: 'browser'
+});
+
+if (!browserBuild.success) {
+	for (const log of browserBuild.logs) {
+		console.error(log);
+	}
+	process.exit(1);
+}
+
+await $`tsc --emitDeclarationOnly --project tsconfig.build.json`;

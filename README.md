@@ -259,6 +259,36 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 | `createSyncCollection({ url, collection, ... })`  | Live diff-driven collection store with optimistic `mutate`.     |
 | `localStorageMutationStorage(key)`                | `localStorage`-backed offline queue for `createSyncCollection`. |
 
+### Framework bindings — `@absolutejs/sync/{react,vue,svelte,angular}`
+
+Idiomatic wrappers over `createSyncCollection`, one per framework, so a live
+collection is one call. Each returns the same `{ data, status, error, mutate }`
+and is SSR-safe (the socket opens on the client only).
+
+| Subpath    | Export                                   | What it is                                           |
+| ---------- | ---------------------------------------- | ---------------------------------------------------- |
+| `/react`   | `useSyncCollection(options)`             | React hook (re-renders on diffs).                    |
+| `/vue`     | `useSyncCollection(options)`             | Vue composable (reactive refs).                      |
+| `/svelte`  | `createSyncCollectionStore(options)`     | Svelte readable store (`$store` → state) + `mutate`. |
+| `/angular` | `SyncCollectionService.connect(options)` | Angular service returning signals.                   |
+
+```tsx
+// React
+import { useSyncCollection } from '@absolutejs/sync/react';
+
+const { data, status, mutate } = useSyncCollection<Order>({
+	url: 'ws://localhost:3000/sync/ws',
+	collection: 'orders',
+	params: { userId }
+});
+
+mutate({
+	name: 'createOrder',
+	args: { total: 42 },
+	optimistic: (draft) => draft.set({ id: tempId, total: 42 } as Order)
+});
+```
+
 ### `@absolutejs/sync/engine`
 
 | Export                                                                      | What it is                                                                                                          |

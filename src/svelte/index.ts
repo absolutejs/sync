@@ -1,0 +1,1 @@
+export { createSyncCollectionStore } from './createSyncCollectionStore';
