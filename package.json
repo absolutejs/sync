@@ -83,6 +83,7 @@
 	},
 	"scripts": {
 		"build": "bun run scripts/build.ts",
+		"config": "absolute config",
 		"test": "bun test",
 		"typecheck": "tsc --noEmit",
 		"format": "prettier --write \"./**/*.{ts,json,md}\"",
@@ -137,6 +138,7 @@
 		}
 	},
 	"devDependencies": {
+		"@absolutejs/absolute": "^0.19.0-beta.1051",
 		"@angular/core": "^21.0.0",
 		"@elysiajs/eden": "^1.4.9",
 		"@types/bun": "latest",
