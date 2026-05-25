@@ -125,14 +125,15 @@ from `mutate`'s signature. No `<T>`, no parallel schema, no custom inference.
 
 ## What ships
 
-- `@absolutejs/sync/engine`: `engine.hydrate(...)`, `hydrateRoute`, `mutateRoute`
-  (done); `syncStore` is added on the client next.
-- `@absolutejs/sync/client`: `syncStore` (generic, Eden-fed). `createSyncCollection`
-  stays as the batteries-included path for non-Eden use.
+- `@absolutejs/sync/engine`: `engine.hydrate(...)`, `hydrateRoute`, `mutateRoute`.
+- `@absolutejs/sync/client`: `syncStore` (generic, Eden-fed) + `unwrapEden`.
+  `createSyncCollection` stays as the batteries-included path for non-Eden use.
 - No new type machinery. Eden + TypeBox do 100% of the typing.
 
 ## Status
 
-Server pieces (`engine.hydrate`, `hydrateRoute`, `mutateRoute`) are implemented and
-verified with a real `treaty<typeof app>` round trip. `syncStore` is the next
-checkpoint.
+Done and verified end to end over the built artifacts: a real `treaty<typeof app>`
+feeds `syncStore` (`hydrate`/`mutations` as Eden calls); row + result types flow
+with no `<T>`, the WS delivers live diffs, and an optimistic mutate reconciles
+without flicker. The one remaining precision item is the version cursor (Tier C),
+to make HTTP-mutate ↔ WS-diff reconciliation exact rather than touched-keys + grace.

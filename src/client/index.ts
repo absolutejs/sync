@@ -20,3 +20,12 @@ export type {
 	SyncCollectionState,
 	SyncCollectionStatus
 } from './syncCollection';
+
+export { syncStore, unwrapEden } from './syncStore';
+export type {
+	MutationMap,
+	SyncStore,
+	SyncStoreOptions,
+	SyncStoreState,
+	SyncStoreStatus
+} from './syncStore';
