@@ -17,6 +17,8 @@ export type {
 } from './materializedView';
 export { createAggregate } from './aggregate';
 export type { Aggregate, AggregateGroup, AggregateOptions } from './aggregate';
+export { createEquiJoin } from './equiJoin';
+export type { EquiJoin, EquiJoinOptions } from './equiJoin';
 export type {
 	ChangeSource,
 	EmitChange,
