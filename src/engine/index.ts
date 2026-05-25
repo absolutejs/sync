@@ -41,11 +41,14 @@ export type {
 export type {
 	ChangeSource,
 	EmitChange,
+	ParsedChange,
 	RowChange,
 	RowKey,
 	RowOp,
 	ViewDiff
 } from './types';
+export { createPollingChangeSource, parseOutboxRow } from './pollingSource';
+export type { OutboxRow, PollingChangeSourceOptions } from './pollingSource';
 
 export { defineCollection, defineJoinCollection } from './collection';
 export type {

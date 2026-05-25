@@ -1,4 +1,4 @@
-import type { ChangeSource, RowChange, RowOp } from '../../engine/types';
+import type { ChangeSource, ParsedChange, RowOp } from '../../engine/types';
 
 /**
  * Postgres CDC adapter for @absolutejs/sync (Tier 3, M5).
@@ -23,10 +23,7 @@ const OP_BY_TG: Record<string, RowOp> = {
 };
 
 /** A parsed change ready to feed the engine. */
-export type ParsedNotification = {
-	table: string;
-	change: RowChange<unknown>;
-};
+export type ParsedNotification = ParsedChange;
 
 /**
  * Default NOTIFY-payload parser: expects the JSON the trigger from

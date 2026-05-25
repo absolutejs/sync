@@ -37,6 +37,12 @@ export type EmitChange = (
 	change: RowChange<unknown>
 ) => void | Promise<void>;
 
+/** A committed change parsed from a CDC source, ready to feed the engine. */
+export type ParsedChange = {
+	table: string;
+	change: RowChange<unknown>;
+};
+
 /**
  * A pluggable source of committed row changes — the seam for catching writes the
  * mutation API didn't make (CDC: Postgres LISTEN/NOTIFY or logical replication,

@@ -25,14 +25,15 @@ Unlike Convex, ElectricSQL, or Zero, it does **not** own or replicate your datab
 — it stays a _library_ over the store, ORM, and transport you already have. Tier 1/2
 keep granularity deliberately coarse (table/row topics, refetch on change); the Tier
 3 engine adds true row-level diffs and optimistic writes. Single-table filtered
-queries are matched incrementally; joins/aggregations are handled (joins via
-re-hydrate, aggregations incrementally), with incremental joins the one remaining
-differential-dataflow frontier.
+queries are matched incrementally; joins (inner and left), aggregations, and
+top-N ordering are maintained incrementally through a composable operator graph
+(`query(...).filter().join().leftJoin().groupBy().orderBy()`).
 
 > Status: early (`0.0.1`). Tier 1 (hub, SSE plugin, browser subscriber,
 > write-behind cache), Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`),
 > and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
-> mutations + offline queue, Postgres CDC, incremental aggregations) are in place.
+> mutations + offline queue, CDC for Postgres/MySQL/SQLite, incremental
+> aggregations + joins, and a declarative operator graph) are in place.
 > Everything ships as subpaths of this one package.
 
 ## Install
@@ -260,13 +261,16 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 
 ### `@absolutejs/sync/engine`
 
-| Export                                                                   | What it is                                                                                                          |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `createSyncEngine()`                                                     | Registry + view syncer: `register`, `subscribe`, `applyChange`, `connectSource`, `registerMutation`, `runMutation`. |
-| `defineCollection({ name, hydrate, key?, match?, authorize?, tables? })` | Define a syncable collection.                                                                                       |
-| `defineMutation({ name, handler, authorize? })`                          | Define a server mutation that emits changes.                                                                        |
-| `createAggregate({ key, groupBy?, value? })`                             | Incremental count/sum/avg/min/max by group.                                                                         |
-| `createMaterializedView({ key, match, equals? })`                        | The predicate-matching IVM primitive (`apply`/`reset` → diffs).                                                     |
+| Export                                                                      | What it is                                                                                                          |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `createSyncEngine()`                                                        | Registry + view syncer: `register`, `subscribe`, `applyChange`, `connectSource`, `registerMutation`, `runMutation`. |
+| `defineCollection({ name, hydrate, key?, match?, authorize?, tables? })`    | Define a syncable collection.                                                                                       |
+| `defineMutation({ name, handler, authorize? })`                             | Define a server mutation that emits changes.                                                                        |
+| `createAggregate({ key, groupBy?, value? })`                                | Incremental count/sum/avg/min/max by group.                                                                         |
+| `createMaterializedView({ key, match, equals? })`                           | The predicate-matching IVM primitive (`apply`/`reset` → diffs).                                                     |
+| `createPollingChangeSource({ poll, intervalMs?, startSeq?, onProcessed? })` | DB-agnostic CDC `ChangeSource` that tails a changelog (outbox) table.                                               |
+| `query(source).filter().map().join().leftJoin().groupBy().orderBy()`        | Declarative incremental query builder (the operator graph).                                                         |
+| `defineGraphCollection({ name, query, key, authorize? })`                   | Run a `query` as a live collection.                                                                                 |
 
 ### `@absolutejs/sync/postgres`
 
@@ -274,6 +278,22 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 | ------------------------------------------------------------ | ---------------------------------------------------------------- |
 | `postgresChangeSource({ listen, channel?, parse? })`         | CDC `ChangeSource` over `LISTEN/NOTIFY` (bring your own client). |
 | `postgresNotifyTrigger({ tables, channel?, functionName? })` | SQL to install the notify triggers (run once).                   |
+
+### `@absolutejs/sync/mysql`
+
+| Export                                                       | What it is                                                                  |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `mysqlChangelogSchema({ tables, changelogTable?, prefix? })` | SQL to install the changelog table + triggers (run once).                   |
+| `createPollingChangeSource({ poll, ... })`                   | Tail the changelog (re-exported from the engine).                           |
+| `mysqlBinlogChangeSource({ subscribe, normalize? })`         | Higher-throughput CDC over the binlog (bring your own reader, e.g. zongji). |
+| `normalizeBinlogEvent(event)`                                | Pure: a binlog row event → engine changes.                                  |
+
+### `@absolutejs/sync/sqlite`
+
+| Export                                                        | What it is                                                |
+| ------------------------------------------------------------- | --------------------------------------------------------- |
+| `sqliteChangelogSchema({ tables, changelogTable?, prefix? })` | SQL to install the changelog table + triggers (run once). |
+| `createPollingChangeSource({ poll, ... })`                    | Tail the changelog (re-exported from the engine).         |
 
 ### `@absolutejs/sync/drizzle` and `@absolutejs/sync/prisma`
 

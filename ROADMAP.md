@@ -42,7 +42,9 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   diff transport (`syncSocket`), a client live-collection store
   (`createSyncCollection`), write-once predicate inference (Prisma), and
   optimistic mutations with reconciliation + offline queue (replay-on-reconnect +
-  durable cross-reload storage). Plus Postgres CDC for out-of-band writes,
+  durable cross-reload storage). Plus CDC for out-of-band writes across **every
+  target database** (Postgres `LISTEN/NOTIFY`, MySQL binlog or changelog poll,
+  SQLite changelog poll — all behind one `ChangeSource` seam),
   incremental aggregations (`createAggregate`) and **incremental equi-joins**
   (`createEquiJoin` + `defineJoinCollection` — a change to either side moves only
   the affected pairs, with per-side access scoping), an end-to-end typed client via
@@ -54,8 +56,10 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   run as live engine collections via `defineGraphCollection` — including live
   top-N, **left joins** (`selectUnmatched` / `query(...).leftJoin(...)`, keeping
   unmatched left rows and reverting when their last match leaves), and joining
-  derived subqueries (a join's right input can be another query). Remaining
-  frontier: CDC for databases other than Postgres.
+  derived subqueries (a join's right input can be another query). The Tier 3
+  engine frontier is now closed end to end; remaining work is ecosystem
+  validation (voice flagship + a standalone sync example) and horizontal scale
+  (a shared change-feed for multi-instance).
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 
@@ -77,9 +81,10 @@ DB (differential-dataflow IVM in a client store):
     - **Route mutations through us (MVP).** All writes go through a mutation API that
       applies to the durable store and emits the change feed. Works on _any_ DB
       immediately; misses out-of-band writes.
-    - **CDC adapters (later).** Postgres logical replication / `LISTEN/NOTIFY`, MySQL
-      binlog, SQLite update hooks — catch external writes too. One per DB, in the
-      adapters package. This is the only DB-specific surface.
+    - **CDC adapters (shipped).** Postgres `LISTEN/NOTIFY`, MySQL binlog _or_
+      changelog poll, SQLite changelog poll — catch external writes too. One
+      subpath per DB, all behind the `ChangeSource` seam (the only DB-specific
+      surface). Postgres logical replication can drop in behind the same seam.
 4. **Client store.** Normalized in-memory collections + the IVM engine for
    next-frame local query results; optional persistence to IndexedDB / WASM-SQLite
    for offline reads.
@@ -116,12 +121,15 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
 - **M4 (done):** Tier 3 write path — server mutations (`defineMutation`/
   `runMutation`) + optimistic mutations, reconciliation (ack/reject), and
   replay-on-reconnect. (Cross-reload persistence: small follow-up.)
-- **M5 (mostly done):** Postgres CDC change source (`LISTEN/NOTIFY`) via the
-  `ChangeSource` seam + `connectSource`; incremental aggregations; incremental
-  equi-joins; and a **general operator graph** — composable `filter`/`map`/`join`/
-  `aggregate` operators + a declarative `query` builder run as live collections
-  (`defineGraphCollection`), covering filter → multi-join → group-by pipelines,
-  inner **and left** joins. Remaining: CDC for databases other than Postgres.
+- **M5 (done):** CDC change sources across all target databases via the
+  `ChangeSource` seam + `connectSource` — Postgres `LISTEN/NOTIFY`
+  (`@absolutejs/sync/postgres`), MySQL binlog _or_ changelog-poll
+  (`@absolutejs/sync/mysql`), and SQLite changelog-poll (`@absolutejs/sync/sqlite`),
+  sharing one dependency-free `createPollingChangeSource` over an outbox table;
+  incremental aggregations; incremental equi-joins; and a **general operator
+  graph** — composable `filter`/`map`/`join`/`aggregate`/`orderBy` operators + a
+  declarative `query` builder run as live collections (`defineGraphCollection`),
+  covering filter → multi-join → group-by pipelines with inner **and left** joins.
 
 ## Risks / open questions
 
