@@ -19,6 +19,7 @@ import type {
 	ReadHandle,
 	TableReader
 } from './reactive';
+import type { ClusterBus } from './cluster';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
 /**
@@ -104,6 +105,12 @@ export type SyncEngine = {
 	 * `applyChange`. Resolves to a disconnect function that stops the source.
 	 */
 	connectSource: (source: ChangeSource) => Promise<() => Promise<void>>;
+	/**
+	 * Join a cluster (see {@link ClusterBus}): broadcast this instance's committed
+	 * changes to peers and apply theirs locally, so subscribers on every instance
+	 * stay live. Resolves to a disconnect function. Run once per instance.
+	 */
+	connectCluster: (bus: ClusterBus) => Promise<() => Promise<void>>;
 	/** Active subscription count, optionally for one collection. */
 	subscriptionCount: (collection?: string) => number;
 	/** Register a mutation definition (see {@link defineMutation}). */
@@ -304,6 +311,18 @@ export const createSyncEngine = (
 	const changeLog: LoggedChange[] = [];
 	let version = 0;
 	const runInTransaction = options.transaction;
+	// Cluster fan-out: a unique id so we ignore our own broadcasts, and the bus
+	// (set by connectCluster) we publish locally-committed changes to.
+	const instanceId = globalThis.crypto?.randomUUID?.() ?? `i${Math.random()}`;
+	let clusterBus: ClusterBus | undefined;
+
+	const broadcast = (
+		changes: { table: string; change: RowChange<unknown> }[]
+	) => {
+		if (clusterBus !== undefined && changes.length > 0) {
+			void clusterBus.publish({ changes, origin: instanceId });
+		}
+	};
 
 	const subsFor = (collection: string) => {
 		let set = active.get(collection);
@@ -597,7 +616,11 @@ export const createSyncEngine = (
 	};
 
 	/** Apply a single committed change at its own version (CDC / direct writes). */
-	const applyChange = async (table: string, change: RowChange<unknown>) => {
+	const applyChange = async (
+		table: string,
+		change: RowChange<unknown>,
+		shouldBroadcast = true
+	) => {
 		version += 1;
 		const changeVersion = version;
 		logChange(changeVersion, { version: changeVersion, table, change });
@@ -618,6 +641,9 @@ export const createSyncEngine = (
 		for (const [subscription, diff] of emissions) {
 			subscription.onDiff(diff, changeVersion);
 		}
+		if (shouldBroadcast) {
+			broadcast([{ table, change }]);
+		}
 	};
 
 	/**
@@ -626,7 +652,8 @@ export const createSyncEngine = (
 	 * client never renders a torn intermediate state mid-mutation.
 	 */
 	const applyChangeBatch = async (
-		changes: { table: string; change: RowChange<unknown> }[]
+		changes: { table: string; change: RowChange<unknown> }[],
+		shouldBroadcast = true
 	) => {
 		if (changes.length === 0) {
 			return;
@@ -675,6 +702,9 @@ export const createSyncEngine = (
 		emissions.push(...(await reactivePairs(reactiveChanges)));
 		for (const [subscription, diff] of emissions) {
 			subscription.onDiff(diff, batchVersion);
+		}
+		if (shouldBroadcast) {
+			broadcast(changes);
 		}
 	};
 
@@ -1053,6 +1083,23 @@ export const createSyncEngine = (
 			await source.start((table, change) => applyChange(table, change));
 			return async () => {
 				await source.stop();
+			};
+		},
+
+		connectCluster: async (bus) => {
+			const unsubscribe = await bus.subscribe((message) => {
+				// Ignore our own broadcasts; apply peers' changes locally without
+				// re-broadcasting (that would loop).
+				if (message.origin === instanceId) {
+					return;
+				}
+				void applyChangeBatch(message.changes, false);
+			});
+			clusterBus = bus;
+
+			return async () => {
+				clusterBus = undefined;
+				await unsubscribe();
 			};
 		},
 

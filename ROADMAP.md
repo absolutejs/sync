@@ -72,10 +72,12 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   that specific row changes; `db.where(table, predicate)` re-runs only when a row
   matching the filter changes — or one that was in the matched set leaves it
   (tracked via the keys that matched at read), correct for insert/update/delete;
-  `db.all` scans keep a table-level dependency. The Tier 3 engine frontier is now
-  closed end to end; remaining work is ecosystem validation (voice flagship + a
-  standalone sync example) and horizontal scale (a shared change-feed for
-  multi-instance).
+  `db.all` scans keep a table-level dependency. Plus **horizontal scale**: a
+  pluggable `ClusterBus` (`engine.connectCluster`) fans every instance's committed
+  changes out to its peers (BYO Redis stream / Postgres `LISTEN`, with an
+  in-memory bus for dev), so subscribers stay live across a load-balanced fleet.
+  The Tier 3 engine frontier is now closed end to end; remaining work is ecosystem
+  validation (voice flagship + a standalone sync example).
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 
@@ -174,8 +176,11 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
   subscriptions, consider `bun:sqlite` spill.
 - **Fan-out:** many subscribers to a hot query — share one materialization, push the
   same diff (Zero dedupes object updates this way).
-- **Multi-instance:** the hub is in-process; horizontal scale needs a shared
-  change-feed (Redis stream / Postgres `LISTEN`) — an adapter, not core.
+- **Multi-instance (addressed):** the hub is in-process, but `engine.connectCluster`
+  fans changes across instances over a pluggable `ClusterBus` (Redis stream /
+  Postgres `LISTEN` — an adapter, not core). Version cursors stay per-instance, so
+  cross-instance reconnect falls back to a snapshot (correct) unless you use
+  sticky sessions.
 
 ## Prior art
 

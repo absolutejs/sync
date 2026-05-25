@@ -1,0 +1,65 @@
+import type { RowChange } from './types';
+
+/**
+ * Horizontal scale — the seam for running the engine across many server
+ * instances. The in-process hub only reaches subscribers on the same instance;
+ * a {@link ClusterBus} fans every instance's committed changes out to the
+ * others, so a mutation on instance A reaches subscribers on instance B.
+ *
+ * Client-agnostic like the {@link ChangeSource} seam: you supply `publish` +
+ * `subscribe` over your bus of choice (Redis stream, Postgres `LISTEN/NOTIFY`,
+ * NATS…), and the engine handles fan-out and loop prevention (each message is
+ * tagged with the originating instance, and an instance ignores its own).
+ *
+ * Note: version cursors are per-instance, so a client that reconnects to a
+ * *different* instance falls back to a fresh snapshot (correct, just not a
+ * catch-up diff) — use sticky sessions if you want cross-instance resume.
+ */
+
+/** A committed change as it travels over the bus. */
+export type ClusterChange = {
+	table: string;
+	change: RowChange<unknown>;
+};
+
+export type ClusterMessage = {
+	/** The instance that produced these changes (so peers ignore their own). */
+	origin: string;
+	changes: ClusterChange[];
+};
+
+export type ClusterBus = {
+	/** Broadcast this instance's committed changes to the others. */
+	publish: (message: ClusterMessage) => void | Promise<void>;
+	/**
+	 * Receive other instances' changes; return a function that stops listening.
+	 * The engine filters out messages from its own `origin`.
+	 */
+	subscribe: (
+		onMessage: (message: ClusterMessage) => void
+	) => (() => void | Promise<void>) | Promise<() => void | Promise<void>>;
+};
+
+/**
+ * An in-process {@link ClusterBus} — for tests, local dev, or several engines in
+ * one process. **Not** cross-process: real horizontal scale needs a bus that
+ * spans machines (Redis stream, Postgres `LISTEN/NOTIFY`).
+ */
+export const createInMemoryClusterBus = (): ClusterBus => {
+	const listeners = new Set<(message: ClusterMessage) => void>();
+
+	return {
+		publish: (message) => {
+			for (const listener of listeners) {
+				listener(message);
+			}
+		},
+		subscribe: (onMessage) => {
+			listeners.add(onMessage);
+
+			return () => {
+				listeners.delete(onMessage);
+			};
+		}
+	};
+};
