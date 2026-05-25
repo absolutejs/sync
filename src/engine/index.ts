@@ -92,6 +92,17 @@ export type {
 	WriteRule
 } from './permissions';
 
+export { defineSearchCollection, SEARCH_SCORE_FIELD } from './search';
+export type {
+	SearchCollectionDefinition,
+	SearchHit,
+	SearchIndex
+} from './search';
+export { createTextIndex } from './textIndex';
+export type { TextIndexOptions } from './textIndex';
+export { createVectorIndex } from './vectorIndex';
+export type { VectorIndexOptions, VectorMetric } from './vectorIndex';
+
 export { defineMutation } from './mutation';
 export type {
 	MutationActions,

@@ -25,6 +25,8 @@ import type {
 	TablePermissions,
 	WriteRule
 } from './permissions';
+import type { SearchCollectionDefinition, SearchIndex } from './search';
+import { SEARCH_SCORE_FIELD } from './search';
 import type { ClusterBus } from './cluster';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
@@ -80,6 +82,14 @@ export type SyncEngine = {
 	/** Register an operator-graph collection (see {@link defineGraphCollection}). */
 	registerGraph: <Out, P = void, Ctx = CollectionContext>(
 		collection: GraphCollectionDefinition<Out, P, Ctx>
+	) => void;
+	/**
+	 * Register a live search collection (see {@link defineSearchCollection}): a
+	 * full-text or vector index maintained from a source table's change feed and
+	 * queried by the subscription's params, returning the ranked top-K live.
+	 */
+	registerSearch: <T, Query = string, Ctx = CollectionContext>(
+		collection: SearchCollectionDefinition<T, Query, Ctx>
 	) => void;
 	/**
 	 * Open a live subscription: authorize, hydrate the initial set, and stream
@@ -229,6 +239,16 @@ type ActiveSubscription =
 			/** Range dependencies (from `db.where`) — predicate + matched keys. */
 			rangeDeps: RangeDep[];
 			onDiff: OnDiff;
+	  }
+	| {
+			kind: 'search';
+			collection: string;
+			key: (row: unknown) => RowKey;
+			/** Re-run the search against the (now-updated) shared index. */
+			rerun: () => unknown[];
+			/** Current ranked result set, keyed (diffed against the next re-run). */
+			current: Map<RowKey, unknown>;
+			onDiff: OnDiff;
 	  };
 
 /** A `db.where` dependency: the predicate plus the keys that matched at read. */
@@ -295,6 +315,31 @@ const shallowEqual = (a: unknown, b: unknown): boolean => {
 	);
 };
 
+/** Shallow-equal ignoring the search score field — used to suppress re-emitting
+ * a search result whose only change is BM25 score drift as the corpus grows. */
+const equalsIgnoringScore = (a: unknown, b: unknown): boolean => {
+	if (
+		typeof a !== 'object' ||
+		typeof b !== 'object' ||
+		a === null ||
+		b === null
+	) {
+		return a === b;
+	}
+	const strip = (value: Record<string, unknown>) =>
+		Object.keys(value).filter((k) => k !== SEARCH_SCORE_FIELD);
+	const aKeys = strip(a as Record<string, unknown>);
+	const bKeys = strip(b as Record<string, unknown>);
+	return (
+		aKeys.length === bKeys.length &&
+		aKeys.every(
+			(k) =>
+				(a as Record<string, unknown>)[k] ===
+				(b as Record<string, unknown>)[k]
+		)
+	);
+};
+
 /**
  * The Tier 3 sync engine: a registry of collections plus the view syncer. It is
  * transport-agnostic — `subscribe` returns the initial snapshot and an
@@ -317,6 +362,7 @@ export const createSyncEngine = (
 		| JoinCollectionDefinition<any, any, any, any, any>
 		| GraphCollectionDefinition<any, any, any>
 		| ReactiveQueryDefinition<any, any, any>
+		| SearchCollectionDefinition<any, any, any>
 	>();
 	const mutations = new Map<string, MutationDefinition<any, any, any>>();
 	const writers = new Map<string, TableWriter>();
@@ -342,6 +388,19 @@ export const createSyncEngine = (
 	// their dependencies (the tables they read) are dynamic, not in tableIndex.
 	const reactiveSubs = new Set<
 		Extract<ActiveSubscription, { kind: 'reactive' }>
+	>();
+	// Search subscriptions + one shared index per search collection, kept live
+	// from the source table's change feed (like reactiveSubs, not in tableIndex).
+	const searchSubs = new Set<
+		Extract<ActiveSubscription, { kind: 'search' }>
+	>();
+	const searchIndexes = new Map<
+		string,
+		{
+			index: SearchIndex<unknown, unknown>;
+			definition: SearchCollectionDefinition<unknown, unknown, unknown>;
+			hydrated: boolean;
+		}
 	>();
 	const active = new Map<string, Set<ActiveSubscription>>();
 	// Which collections read each table — so a table change fans to all of them.
@@ -420,6 +479,10 @@ export const createSyncEngine = (
 		}
 		if (subscription.kind === 'reactive') {
 			// Reactive subs re-run as a whole (see reactivePairs), not per change.
+			return EMPTY_DIFF;
+		}
+		if (subscription.kind === 'search') {
+			// Search subs re-rank as a whole (see searchPairs), not per change.
 			return EMPTY_DIFF;
 		}
 		if (subscription.incremental) {
@@ -594,10 +657,16 @@ export const createSyncEngine = (
 		};
 	};
 
-	/** Diff a reactive query's re-run against its current set; updates `current`. */
+	/** Diff a re-run against a sub's current set; updates `current`. Shared by the
+	 * reactive and search kinds (both re-run wholesale and diff). `equals` decides
+	 * whether a still-present row counts as changed. */
 	const diffRerun = (
-		sub: ReactiveSub,
-		rows: unknown[]
+		sub: {
+			key: (row: unknown) => RowKey;
+			current: Map<RowKey, unknown>;
+		},
+		rows: unknown[],
+		equals: (a: unknown, b: unknown) => boolean = shallowEqual
 	): ViewDiff<unknown> => {
 		const next = new Map<RowKey, unknown>();
 		for (const row of rows) {
@@ -610,7 +679,7 @@ export const createSyncEngine = (
 			const previous = sub.current.get(rowKey);
 			if (previous === undefined) {
 				added.push(row);
-			} else if (!shallowEqual(previous, row)) {
+			} else if (!equals(previous, row)) {
 				changed.push(row);
 			}
 		}
@@ -669,6 +738,62 @@ export const createSyncEngine = (
 		return pairs;
 	};
 
+	/** Lazily build + hydrate a search collection's shared index (once). */
+	const ensureSearchIndex = async (
+		definition: SearchCollectionDefinition<unknown, unknown, unknown>
+	) => {
+		let entry = searchIndexes.get(definition.name);
+		if (entry === undefined) {
+			entry = { index: definition.index(), definition, hydrated: false };
+			searchIndexes.set(definition.name, entry);
+		}
+		if (!entry.hydrated) {
+			for (const row of await definition.source()) {
+				entry.index.add(row);
+			}
+			entry.hydrated = true;
+		}
+		return entry;
+	};
+
+	/**
+	 * Keep search indexes live and re-rank affected search subs: apply each change
+	 * to its collection's index, then re-run every sub whose collection changed.
+	 * Synchronous — the index ops and re-ranks don't touch the DB.
+	 */
+	const searchPairs = (
+		changes: { table: string; change: RowChange<unknown> }[]
+	): [ActiveSubscription, ViewDiff<unknown>][] => {
+		const touched = new Set<string>();
+		for (const { table, change } of changes) {
+			for (const entry of searchIndexes.values()) {
+				if (!entry.hydrated || entry.definition.table !== table) {
+					continue;
+				}
+				if (change.op === 'delete') {
+					entry.index.remove(entry.definition.key(change.row));
+				} else {
+					entry.index.add(change.row);
+				}
+				touched.add(entry.definition.name);
+			}
+		}
+		const pairs: [ActiveSubscription, ViewDiff<unknown>][] = [];
+		for (const sub of searchSubs) {
+			if (!touched.has(sub.collection)) {
+				continue;
+			}
+			// Ignore pure score drift (BM25 idf shifts as the corpus grows), so a
+			// result only re-emits when it enters/leaves or its content changes —
+			// not on every unrelated insert.
+			const diff = diffRerun(sub, sub.rerun(), equalsIgnoringScore);
+			if (!isEmptyViewDiff(diff)) {
+				pairs.push([sub, diff]);
+			}
+		}
+		return pairs;
+	};
+
 	const logChange = (changeVersion: number, entry: LoggedChange) => {
 		changeLog.push(entry);
 		if (changeLog.length > changeLogSize) {
@@ -699,6 +824,7 @@ export const createSyncEngine = (
 				{ table, key: changedKeyFor(table, change), row: change.row }
 			]))
 		);
+		emissions.push(...searchPairs([{ table, change }]));
 		for (const [subscription, diff] of emissions) {
 			subscription.onDiff(diff, changeVersion);
 		}
@@ -761,6 +887,7 @@ export const createSyncEngine = (
 			}
 		}
 		emissions.push(...(await reactivePairs(reactiveChanges)));
+		emissions.push(...searchPairs(changes));
 		for (const [subscription, diff] of emissions) {
 			subscription.onDiff(diff, batchVersion);
 		}
@@ -968,6 +1095,69 @@ export const createSyncEngine = (
 		};
 	};
 
+	const subscribeSearch = async (
+		collection: string,
+		definition: SearchCollectionDefinition<unknown, unknown, unknown>,
+		params: unknown,
+		ctx: unknown,
+		onDiff: OnDiff,
+		set: Set<ActiveSubscription>
+	): Promise<Subscription<unknown>> => {
+		// The subscription params are the query (a string for text, a vector for
+		// similarity).
+		const query = params;
+		if (definition.authorize !== undefined) {
+			const allowed = await definition.authorize(query, ctx);
+			if (!allowed) {
+				throw new UnauthorizedError(
+					`subscribe to collection "${collection}"`
+				);
+			}
+		}
+		const entry = await ensureSearchIndex(definition);
+		const limit = definition.limit ?? 20;
+		const readRule = readRuleFor(definition.table);
+		// Re-rank: top-K from the (shared, live) index, scoped by the read rule,
+		// each row tagged with its score so the client can sort by relevance.
+		const rerun = (): unknown[] => {
+			const candidates = entry.index.search(
+				query,
+				readRule ? limit * 5 : limit
+			);
+			const visible = readRule
+				? candidates.filter((hit) => readRule(ctx, hit.row))
+				: candidates;
+			return visible.slice(0, limit).map((hit) => ({
+				...(hit.row as Record<string, unknown>),
+				[SEARCH_SCORE_FIELD]: hit.score
+			}));
+		};
+		const initial = rerun();
+		const current = new Map<RowKey, unknown>();
+		for (const row of initial) {
+			current.set(definition.key(row), row);
+		}
+		const atVersion = version;
+		const subscription: Extract<ActiveSubscription, { kind: 'search' }> = {
+			kind: 'search',
+			collection,
+			key: definition.key,
+			rerun,
+			current,
+			onDiff
+		};
+		set.add(subscription);
+		searchSubs.add(subscription);
+		return {
+			initial,
+			version: atVersion,
+			unsubscribe: () => {
+				set.delete(subscription);
+				searchSubs.delete(subscription);
+			}
+		};
+	};
+
 	return {
 		register: (collection) => {
 			registry.set(collection.name, collection);
@@ -987,6 +1177,12 @@ export const createSyncEngine = (
 			for (const table of collection.query.tables()) {
 				addTableIndex(table, collection.name);
 			}
+		},
+
+		registerSearch: (collection) => {
+			// Like reactive: not in tableIndex — its index is driven directly by
+			// searchPairs off the change feed.
+			registry.set(collection.name, collection);
 		},
 
 		subscribe: async ({ collection, params, ctx, onDiff, since }) => {
@@ -1045,6 +1241,21 @@ export const createSyncEngine = (
 					subscribeSet
 				);
 				return reactived as Subscription<never>;
+			}
+			if (registeredKind === 'search') {
+				const searched = await subscribeSearch(
+					collection,
+					registered as SearchCollectionDefinition<
+						unknown,
+						unknown,
+						unknown
+					>,
+					params,
+					ctx,
+					typedOnDiff,
+					subscribeSet
+				);
+				return searched as Subscription<never>;
 			}
 			const definition = registered as CollectionDefinition<
 				unknown,

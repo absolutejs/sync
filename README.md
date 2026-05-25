@@ -33,9 +33,9 @@ top-N ordering are maintained incrementally through a composable operator graph
 > write-behind cache), Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`),
 > and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
 > mutations + offline queue, a local-first client cache, declarative row-level
-> permissions, CDC for Postgres/MySQL/SQLite, incremental aggregations + joins,
-> and a declarative operator graph) are in place.
-> Everything ships as subpaths of this one package.
+> permissions, live full-text + vector search, CDC for Postgres/MySQL/SQLite,
+> incremental aggregations + joins, and a declarative operator graph) are in
+> place. Everything ships as subpaths of this one package.
 
 ## Install
 
@@ -249,6 +249,37 @@ await orders.mutate({
     });
     ```
 
+- **Live search.** A `defineSearchCollection` is a full-text or vector index kept
+  live from a table's change feed. The subscription's `params` are the query (a
+  string for keyword search, an embedding for similarity); the ranked top-K stream
+  back as an ordinary collection and re-rank as rows change. Read permissions on
+  the source table still scope a caller's hits. Standalone, `createTextIndex` and
+  `createVectorIndex` are reusable (e.g. RAG retrieval with `@absolutejs/rag`).
+
+    ```ts
+    // server
+    engine.registerSearch(
+    	defineSearchCollection<Doc>({
+    		name: 'docSearch',
+    		table: 'docs',
+    		index: () =>
+    			createTextIndex({
+    				key: (d) => d.id,
+    				fields: ['title', 'body']
+    			}),
+    		source: () => db.select().from(docs), // the corpus to index
+    		key: (d) => d.id
+    	})
+    );
+
+    // client — params are the query; each result row carries `_score`
+    const results = createSyncCollection<Doc>({
+    	url,
+    	collection: 'docSearch',
+    	params: 'quick brown fox' // a vector for createVectorIndex
+    });
+    ```
+
 ## Write-behind cache — keep a remote store off your hot path
 
 ```ts
@@ -328,21 +359,24 @@ mutate({
 
 ### `@absolutejs/sync/engine`
 
-| Export                                                                            | What it is                                                                                                                                                                                                             |
-| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `createSyncEngine()`                                                              | Registry + view syncer: `register`, `subscribe`, `applyChange`, `connectSource`, `registerMutation`, `registerWriter`, `runMutation`.                                                                                  |
-| `defineCollection({ name, hydrate, key?, match?, authorize?, tables? })`          | Define a syncable collection.                                                                                                                                                                                          |
-| `defineMutation({ name, handler, authorize? })`                                   | Define a server mutation. Its `handler` gets `actions.insert/update/delete` (write through a registered `TableWriter` → persists + emits in one step) plus `actions.change` (escape hatch). Changes commit atomically. |
-| `registerWriter(table, { insert, update, delete })`                               | Teach the engine how to persist a table (any ORM), so writes auto-emit — you can't write without going live.                                                                                                           |
-| `createAggregate({ key, groupBy?, value? })`                                      | Incremental count/sum/avg/min/max by group.                                                                                                                                                                            |
-| `createMaterializedView({ key, match, equals? })`                                 | The predicate-matching IVM primitive (`apply`/`reset` → diffs).                                                                                                                                                        |
-| `createPollingChangeSource({ poll, intervalMs?, startSeq?, onProcessed? })`       | DB-agnostic CDC `ChangeSource` that tails a changelog (outbox) table.                                                                                                                                                  |
-| `engine.connectCluster(bus)` + `createInMemoryClusterBus()`                       | Horizontal scale: fan changes across server instances over a `ClusterBus` (BYO Redis/Postgres; in-memory bus for dev).                                                                                                 |
-| `createPresenceHub()` + `syncSocket({ engine, presence })`                        | Ephemeral room-scoped presence (online / typing / cursors) over the same socket — not persisted, auto-cleaned on disconnect.                                                                                           |
-| `query(source).filter().map().join().leftJoin().groupBy().orderBy()`              | Declarative incremental query builder (the operator graph).                                                                                                                                                            |
-| `defineGraphCollection({ name, query, key, authorize? })`                         | Run a `query` as a live collection.                                                                                                                                                                                    |
-| `defineReactiveQuery({ name, run, key })` + `registerReactive` / `registerReader` | Read-set-tracked query: `run(ctx)` reads via `ctx.db` (`all`/`get`/`where`) and re-runs only when the rows/ranges it read change — no `match`, no manual emit.                                                         |
-| `definePermissions({ [table]: { read?, insert?, update?, delete?, write? } })`    | Declarative row-level access control. Pass as `createSyncEngine({ permissions })` or `registerPermissions(table, rules)`. Read rules filter every row emitted; write rules gate `actions.insert/update/delete`.        |
+| Export                                                                                   | What it is                                                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createSyncEngine()`                                                                     | Registry + view syncer: `register`, `subscribe`, `applyChange`, `connectSource`, `registerMutation`, `registerWriter`, `runMutation`.                                                                                  |
+| `defineCollection({ name, hydrate, key?, match?, authorize?, tables? })`                 | Define a syncable collection.                                                                                                                                                                                          |
+| `defineMutation({ name, handler, authorize? })`                                          | Define a server mutation. Its `handler` gets `actions.insert/update/delete` (write through a registered `TableWriter` → persists + emits in one step) plus `actions.change` (escape hatch). Changes commit atomically. |
+| `registerWriter(table, { insert, update, delete })`                                      | Teach the engine how to persist a table (any ORM), so writes auto-emit — you can't write without going live.                                                                                                           |
+| `createAggregate({ key, groupBy?, value? })`                                             | Incremental count/sum/avg/min/max by group.                                                                                                                                                                            |
+| `createMaterializedView({ key, match, equals? })`                                        | The predicate-matching IVM primitive (`apply`/`reset` → diffs).                                                                                                                                                        |
+| `createPollingChangeSource({ poll, intervalMs?, startSeq?, onProcessed? })`              | DB-agnostic CDC `ChangeSource` that tails a changelog (outbox) table.                                                                                                                                                  |
+| `engine.connectCluster(bus)` + `createInMemoryClusterBus()`                              | Horizontal scale: fan changes across server instances over a `ClusterBus` (BYO Redis/Postgres; in-memory bus for dev).                                                                                                 |
+| `createPresenceHub()` + `syncSocket({ engine, presence })`                               | Ephemeral room-scoped presence (online / typing / cursors) over the same socket — not persisted, auto-cleaned on disconnect.                                                                                           |
+| `query(source).filter().map().join().leftJoin().groupBy().orderBy()`                     | Declarative incremental query builder (the operator graph).                                                                                                                                                            |
+| `defineGraphCollection({ name, query, key, authorize? })`                                | Run a `query` as a live collection.                                                                                                                                                                                    |
+| `defineReactiveQuery({ name, run, key })` + `registerReactive` / `registerReader`        | Read-set-tracked query: `run(ctx)` reads via `ctx.db` (`all`/`get`/`where`) and re-runs only when the rows/ranges it read change — no `match`, no manual emit.                                                         |
+| `definePermissions({ [table]: { read?, insert?, update?, delete?, write? } })`           | Declarative row-level access control. Pass as `createSyncEngine({ permissions })` or `registerPermissions(table, rules)`. Read rules filter every row emitted; write rules gate `actions.insert/update/delete`.        |
+| `defineSearchCollection({ name, table, index, source, key, limit? })` + `registerSearch` | Live search collection: the subscription's `params` are the query (string/vector), the ranked top-K stream back as a normal collection, re-ranked as rows change. Each row carries its score under `_score`.           |
+| `createTextIndex({ key, fields, tokenize?, stopwords?, k1?, b? })`                       | Incremental BM25 full-text index (keyword search). Implements `SearchIndex`; usable standalone or inside a search collection.                                                                                          |
+| `createVectorIndex({ key, embedding, metric? })`                                         | Incremental vector index (cosine/dot/euclidean exact k-NN) for semantic search — pairs with `@absolutejs/ai` / `@absolutejs/rag` for RAG retrieval on your own data.                                                   |
 
 ### `@absolutejs/sync/postgres`
 
