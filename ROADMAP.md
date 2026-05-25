@@ -52,8 +52,9 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   (`filter`/`map`/`join`/`aggregate`/`orderBy`+limit over a keyed change stream)
   and a declarative `query(...).filter().map().join().groupBy().orderBy()` builder,
   run as live engine collections via `defineGraphCollection` — including live
-  top-N. Remaining frontier: joining two derived subqueries (a join's right input
-  is currently a base table) and CDC for databases other than Postgres.
+  top-N and joining derived subqueries (a join's right input can be another
+  query). Remaining frontier: left/outer joins (inner is done) and CDC for
+  databases other than Postgres.
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 
@@ -119,7 +120,7 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
   equi-joins; and a **general operator graph** — composable `filter`/`map`/`join`/
   `aggregate` operators + a declarative `query` builder run as live collections
   (`defineGraphCollection`), covering filter → multi-join → group-by pipelines.
-  Remaining: joining two derived subqueries and CDC for databases other than
+  Remaining: left/outer joins (inner is done) and CDC for databases other than
   Postgres.
 
 ## Risks / open questions

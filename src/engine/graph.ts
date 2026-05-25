@@ -65,6 +65,10 @@ export type GraphInstance<Out> = {
 
 // `any` throughout the internals: a graph chains heterogeneously-typed stages;
 // the public Query/GraphSource surface stays fully typed.
+type AnySource = GraphSource<any, any, any>;
+
+type Plan = { source: AnySource; steps: AnyStep[] };
+
 type AnyStep =
 	| { kind: 'filter'; predicate: (row: any, p: any, ctx: any) => boolean }
 	| {
@@ -72,15 +76,24 @@ type AnyStep =
 			transform: (row: any) => any;
 			rekey?: (row: any) => RowKey;
 	  }
-	| ({ kind: 'join'; right: GraphSource<any, any, any> } & JoinOptions<
-			any,
-			any,
-			any
-	  >)
+	// A join's right input is itself a (sub)query plan — a base table is just a
+	// plan with no steps, so a join can combine two derived streams.
+	| ({ kind: 'join'; rightPlan: Plan } & JoinOptions<any, any, any>)
 	| ({ kind: 'aggregate' } & GroupByOptions<any>)
 	| ({ kind: 'orderBy' } & OrderByQueryOptions<any>);
 
-type AnySource = GraphSource<any, any, any>;
+/** Plan behind each Query, so a Query can be passed as a join's right input. */
+const PLANS = new WeakMap<object, Plan>();
+
+const planTables = (plan: Plan): string[] => {
+	const tables = [plan.source.table];
+	for (const step of plan.steps) {
+		if (step.kind === 'join') {
+			tables.push(...planTables(step.rightPlan));
+		}
+	}
+	return [...new Set(tables)];
+};
 
 export type Query<Row, P = void, Ctx = CollectionContext> = {
 	filter: (
@@ -91,7 +104,7 @@ export type Query<Row, P = void, Ctx = CollectionContext> = {
 		rekey?: (row: Out) => RowKey
 	) => Query<Out, P, Ctx>;
 	join: <Right, Out>(
-		right: GraphSource<Right, P, Ctx>,
+		right: GraphSource<Right, P, Ctx> | Query<Right, P, Ctx>,
 		options: JoinOptions<Row, Right, Out>
 	) => Query<Out, P, Ctx>;
 	groupBy: (options: GroupByOptions<Row>) => Query<AggregateGroup, P, Ctx>;
@@ -102,16 +115,32 @@ export type Query<Row, P = void, Ctx = CollectionContext> = {
 	instantiate: (params: P, ctx: Ctx) => GraphInstance<Row>;
 };
 
+/** A graph that emits a change stream (no materialization) — recursive: a join's
+ * right is itself a StreamGraph, so subqueries nest. */
+type StreamGraph = {
+	tables: string[];
+	outKey: (row: any) => RowKey;
+	hydrateStream: () => Promise<Change<any>[]>;
+	applyStream: (table: string, change: RowChange<unknown>) => Change<any>[];
+};
+
 type Stage =
 	| { kind: 'op'; op: Operator<any, any> }
-	| { kind: 'join'; node: JoinNode<any, any, any>; right: AnySource };
+	| { kind: 'join'; node: JoinNode<any, any, any>; right: StreamGraph };
 
-const instantiate = (
+/** How a table's change enters the graph (root's left, or a join's right input). */
+type Entry = {
+	stageIndex: number;
+	side: 'left' | 'right';
+	produce: (change: RowChange<unknown>) => Change<any>[];
+};
+
+const instantiateStream = (
 	source: AnySource,
 	steps: AnyStep[],
 	params: any,
 	ctx: any
-): GraphInstance<any> => {
+): StreamGraph => {
 	const stages: Stage[] = [];
 	let currentKey: (row: any) => RowKey = source.key;
 
@@ -123,25 +152,28 @@ const instantiate = (
 				op: filterOp((row) => predicate(row, params, ctx))
 			});
 		} else if (step.kind === 'map') {
-			stages.push({
-				kind: 'op',
-				op: mapOp(step.transform, step.rekey)
-			});
+			stages.push({ kind: 'op', op: mapOp(step.transform, step.rekey) });
 			if (step.rekey) {
 				currentKey = step.rekey;
 			}
 		} else if (step.kind === 'join') {
+			const right = instantiateStream(
+				step.rightPlan.source,
+				step.rightPlan.steps,
+				params,
+				ctx
+			);
 			stages.push({
 				kind: 'join',
 				node: joinNode({
 					leftKey: currentKey,
-					rightKey: step.right.key,
+					rightKey: right.outKey,
 					leftOn: step.on,
 					rightOn: step.rightOn,
 					select: step.select,
 					key: step.key
 				}),
-				right: step.right
+				right
 			});
 			currentKey = step.key;
 		} else if (step.kind === 'aggregate') {
@@ -169,8 +201,6 @@ const instantiate = (
 		}
 	}
 
-	const sink = materialize<any>(currentKey);
-
 	const propagate = (
 		changes: Change<any>[],
 		fromStage: number,
@@ -191,13 +221,18 @@ const instantiate = (
 		return cs;
 	};
 
-	// table -> the entry points its changes feed (root left + each join's right).
-	type Entry = {
-		stageIndex: number;
-		side: 'left' | 'right';
-		key: (row: any) => RowKey;
-		match?: (row: any, p: any, ctx: any) => boolean;
+	const sourceChange = (change: RowChange<unknown>): Change<any> => {
+		const key = source.key(change.row);
+		if (
+			change.op === 'delete' ||
+			(source.match !== undefined &&
+				!source.match(change.row, params, ctx))
+		) {
+			return { op: 'delete', key, row: change.row };
+		}
+		return { op: 'upsert', key, row: change.row };
 	};
+
 	const entries = new Map<string, Entry[]>();
 	const addEntry = (table: string, entry: Entry) => {
 		const list = entries.get(table);
@@ -207,68 +242,42 @@ const instantiate = (
 			list.push(entry);
 		}
 	};
+	// The root source feeds the left of stage 0.
 	addEntry(source.table, {
 		stageIndex: 0,
 		side: 'left',
-		key: source.key,
-		match: source.match
+		produce: (change) => [sourceChange(change)]
 	});
+	// Each join's right subgraph feeds that join's right; route every sub-table.
 	stages.forEach((stage, index) => {
 		if (stage.kind === 'join') {
-			addEntry(stage.right.table, {
-				stageIndex: index,
-				side: 'right',
-				key: stage.right.key,
-				match: stage.right.match
-			});
+			for (const table of stage.right.tables) {
+				addEntry(table, {
+					stageIndex: index,
+					side: 'right',
+					produce: (change) =>
+						(stage as { right: StreamGraph }).right.applyStream(
+							table,
+							change
+						)
+				});
+			}
 		}
 	});
 
-	const toChange = (
-		entry: Entry,
-		change: RowChange<unknown>
-	): Change<any> => {
-		const key = entry.key(change.row);
-		if (
-			change.op === 'delete' ||
-			(entry.match !== undefined && !entry.match(change.row, params, ctx))
-		) {
-			return { op: 'delete', key, row: change.row };
-		}
-		return { op: 'upsert', key, row: change.row };
-	};
-
 	return {
-		tables: [
-			source.table,
-			...steps
-				.filter(
-					(step): step is AnyStep & { kind: 'join' } =>
-						step.kind === 'join'
-				)
-				.map((step) => step.right.table)
-		],
-		hydrate: async () => {
-			// Prime each join's right index first, then push the root through.
+		tables: planTables({ source, steps }),
+		outKey: currentKey,
+		hydrateStream: async () => {
+			// Prime each join's right (recursively hydrating its subgraph) first.
 			for (let i = 0; i < stages.length; i += 1) {
 				const stage = stages[i]!;
 				if (stage.kind === 'join') {
-					const rightRows = [
-						...(await stage.right.hydrate(params, ctx))
-					];
-					propagate(
-						rightRows.map((row) => ({
-							op: 'upsert' as const,
-							key: stage.right.key(row),
-							row
-						})),
-						i,
-						'right'
-					);
+					propagate(await stage.right.hydrateStream(), i, 'right');
 				}
 			}
 			const rootRows = [...(await source.hydrate(params, ctx))];
-			const out = propagate(
+			return propagate(
 				rootRows.map((row) => ({
 					op: 'upsert' as const,
 					key: source.key(row),
@@ -277,55 +286,77 @@ const instantiate = (
 				0,
 				'left'
 			);
-			sink.apply(out);
-			return sink.rows();
 		},
-		applyChange: (table, change) => {
+		applyStream: (table, change) => {
 			const list = entries.get(table);
 			if (list === undefined) {
-				return { added: [], removed: [], changed: [] };
+				return [];
 			}
 			const out: Change<any>[] = [];
 			for (const entry of list) {
 				out.push(
 					...propagate(
-						[toChange(entry, change)],
+						entry.produce(change),
 						entry.stageIndex,
 						entry.side
 					)
 				);
 			}
-			return sink.apply(out);
+			return out;
 		}
+	};
+};
+
+const instantiate = (
+	source: AnySource,
+	steps: AnyStep[],
+	params: any,
+	ctx: any
+): GraphInstance<any> => {
+	const graph = instantiateStream(source, steps, params, ctx);
+	const sink = materialize<any>(graph.outKey);
+	return {
+		tables: graph.tables,
+		hydrate: async () => {
+			sink.apply(await graph.hydrateStream());
+			return sink.rows();
+		},
+		applyChange: (table, change) =>
+			sink.apply(graph.applyStream(table, change))
 	};
 };
 
 const makeQuery = <Row, P, Ctx>(
 	source: AnySource,
 	steps: AnyStep[]
-): Query<Row, P, Ctx> => ({
-	filter: (predicate) =>
-		makeQuery(source, [...steps, { kind: 'filter', predicate }]),
-	map: (transform, rekey) =>
-		makeQuery(source, [...steps, { kind: 'map', transform, rekey }]),
-	join: (right, options) =>
-		makeQuery(source, [...steps, { kind: 'join', right, ...options }]),
-	groupBy: (options) =>
-		makeQuery(source, [...steps, { kind: 'aggregate', ...options }]),
-	orderBy: (options) =>
-		makeQuery(source, [...steps, { kind: 'orderBy', ...options }]),
-	tables: () => [
-		source.table,
-		...steps
-			.filter(
-				(step): step is AnyStep & { kind: 'join' } =>
-					step.kind === 'join'
-			)
-			.map((step) => step.right.table)
-	],
-	instantiate: (params, ctx) =>
-		instantiate(source, steps, params, ctx) as GraphInstance<Row>
-});
+): Query<Row, P, Ctx> => {
+	const queryInstance: Query<Row, P, Ctx> = {
+		filter: (predicate) =>
+			makeQuery(source, [...steps, { kind: 'filter', predicate }]),
+		map: (transform, rekey) =>
+			makeQuery(source, [...steps, { kind: 'map', transform, rekey }]),
+		join: (right, options) => {
+			// `right` is a base source or a sub-Query; normalize to a plan.
+			const rightPlan = PLANS.get(right as object) ?? {
+				source: right as AnySource,
+				steps: []
+			};
+			return makeQuery(source, [
+				...steps,
+				{ kind: 'join', rightPlan, ...options }
+			]);
+		},
+		groupBy: (options) =>
+			makeQuery(source, [...steps, { kind: 'aggregate', ...options }]),
+		orderBy: (options) =>
+			makeQuery(source, [...steps, { kind: 'orderBy', ...options }]),
+		tables: () => planTables({ source, steps }),
+		instantiate: (params, ctx) =>
+			instantiate(source, steps, params, ctx) as GraphInstance<Row>
+	};
+	PLANS.set(queryInstance, { source, steps });
+	return queryInstance;
+};
 
 /** Start a query from a source table. */
 export const query = <Row, P = void, Ctx = CollectionContext>(
