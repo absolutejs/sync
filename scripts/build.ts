@@ -16,7 +16,7 @@ const serverBuild = await Bun.build({
 		'src/adapters/mysql/index.ts',
 		'src/adapters/sqlite/index.ts'
 	],
-	external: ['elysia', 'drizzle-orm'],
+	external: ['elysia', '@elysiajs/cron', 'drizzle-orm'],
 	outdir: DIST,
 	root: 'src',
 	sourcemap: 'linked',

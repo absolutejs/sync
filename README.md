@@ -33,9 +33,9 @@ top-N ordering are maintained incrementally through a composable operator graph
 > write-behind cache), Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`),
 > and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
 > mutations + offline queue, a local-first client cache, declarative row-level
-> permissions, live full-text + vector search, CDC for Postgres/MySQL/SQLite,
-> incremental aggregations + joins, and a declarative operator graph) are in
-> place. Everything ships as subpaths of this one package.
+> permissions, live full-text + vector search, scheduled functions, CDC for
+> Postgres/MySQL/SQLite, incremental aggregations + joins, and a declarative
+> operator graph) are in place. Everything ships as subpaths of this one package.
 
 ## Install
 
@@ -280,6 +280,32 @@ await orders.mutate({
     });
     ```
 
+- **Scheduled functions.** Register server-side work that runs on a cron pattern;
+  whatever it writes via `ctx.actions` goes live through the change feed (and it can
+  read current state via `ctx.db`). Cron decides _when_ (via `@elysiajs/cron`, an
+  optional peer); the engine makes the effect _live_. It doesn't reinvent jobs —
+  for durable, retryable work a schedule can `enqueue` into
+  [`@absolutejs/queue`](https://github.com/absolutejs/queue).
+
+    ```ts
+    import { scheduled } from '@absolutejs/sync';
+
+    engine.registerSchedule({
+    	name: 'digest',
+    	pattern: '0 8 * * 1', // Mondays 08:00 (6-field for seconds: '*/5 * * * * *')
+    	run: async ({ db, actions }) => {
+    		const stale = await db.all('reports');
+    		await actions.insert('digests', {
+    			id: crypto.randomUUID(),
+    			at: Date.now()
+    		});
+    		// or: queue.enqueue('email.send', { … }) for durable delivery
+    	}
+    });
+
+    new Elysia().use(syncSocket({ engine })).use(scheduled({ engine })); // wires cron
+    ```
+
 ## Write-behind cache — keep a remote store off your hot path
 
 ```ts
@@ -306,12 +332,13 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 
 ### `@absolutejs/sync`
 
-| Export                                                                                     | What it is                                                           |
-| ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
-| `createReactiveHub()`                                                                      | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`). |
-| `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                       | Elysia plugin: SSE stream of hub events.                             |
-| `syncSocket({ engine, path?, resolveContext? })`                                           | Elysia WebSocket plugin for the sync engine.                         |
-| `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })` | In-memory cache + write-behind persistence.                          |
+| Export                                                                                     | What it is                                                                                            |
+| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `createReactiveHub()`                                                                      | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`).                                  |
+| `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                       | Elysia plugin: SSE stream of hub events.                                                              |
+| `syncSocket({ engine, path?, resolveContext? })`                                           | Elysia WebSocket plugin for the sync engine.                                                          |
+| `scheduled({ engine, prefix?, onError? })`                                                 | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). |
+| `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })` | In-memory cache + write-behind persistence.                                                           |
 
 ### `@absolutejs/sync/client`
 
@@ -377,6 +404,7 @@ mutate({
 | `defineSearchCollection({ name, table, index, source, key, limit? })` + `registerSearch` | Live search collection: the subscription's `params` are the query (string/vector), the ranked top-K stream back as a normal collection, re-ranked as rows change. Each row carries its score under `_score`.           |
 | `createTextIndex({ key, fields, tokenize?, stopwords?, k1?, b? })`                       | Incremental BM25 full-text index (keyword search). Implements `SearchIndex`; usable standalone or inside a search collection.                                                                                          |
 | `createVectorIndex({ key, embedding, metric? })`                                         | Incremental vector index (cosine/dot/euclidean exact k-NN) for semantic search — pairs with `@absolutejs/ai` / `@absolutejs/rag` for RAG retrieval on your own data.                                                   |
+| `defineSchedule({ name, pattern, run })` + `registerSchedule` / `runSchedule`            | Scheduled function: `run({ db, actions })` fires on a cron `pattern`; its writes go live through the change feed. Wire triggers with the `scheduled` plugin (or call `runSchedule(name)` on demand).                   |
 
 ### `@absolutejs/sync/postgres`
 

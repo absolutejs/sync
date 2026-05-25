@@ -27,6 +27,7 @@ import type {
 } from './permissions';
 import type { SearchCollectionDefinition, SearchIndex } from './search';
 import { SEARCH_SCORE_FIELD } from './search';
+import type { ScheduleDefinition } from './schedule';
 import type { ClusterBus } from './cluster';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
@@ -91,6 +92,20 @@ export type SyncEngine = {
 	registerSearch: <T, Query = string, Ctx = CollectionContext>(
 		collection: SearchCollectionDefinition<T, Query, Ctx>
 	) => void;
+	/**
+	 * Register a scheduled function (see {@link defineSchedule}): server-triggered
+	 * work whose `actions` writes go live through the change feed. Wire the cron
+	 * triggers with the `scheduled` Elysia plugin.
+	 */
+	registerSchedule: (schedule: ScheduleDefinition) => void;
+	/**
+	 * Run a registered schedule's handler now: its writes commit (in the
+	 * configured transaction) and emit as one live batch. The `scheduled` plugin
+	 * calls this on each cron fire; call it directly to trigger on demand.
+	 */
+	runSchedule: (name: string) => Promise<void>;
+	/** Registered schedules (name + cron pattern) — used by the `scheduled` plugin. */
+	listSchedules: () => ScheduleDefinition[];
 	/**
 	 * Open a live subscription: authorize, hydrate the initial set, and stream
 	 * diffs as changes arrive. Rejects with {@link UnauthorizedError} on deny.
@@ -367,6 +382,7 @@ export const createSyncEngine = (
 	const mutations = new Map<string, MutationDefinition<any, any, any>>();
 	const writers = new Map<string, TableWriter>();
 	const readers = new Map<string, TableReader>();
+	const schedules = new Map<string, ScheduleDefinition>();
 	// Declarative row-level permissions, keyed by table. Stored with an `unknown`
 	// context — the engine threads ctx untyped — while the public
 	// `definePermissions`/`registerPermissions` surface stays fully typed.
@@ -585,7 +601,9 @@ export const createSyncEngine = (
 		ctx: unknown,
 		readTables: Set<string>,
 		readKeys: Set<string>,
-		rangeDeps: RangeDep[]
+		rangeDeps: RangeDep[],
+		// Schedules read unscoped (trusted server code); subscriptions apply rules.
+		applyRules = true
 	): ReadHandle => {
 		const readerFor = (table: string): TableReader => {
 			const reader = readers.get(table);
@@ -596,12 +614,14 @@ export const createSyncEngine = (
 			}
 			return reader;
 		};
+		const ruleFor = (table: string) =>
+			applyRules ? readRuleFor(table) : undefined;
 
 		return {
 			all: async (table) => {
 				readTables.add(table);
 				const rows = [...(await readerFor(table).all(ctx))];
-				const rule = readRuleFor(table);
+				const rule = ruleFor(table);
 				return (
 					rule ? rows.filter((row) => rule(ctx, row)) : rows
 				) as never[];
@@ -619,7 +639,7 @@ export const createSyncEngine = (
 					readTables.add(table);
 				}
 				const row = await reader.get(key, ctx);
-				const rule = readRuleFor(table);
+				const rule = ruleFor(table);
 				// A row the caller can't read reads as absent.
 				return (
 					rule && row !== undefined && !rule(ctx, row)
@@ -629,7 +649,7 @@ export const createSyncEngine = (
 			},
 			where: async (table, predicate) => {
 				const reader = readerFor(table);
-				const rule = readRuleFor(table);
+				const rule = ruleFor(table);
 				// Fold the read rule into the range predicate, so an unreadable row
 				// never matches and a visibility flip still re-runs the query.
 				const effective = (
@@ -655,6 +675,93 @@ export const createSyncEngine = (
 				return matched as never[];
 			}
 		};
+	};
+
+	const writerFor = (table: string): TableWriter => {
+		const writer = writers.get(table);
+		if (writer === undefined) {
+			throw new Error(
+				`No writer registered for table "${table}" — register one with engine.registerWriter, or use actions.change`
+			);
+		}
+		return writer;
+	};
+
+	// Enforce a table's declarative write rule before the writer runs (so a deny
+	// rolls the transaction back). For update/delete, evaluate the rule against the
+	// *existing* row when a reader can load it — so the check reflects committed
+	// state, not a client-supplied payload.
+	const authorizeWrite = async (
+		table: string,
+		op: 'insert' | 'update' | 'delete',
+		value: unknown,
+		ctx: unknown
+	) => {
+		const rule = writeRuleFor(table, op);
+		if (rule === undefined) {
+			return;
+		}
+		let subject = value;
+		if (op !== 'insert') {
+			const reader = readers.get(table);
+			if (reader?.get !== undefined) {
+				const id = reader.key
+					? reader.key(value)
+					: (value as { id?: RowKey }).id;
+				if (id !== undefined) {
+					const existing = await reader.get(id, ctx);
+					if (existing !== undefined) {
+						subject = existing;
+					}
+				}
+			}
+		}
+		if (!rule(ctx, subject)) {
+			throw new UnauthorizedError(`${op} on table "${table}"`);
+		}
+	};
+
+	/**
+	 * Build the write actions a mutation or schedule handler uses, collecting its
+	 * changes into a fresh buffer (so a transaction that retries/rolls back never
+	 * double-emits). `tx` threads to each writer. `enforce` applies write
+	 * permission rules (mutations); schedules run trusted, so they pass `false`.
+	 */
+	const makeActions = (tx: unknown, ctx: unknown, enforce: boolean) => {
+		const buffered: { table: string; change: RowChange<unknown> }[] = [];
+		const actions: MutationActions = {
+			change: (collection, change) => {
+				buffered.push({
+					table: collection,
+					change: change as RowChange<unknown>
+				});
+				return Promise.resolve();
+			},
+			insert: async (table, data) => {
+				if (enforce) {
+					await authorizeWrite(table, 'insert', data, ctx);
+				}
+				const row = await writerFor(table).insert(data, ctx, tx);
+				buffered.push({ table, change: { op: 'insert', row } });
+				return row;
+			},
+			update: async (table, data) => {
+				if (enforce) {
+					await authorizeWrite(table, 'update', data, ctx);
+				}
+				const row = await writerFor(table).update(data, ctx, tx);
+				buffered.push({ table, change: { op: 'update', row } });
+				return row;
+			},
+			delete: async (table, row) => {
+				if (enforce) {
+					await authorizeWrite(table, 'delete', row, ctx);
+				}
+				await writerFor(table).delete(row, ctx, tx);
+				buffered.push({ table, change: { op: 'delete', row } });
+			}
+		};
+		return { actions, buffered };
 	};
 
 	/** Diff a re-run against a sub's current set; updates `current`. Shared by the
@@ -1437,98 +1544,14 @@ export const createSyncEngine = (
 					throw new UnauthorizedError(`run mutation "${name}"`);
 				}
 			}
-			const writerFor = (table: string): TableWriter => {
-				const writer = writers.get(table);
-				if (writer === undefined) {
-					throw new Error(
-						`No writer registered for table "${table}" — register one with engine.registerWriter, or use actions.change`
-					);
-				}
-				return writer;
-			};
-
-			// Enforce the table's declarative write rule before the writer runs (so
-			// a deny rolls the transaction back). For update/delete, evaluate the
-			// rule against the *existing* row when a reader can load it — so the
-			// check reflects committed state, not a client-supplied payload.
-			const authorizeWrite = async (
-				table: string,
-				op: 'insert' | 'update' | 'delete',
-				value: unknown
-			) => {
-				const rule = writeRuleFor(table, op);
-				if (rule === undefined) {
-					return;
-				}
-				let subject = value;
-				if (op !== 'insert') {
-					const reader = readers.get(table);
-					if (reader?.get !== undefined) {
-						const id = reader.key
-							? reader.key(value)
-							: (value as { id?: RowKey }).id;
-						if (id !== undefined) {
-							const existing = await reader.get(id, ctx);
-							if (existing !== undefined) {
-								subject = existing;
-							}
-						}
-					}
-				}
-				if (!rule(ctx, subject)) {
-					throw new UnauthorizedError(`${op} on table "${table}"`);
-				}
-			};
 
 			// Run the handler (optionally inside the DB transaction), collecting its
 			// changes into a fresh buffer per attempt — so a transaction that retries
-			// or rolls back never double-emits or leaks a half-applied batch. The
-			// `tx` handle threads through to each writer.
+			// or rolls back never double-emits or leaks a half-applied batch.
 			const runHandler = async (tx: unknown) => {
-				const buffered: {
-					table: string;
-					change: RowChange<unknown>;
-				}[] = [];
-				const actions: MutationActions = {
-					change: (collection, change) => {
-						buffered.push({
-							table: collection,
-							change: change as RowChange<unknown>
-						});
-						return Promise.resolve();
-					},
-					insert: async (table, data) => {
-						await authorizeWrite(table, 'insert', data);
-						const row = await writerFor(table).insert(
-							data,
-							ctx,
-							tx
-						);
-						buffered.push({ table, change: { op: 'insert', row } });
-						return row;
-					},
-					update: async (table, data) => {
-						await authorizeWrite(table, 'update', data);
-						const row = await writerFor(table).update(
-							data,
-							ctx,
-							tx
-						);
-						buffered.push({ table, change: { op: 'update', row } });
-						return row;
-					},
-					delete: async (table, row) => {
-						await authorizeWrite(table, 'delete', row);
-						await writerFor(table).delete(row, ctx, tx);
-						buffered.push({ table, change: { op: 'delete', row } });
-					}
-				};
-				const handlerResult = await mutation.handler(
-					args,
-					ctx,
-					actions
-				);
-				return { buffered, result: handlerResult };
+				const { actions, buffered } = makeActions(tx, ctx, true);
+				const result = await mutation.handler(args, ctx, actions);
+				return { buffered, result };
 			};
 
 			// Emit only after the transaction commits, so subscribers never see a
@@ -1539,6 +1562,32 @@ export const createSyncEngine = (
 					: await runHandler(undefined);
 			await applyChangeBatch(buffered);
 			return result;
+		},
+
+		registerSchedule: (schedule) => {
+			schedules.set(schedule.name, schedule);
+		},
+
+		listSchedules: () => [...schedules.values()],
+
+		runSchedule: async (name) => {
+			const schedule = schedules.get(name);
+			if (schedule === undefined) {
+				throw new Error(`Unknown schedule "${name}"`);
+			}
+			// A schedule reads unscoped and writes without permission checks (it's
+			// trusted server code); its writes emit as one live batch like a mutation.
+			const runHandler = async (tx: unknown) => {
+				const { actions, buffered } = makeActions(tx, {}, false);
+				const db = makeReadHandle({}, new Set(), new Set(), [], false);
+				await schedule.run({ actions, db });
+				return buffered;
+			};
+			const buffered =
+				runInTransaction !== undefined
+					? await runInTransaction((tx) => runHandler(tx))
+					: await runHandler(undefined);
+			await applyChangeBatch(buffered);
 		}
 	};
 };

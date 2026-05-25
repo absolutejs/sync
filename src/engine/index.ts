@@ -103,6 +103,9 @@ export type { TextIndexOptions } from './textIndex';
 export { createVectorIndex } from './vectorIndex';
 export type { VectorIndexOptions, VectorMetric } from './vectorIndex';
 
+export { defineSchedule } from './schedule';
+export type { ScheduleContext, ScheduleDefinition } from './schedule';
+
 export { defineMutation } from './mutation';
 export type {
 	MutationActions,
