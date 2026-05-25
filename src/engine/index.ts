@@ -15,6 +15,8 @@ export type {
 	MaterializedView,
 	MaterializedViewOptions
 } from './materializedView';
+export { createAggregate } from './aggregate';
+export type { Aggregate, AggregateGroup, AggregateOptions } from './aggregate';
 export type {
 	ChangeSource,
 	EmitChange,
