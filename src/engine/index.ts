@@ -26,7 +26,8 @@ export {
 	fromRowChange,
 	joinNode,
 	mapOp,
-	materialize
+	materialize,
+	orderByOp
 } from './dataflow';
 export type {
 	AggregateOpOptions,
@@ -34,7 +35,8 @@ export type {
 	JoinNode,
 	JoinNodeOptions,
 	Materializer,
-	Operator
+	Operator,
+	OrderByOptions
 } from './dataflow';
 export type {
 	ChangeSource,
@@ -59,6 +61,7 @@ export type {
 	GraphSource,
 	GroupByOptions,
 	JoinOptions,
+	OrderByQueryOptions,
 	Query
 } from './graph';
 

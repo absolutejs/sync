@@ -5,7 +5,8 @@ import {
 	filterOp,
 	joinNode,
 	mapOp,
-	materialize
+	materialize,
+	orderByOp
 } from './dataflow';
 import type { Change, JoinNode, Operator } from './dataflow';
 import type { RowChange, RowKey, ViewDiff } from './types';
@@ -44,6 +45,17 @@ export type GroupByOptions<Row> = {
 	value?: (row: Row) => number;
 };
 
+export type OrderByQueryOptions<Row> = {
+	/** Row identity. */
+	key: (row: Row) => RowKey;
+	/** Sort comparator (ascending). */
+	compare: (a: Row, b: Row) => number;
+	/** Keep at most this many rows (top-N). */
+	limit?: number;
+	/** Skip this many from the front (pagination). */
+	offset?: number;
+};
+
 /** A live, instantiated graph for one subscription. */
 export type GraphInstance<Out> = {
 	tables: string[];
@@ -65,7 +77,8 @@ type AnyStep =
 			any,
 			any
 	  >)
-	| ({ kind: 'aggregate' } & GroupByOptions<any>);
+	| ({ kind: 'aggregate' } & GroupByOptions<any>)
+	| ({ kind: 'orderBy' } & OrderByQueryOptions<any>);
 
 type AnySource = GraphSource<any, any, any>;
 
@@ -82,6 +95,7 @@ export type Query<Row, P = void, Ctx = CollectionContext> = {
 		options: JoinOptions<Row, Right, Out>
 	) => Query<Out, P, Ctx>;
 	groupBy: (options: GroupByOptions<Row>) => Query<AggregateGroup, P, Ctx>;
+	orderBy: (options: OrderByQueryOptions<Row>) => Query<Row, P, Ctx>;
 	/** Source tables this query reads. */
 	tables: () => string[];
 	/** Instantiate the graph for one subscription's params/ctx. */
@@ -130,7 +144,7 @@ const instantiate = (
 				right: step.right
 			});
 			currentKey = step.key;
-		} else {
+		} else if (step.kind === 'aggregate') {
 			stages.push({
 				kind: 'op',
 				op: aggregateOp({
@@ -140,6 +154,18 @@ const instantiate = (
 				})
 			});
 			currentKey = (group: AggregateGroup) => group.group;
+		} else {
+			stages.push({
+				kind: 'op',
+				op: orderByOp({
+					key: step.key,
+					compare: step.compare,
+					limit: step.limit,
+					offset: step.offset
+				})
+			});
+			// orderBy preserves rows (and their identity), just windows them.
+			currentKey = step.key;
 		}
 	}
 
@@ -286,6 +312,8 @@ const makeQuery = <Row, P, Ctx>(
 		makeQuery(source, [...steps, { kind: 'join', right, ...options }]),
 	groupBy: (options) =>
 		makeQuery(source, [...steps, { kind: 'aggregate', ...options }]),
+	orderBy: (options) =>
+		makeQuery(source, [...steps, { kind: 'orderBy', ...options }]),
 	tables: () => [
 		source.table,
 		...steps

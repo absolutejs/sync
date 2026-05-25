@@ -165,6 +165,65 @@ export const aggregateOp = <In>(
 	};
 };
 
+export type OrderByOptions<T> = {
+	/** Row identity. */
+	key: (row: T) => RowKey;
+	/** Sort comparator (ascending: negative = a before b). */
+	compare: (a: T, b: T) => number;
+	/** Keep at most this many rows (the top-N window). */
+	limit?: number;
+	/** Skip this many rows from the front (pagination). Defaults to 0. */
+	offset?: number;
+};
+
+/**
+ * Maintain a sorted top-N window: keep only the `[offset, offset + limit)` slice
+ * by `compare`, emitting which rows entered/left the window as input changes.
+ * A single insert can both add a row and evict the one it displaced — both are
+ * emitted. Bounded output (≤ limit upserts per batch); it re-sorts its input, so
+ * place it where the input is already narrowed (e.g. after a filter/join).
+ *
+ * The window is the right *set* of rows; sort them by the same comparator on the
+ * client for display order (cheap for N rows — the diff protocol is unordered).
+ */
+export const orderByOp = <T>(options: OrderByOptions<T>): Operator<T, T> => {
+	const { key, compare } = options;
+	const offset = options.offset ?? 0;
+	const limit = options.limit ?? Number.POSITIVE_INFINITY;
+	const all = new Map<RowKey, T>();
+	let window = new Map<RowKey, T>();
+
+	return {
+		push: (changes) => {
+			for (const change of changes) {
+				if (change.op === 'delete') {
+					all.delete(change.key);
+				} else {
+					all.set(change.key, change.row);
+				}
+			}
+			const windowed = [...all.values()]
+				.sort(compare)
+				.slice(offset, offset + limit);
+			const next = new Map<RowKey, T>();
+			for (const row of windowed) {
+				next.set(key(row), row);
+			}
+			const out: Change<T>[] = [];
+			for (const [rowKey, row] of window) {
+				if (!next.has(rowKey)) {
+					out.push({ op: 'delete', key: rowKey, row });
+				}
+			}
+			for (const [rowKey, row] of next) {
+				out.push({ op: 'upsert', key: rowKey, row });
+			}
+			window = next;
+			return out;
+		}
+	};
+};
+
 /** A two-input incremental equi-join node. */
 export type JoinNode<L, R, Out> = {
 	hydrate: (left: Iterable<L>, right: Iterable<R>) => void;

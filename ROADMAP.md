@@ -49,11 +49,11 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   Eden + TypeBox (`hydrateRoute`/`mutateRoute` + `syncStore`), and a **version
   cursor** for resumable reconnects (catch-up diffs from a bounded change log).
   Plus a **general operator graph**: composable incremental operators
-  (`filter`/`map`/`join`/`aggregate` over a keyed change stream) and a declarative
-  `query(...).filter().map().join().groupBy()` builder, run as live engine
-  collections via `defineGraphCollection`. Remaining frontier: joining two derived
-  subqueries (a join's right input is currently a base table), windowed
-  ORDER BY/LIMIT, and CDC for databases other than Postgres.
+  (`filter`/`map`/`join`/`aggregate`/`orderBy`+limit over a keyed change stream)
+  and a declarative `query(...).filter().map().join().groupBy().orderBy()` builder,
+  run as live engine collections via `defineGraphCollection` — including live
+  top-N. Remaining frontier: joining two derived subqueries (a join's right input
+  is currently a base table) and CDC for databases other than Postgres.
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 
@@ -119,8 +119,8 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
   equi-joins; and a **general operator graph** — composable `filter`/`map`/`join`/
   `aggregate` operators + a declarative `query` builder run as live collections
   (`defineGraphCollection`), covering filter → multi-join → group-by pipelines.
-  Remaining: joining two derived subqueries, windowed ORDER BY/LIMIT, and CDC for
-  databases other than Postgres.
+  Remaining: joining two derived subqueries and CDC for databases other than
+  Postgres.
 
 ## Risks / open questions
 
