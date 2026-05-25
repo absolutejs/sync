@@ -149,7 +149,11 @@ import { syncSocket } from '@absolutejs/sync';
 import { createSyncEngine, defineMutation } from '@absolutejs/sync/engine';
 import { prismaCollection } from '@absolutejs/sync/prisma';
 
-const engine = createSyncEngine();
+// `transaction` runs every mutation in your DB's transaction (any ORM), so its
+// writes are ACID and the diff is emitted only after the commit.
+const engine = createSyncEngine({
+	transaction: (run) => prisma.$transaction(run)
+});
 
 engine.register(
 	prismaCollection({
@@ -160,12 +164,14 @@ engine.register(
 	})
 );
 
-// Teach the engine how to persist the table once — now writes auto-emit.
+// Teach the engine how to persist the table once — now writes auto-emit. The
+// third arg is the transaction handle, so the write joins the mutation's tx.
 engine.registerWriter('orders', {
-	insert: (data, ctx) =>
-		prisma.order.create({ data: { ...data, userId: ctx.userId } }),
-	update: (data) => prisma.order.update({ where: { id: data.id }, data }),
-	delete: (row) => prisma.order.delete({ where: { id: row.id } })
+	insert: (data, ctx, tx) =>
+		tx.order.create({ data: { ...data, userId: ctx.userId } }),
+	update: (data, _ctx, tx) =>
+		tx.order.update({ where: { id: data.id }, data }),
+	delete: (row, _ctx, tx) => tx.order.delete({ where: { id: row.id } })
 });
 
 engine.registerMutation(

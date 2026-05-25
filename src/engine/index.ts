@@ -73,7 +73,8 @@ export type {
 	MutationActions,
 	MutationDefinition,
 	MutationHandler,
-	TableWriter
+	TableWriter,
+	TransactionRunner
 } from './mutation';
 
 export { createSyncEngine, UnauthorizedError } from './syncEngine';

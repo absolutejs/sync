@@ -6,13 +6,30 @@ import type { RowChange } from './types';
  * `insert`/`update`/`delete` on the mutation actions write to your store (any
  * ORM) and emit the live change in one step. Each function returns the stored
  * row so the emitted diff carries DB-generated fields (ids, timestamps).
+ *
+ * The third argument is the transaction handle from the engine's
+ * {@link TransactionRunner} (or `undefined` if none is configured) — write
+ * through it so a mutation's writes commit all-or-nothing.
  */
-export type TableWriter<Row = any, Ctx = unknown> = {
-	insert: (data: any, ctx: Ctx) => Promise<Row> | Row;
-	update: (data: any, ctx: Ctx) => Promise<Row> | Row;
+export type TableWriter<Row = any, Ctx = unknown, Tx = unknown> = {
+	insert: (data: any, ctx: Ctx, tx: Tx) => Promise<Row> | Row;
+	update: (data: any, ctx: Ctx, tx: Tx) => Promise<Row> | Row;
 	/** Persist the delete; receives the row/identifier passed to `actions.delete`. */
-	delete: (row: any, ctx: Ctx) => Promise<unknown> | unknown;
+	delete: (row: any, ctx: Ctx, tx: Tx) => Promise<unknown> | unknown;
 };
+
+/**
+ * Runs a function inside your database's transaction, threading the transaction
+ * handle to each {@link TableWriter}, so a mutation's writes commit
+ * all-or-nothing and the engine emits its diff only after the commit. Configure
+ * it on {@link createSyncEngine}. Examples:
+ *
+ *   `(run) => db.transaction(run)`        // Drizzle
+ *   `(run) => prisma.$transaction(run)`   // Prisma
+ */
+export type TransactionRunner = <R>(
+	run: (tx: unknown) => Promise<R>
+) => Promise<R>;
 
 /**
  * Actions a mutation handler uses to write and publish changes.

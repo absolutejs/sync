@@ -11,7 +11,8 @@ import type { MaterializedView } from './materializedView';
 import type {
 	MutationActions,
 	MutationDefinition,
-	TableWriter
+	TableWriter,
+	TransactionRunner
 } from './mutation';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
 
@@ -109,9 +110,9 @@ export type SyncEngine = {
 	 * `actions.insert/update/delete` write to your store and emit the live change
 	 * in one step — you can't write without going live. See {@link TableWriter}.
 	 */
-	registerWriter: <Row = unknown, Ctx = CollectionContext>(
+	registerWriter: <Row = unknown, Ctx = CollectionContext, Tx = unknown>(
 		table: string,
-		writer: TableWriter<Row, Ctx>
+		writer: TableWriter<Row, Ctx, Tx>
 	) => void;
 	/**
 	 * Run a registered mutation: authorize, invoke its handler (which writes and
@@ -178,6 +179,13 @@ export type SyncEngineOptions = {
 	 * snapshot. Defaults to 1024.
 	 */
 	changeLogSize?: number;
+	/**
+	 * Run every mutation inside your database's transaction (see
+	 * {@link TransactionRunner}): the handler's writes commit all-or-nothing, and
+	 * the engine emits the resulting diff only after the commit. Omit to run
+	 * mutations without a transaction (each writer call is its own DB op).
+	 */
+	transaction?: TransactionRunner;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -215,6 +223,7 @@ export const createSyncEngine = (
 	const changeLogSize = options.changeLogSize ?? 1024;
 	const changeLog: LoggedChange[] = [];
 	let version = 0;
+	const runInTransaction = options.transaction;
 
 	const subsFor = (collection: string) => {
 		let set = active.get(collection);
@@ -753,11 +762,6 @@ export const createSyncEngine = (
 					throw new UnauthorizedError(`run mutation "${name}"`);
 				}
 			}
-			// Buffer the handler's changes, then commit them atomically: one
-			// version and one merged diff per subscription, so no client observes a
-			// torn intermediate state. A throwing handler commits nothing.
-			const buffered: { table: string; change: RowChange<unknown> }[] =
-				[];
 			const writerFor = (table: string): TableWriter => {
 				const writer = writers.get(table);
 				if (writer === undefined) {
@@ -767,30 +771,61 @@ export const createSyncEngine = (
 				}
 				return writer;
 			};
-			const actions: MutationActions = {
-				change: (collection, change) => {
-					buffered.push({
-						table: collection,
-						change: change as RowChange<unknown>
-					});
-					return Promise.resolve();
-				},
-				insert: async (table, data) => {
-					const row = await writerFor(table).insert(data, ctx);
-					buffered.push({ table, change: { op: 'insert', row } });
-					return row;
-				},
-				update: async (table, data) => {
-					const row = await writerFor(table).update(data, ctx);
-					buffered.push({ table, change: { op: 'update', row } });
-					return row;
-				},
-				delete: async (table, row) => {
-					await writerFor(table).delete(row, ctx);
-					buffered.push({ table, change: { op: 'delete', row } });
-				}
+
+			// Run the handler (optionally inside the DB transaction), collecting its
+			// changes into a fresh buffer per attempt — so a transaction that retries
+			// or rolls back never double-emits or leaks a half-applied batch. The
+			// `tx` handle threads through to each writer.
+			const runHandler = async (tx: unknown) => {
+				const buffered: {
+					table: string;
+					change: RowChange<unknown>;
+				}[] = [];
+				const actions: MutationActions = {
+					change: (collection, change) => {
+						buffered.push({
+							table: collection,
+							change: change as RowChange<unknown>
+						});
+						return Promise.resolve();
+					},
+					insert: async (table, data) => {
+						const row = await writerFor(table).insert(
+							data,
+							ctx,
+							tx
+						);
+						buffered.push({ table, change: { op: 'insert', row } });
+						return row;
+					},
+					update: async (table, data) => {
+						const row = await writerFor(table).update(
+							data,
+							ctx,
+							tx
+						);
+						buffered.push({ table, change: { op: 'update', row } });
+						return row;
+					},
+					delete: async (table, row) => {
+						await writerFor(table).delete(row, ctx, tx);
+						buffered.push({ table, change: { op: 'delete', row } });
+					}
+				};
+				const handlerResult = await mutation.handler(
+					args,
+					ctx,
+					actions
+				);
+				return { buffered, result: handlerResult };
 			};
-			const result = await mutation.handler(args, ctx, actions);
+
+			// Emit only after the transaction commits, so subscribers never see a
+			// change that later rolls back.
+			const { buffered, result } =
+				runInTransaction !== undefined
+					? await runInTransaction((tx) => runHandler(tx))
+					: await runHandler(undefined);
 			await applyChangeBatch(buffered);
 			return result;
 		}
