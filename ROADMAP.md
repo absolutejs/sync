@@ -37,8 +37,14 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   one version, extractable later. Client `createLiveQuery` wraps fetch + subscription
   (hydrate-once, refetch-on-event, supersede/reconnect/SSR-seed). Remaining: prove on
   the voice example's dashboards.
-- **Tier 3 — sync engine MVP — PLANNED (this doc).** Row-level reactive query
-  results, optimistic mutations, offline. See below.
+- **Tier 3 — sync engine MVP — READ + WRITE PATHS DONE.** Row-level reactive
+  query results (predicate-matching IVM + collections + view syncer), a WebSocket
+  diff transport (`syncSocket`), a client live-collection store
+  (`createSyncCollection`), write-once predicate inference (Prisma), and
+  optimistic mutations with reconciliation + replay-on-reconnect. Remaining:
+  CDC change-source adapters and joins/aggregations (differential dataflow) — see
+  M5. Cross-reload offline persistence is a small follow-up (replay-on-reconnect
+  is in).
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 
@@ -93,9 +99,12 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
 - **M2 (library done):** Drizzle + Prisma topic adapters (auto table/key topics) +
   client `createLiveQuery`, shipped as subpaths. Remaining: prove on the voice
   example's dashboards.
-- **M3:** Tier 3 read path — view syncer + predicate-matching IVM + diff frames +
-  client store; one demo collection end to end.
-- **M4:** Tier 3 write path — optimistic mutations + reconciliation + offline queue.
+- **M3 (done):** Tier 3 read path — predicate-matching IVM + collections + view
+  syncer + WebSocket diff transport + client live-collection store + write-once
+  predicate inference (Prisma). End-to-end verified.
+- **M4 (done):** Tier 3 write path — server mutations (`defineMutation`/
+  `runMutation`) + optimistic mutations, reconciliation (ack/reject), and
+  replay-on-reconnect. (Cross-reload persistence: small follow-up.)
 - **M5:** CDC change-source adapters (Postgres first) for out-of-band writes;
   differential-dataflow IVM for joins/aggregations.
 
