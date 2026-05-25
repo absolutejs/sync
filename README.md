@@ -160,16 +160,20 @@ engine.register(
 	})
 );
 
+// Teach the engine how to persist the table once — now writes auto-emit.
+engine.registerWriter('orders', {
+	insert: (data, ctx) =>
+		prisma.order.create({ data: { ...data, userId: ctx.userId } }),
+	update: (data) => prisma.order.update({ where: { id: data.id }, data }),
+	delete: (row) => prisma.order.delete({ where: { id: row.id } })
+});
+
 engine.registerMutation(
 	defineMutation({
 		name: 'createOrder',
-		handler: async (args, ctx, actions) => {
-			const order = await prisma.order.create({
-				data: { ...args, userId: ctx.userId }
-			});
-			await actions.change('orders', { op: 'insert', row: order });
-			return order;
-		}
+		// Persists AND goes live in one step — you can't forget to emit, and the
+		// diff carries the stored row (db-assigned id). Commits atomically.
+		handler: (args, ctx, actions) => actions.insert('orders', args)
 	})
 );
 
