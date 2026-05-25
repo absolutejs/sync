@@ -22,13 +22,24 @@ export type SubscribeArgs<T, P, Ctx> = {
 	params: P;
 	/** Caller context (e.g. session); passed to hydrate/match/authorize. */
 	ctx: Ctx;
-	/** Receives every non-empty diff after the initial snapshot. */
-	onDiff: (diff: ViewDiff<T>) => void;
+	/** Receives every non-empty diff (with its version) after the initial reply. */
+	onDiff: (diff: ViewDiff<T>, version: number) => void;
+	/**
+	 * Resume from a version the client already applied. When the change log still
+	 * covers `(since, now]` for a single-table collection, the engine replies with
+	 * a catch-up diff instead of a full snapshot; otherwise it falls back to a
+	 * snapshot.
+	 */
+	since?: number;
 };
 
 export type Subscription<T> = {
-	/** The result set at subscribe time (the initial snapshot). */
+	/** The result set at subscribe time — a snapshot (empty when resuming). */
 	initial: T[];
+	/** Catch-up diff when resuming via `since` (instead of `initial`). */
+	catchup?: ViewDiff<T>;
+	/** The engine version this reply brings the client up to. */
+	version: number;
 	/** Stop receiving diffs and release the view. */
 	unsubscribe: () => void;
 };
@@ -94,7 +105,22 @@ type ActiveSubscription = {
 	incremental: boolean;
 	/** Re-run the bound hydrate for the refetch fallback. */
 	rehydrate: () => Promise<Iterable<unknown>>;
-	onDiff: (diff: ViewDiff<unknown>) => void;
+	onDiff: (diff: ViewDiff<unknown>, version: number) => void;
+};
+
+type LoggedChange = {
+	version: number;
+	table: string;
+	change: RowChange<unknown>;
+};
+
+export type SyncEngineOptions = {
+	/**
+	 * How many recent changes to retain for resumable reconnects. A client that
+	 * reconnects within this window gets a catch-up diff; beyond it, a fresh
+	 * snapshot. Defaults to 1024.
+	 */
+	changeLogSize?: number;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -109,7 +135,9 @@ const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
  * `authorize`, and a collection's `match`/`hydrate` scope rows to the caller, so
  * a change to a row the caller can't see never reaches them.
  */
-export const createSyncEngine = (): SyncEngine => {
+export const createSyncEngine = (
+	options: SyncEngineOptions = {}
+): SyncEngine => {
 	// Heterogeneous registry: `any` here is what lets collections of different
 	// row/param/context types share one map (the public `register`/`subscribe`
 	// surface stays fully typed).
@@ -118,6 +146,12 @@ export const createSyncEngine = (): SyncEngine => {
 	const active = new Map<string, Set<ActiveSubscription>>();
 	// Which collections read each table — so a table change fans to all of them.
 	const tableIndex = new Map<string, Set<string>>();
+
+	// Monotonic change feed: every applyChange bumps `version` and appends to a
+	// bounded log, so a client can resume from the version it last applied.
+	const changeLogSize = options.changeLogSize ?? 1024;
+	const changeLog: LoggedChange[] = [];
+	let version = 0;
 
 	const subsFor = (collection: string) => {
 		let set = active.get(collection);
@@ -130,7 +164,8 @@ export const createSyncEngine = (): SyncEngine => {
 
 	const applyToSubscription = async (
 		subscription: ActiveSubscription,
-		change: RowChange<unknown>
+		change: RowChange<unknown>,
+		changeVersion: number
 	) => {
 		let diff;
 		if (subscription.incremental) {
@@ -146,11 +181,17 @@ export const createSyncEngine = (): SyncEngine => {
 			diff = subscription.view.reset(await subscription.rehydrate());
 		}
 		if (!isEmptyViewDiff(diff)) {
-			subscription.onDiff(diff);
+			subscription.onDiff(diff, changeVersion);
 		}
 	};
 
 	const applyChange = async (table: string, change: RowChange<unknown>) => {
+		version += 1;
+		changeLog.push({ version, table, change });
+		if (changeLog.length > changeLogSize) {
+			changeLog.shift();
+		}
+		const changeVersion = version;
 		const collectionNames = tableIndex.get(table);
 		if (collectionNames === undefined) {
 			return;
@@ -161,9 +202,54 @@ export const createSyncEngine = (): SyncEngine => {
 				continue;
 			}
 			for (const subscription of set) {
-				await applyToSubscription(subscription, change);
+				await applyToSubscription(subscription, change, changeVersion);
 			}
 		}
+	};
+
+	/**
+	 * Can we replay `(since, now]` from the log for `tables`? Only when the log
+	 * hasn't been trimmed past `since` (no gap).
+	 */
+	const canResume = (since: number, incremental: boolean): boolean => {
+		if (!incremental) {
+			return false; // refetch/join subs can't be replayed precisely
+		}
+		if (since >= version) {
+			return true; // nothing newer to replay
+		}
+		const oldest = changeLog[0];
+		return oldest !== undefined && oldest.version <= since + 1;
+	};
+
+	/** Build a catch-up diff from the log for one subscription (last op per key wins). */
+	const buildCatchup = (
+		since: number,
+		tables: string[],
+		key: (row: unknown) => RowKey,
+		match: (row: unknown) => boolean
+	): ViewDiff<unknown> => {
+		const latest = new Map<
+			RowKey,
+			{ op: 'upsert' | 'remove'; row: unknown }
+		>();
+		for (const entry of changeLog) {
+			if (entry.version <= since || !tables.includes(entry.table)) {
+				continue;
+			}
+			const row = entry.change.row;
+			const present =
+				entry.change.op !== 'delete' && match(row)
+					? 'upsert'
+					: 'remove';
+			latest.set(key(row), { op: present, row });
+		}
+		const changed: unknown[] = [];
+		const removed: unknown[] = [];
+		for (const { op, row } of latest.values()) {
+			(op === 'upsert' ? changed : removed).push(row);
+		}
+		return { added: [], removed, changed };
 	};
 
 	return {
@@ -180,7 +266,7 @@ export const createSyncEngine = (): SyncEngine => {
 			}
 		},
 
-		subscribe: async ({ collection, params, ctx, onDiff }) => {
+		subscribe: async ({ collection, params, ctx, onDiff, since }) => {
 			const definition = registry.get(collection) as
 				| CollectionDefinition<unknown, unknown, unknown>
 				| undefined;
@@ -205,33 +291,55 @@ export const createSyncEngine = (): SyncEngine => {
 			// join/aggregate spanning tables can't match a single row, so it uses
 			// the refetch fallback.
 			const incremental = match !== undefined && tables.length === 1;
+			const boundMatch = incremental
+				? (row: unknown) => match(row, params, ctx)
+				: () => true;
 			const view = createMaterializedView<unknown>({
 				key,
-				match: incremental
-					? (row) => match(row, params, ctx)
-					: () => true
+				match: boundMatch
 			});
 
-			// Hydrate, then register. A change arriving in this gap is missed —
-			// the known hydrate-vs-live race; change-feed sequencing addresses it
-			// in a later checkpoint.
+			// Resume from the log when possible (catch-up diff); else send a
+			// snapshot. The view is hydrated either way so future changes match.
+			const resuming =
+				since !== undefined && canResume(since, incremental);
 			view.hydrate([...(await rehydrate())]);
+			const atVersion = version;
 
 			const subscription: ActiveSubscription = {
 				collection,
 				view,
 				incremental,
 				rehydrate,
-				onDiff: onDiff as (diff: ViewDiff<unknown>) => void
+				onDiff: onDiff as (
+					diff: ViewDiff<unknown>,
+					version: number
+				) => void
 			};
 			const set = subsFor(collection);
 			set.add(subscription);
 
+			const unsubscribe = () => {
+				set.delete(subscription);
+			};
+
+			if (resuming) {
+				return {
+					initial: [],
+					catchup: buildCatchup(
+						since,
+						tables,
+						key,
+						boundMatch
+					) as ViewDiff<never>,
+					version: atVersion,
+					unsubscribe
+				};
+			}
 			return {
 				initial: view.rows() as never[],
-				unsubscribe: () => {
-					set.delete(subscription);
-				}
+				version: atVersion,
+				unsubscribe
 			};
 		},
 

@@ -43,9 +43,11 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   (`createSyncCollection`), write-once predicate inference (Prisma), and
   optimistic mutations with reconciliation + offline queue (replay-on-reconnect +
   durable cross-reload storage). Plus Postgres CDC for out-of-band writes,
-  multi-table collections (joins via refetch), and incremental aggregations.
-  Remaining frontier: incremental equi-join (differential dataflow) and CDC for
-  other databases.
+  multi-table collections (joins via refetch), incremental aggregations, an
+  end-to-end typed client via Eden + TypeBox (`hydrateRoute`/`mutateRoute` +
+  `syncStore`), and a **version cursor** for resumable reconnects (catch-up diffs
+  from a bounded change log). Remaining frontier: incremental equi-join
+  (differential dataflow) and CDC for other databases.
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 

@@ -113,13 +113,16 @@ from `mutate`'s signature. No `<T>`, no parallel schema, no custom inference.
 - **Confirmed state** comes from the WS (`syncSocket`): a snapshot on subscribe,
   then ordered diffs — race-free, already built and tested. `hydrate` is used for
   the row **type** and for SSR seeding (`initialData`).
+- **Version cursor (in).** Every snapshot/diff carries a monotonic version; the
+  client tracks the highest it applied and, on reconnect, resumes with `since` —
+  the engine replays a **catch-up diff** from a bounded change log (or falls back
+  to a snapshot if the log can't cover the gap). So a reconnect costs deltas, not a
+  full re-hydrate, and never misses or double-applies a change.
 - **Mutations** go over Eden HTTP (typed). The store applies an optimistic overlay,
   awaits the call, and reconciles: roll back on reject; on success drop the overlay
   once the WS diff has reflected the touched keys (with a short grace fallback for
-  mutations that don't touch this collection). The precise long-term mechanism is a
-  monotonic **version cursor** (hydrate/diff/mutate carry a version; drop the overlay
-  at `appliedVersion >= mutationVersion`) — the same change-feed sequencing tracked
-  as Tier C hardening.
+  mutations that don't touch this collection). This is correct and flicker-free;
+  the version cursor is available to make it exact for the multi-collection edge.
 - **Offline**: pending mutate calls are queued and replayed on reconnect; optional
   durable `storage` survives reload.
 
@@ -134,6 +137,6 @@ from `mutate`'s signature. No `<T>`, no parallel schema, no custom inference.
 
 Done and verified end to end over the built artifacts: a real `treaty<typeof app>`
 feeds `syncStore` (`hydrate`/`mutations` as Eden calls); row + result types flow
-with no `<T>`, the WS delivers live diffs, and an optimistic mutate reconciles
-without flicker. The one remaining precision item is the version cursor (Tier C),
-to make HTTP-mutate ↔ WS-diff reconciliation exact rather than touched-keys + grace.
+with no `<T>`, the WS delivers live diffs, an optimistic mutate reconciles without
+flicker, and a reconnect resumes from a version cursor (catch-up diff, not a full
+re-snapshot) — verified over real WebSockets.

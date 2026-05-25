@@ -7,14 +7,28 @@ import type { Subscription, SyncEngine } from './syncEngine';
 
 /** Client → server. */
 export type ClientFrame =
-	| { type: 'subscribe'; id: string; collection: string; params?: unknown }
+	| {
+			type: 'subscribe';
+			id: string;
+			collection: string;
+			params?: unknown;
+			/** Resume from a version already applied (catch-up instead of snapshot). */
+			since?: number;
+	  }
 	| { type: 'unsubscribe'; id: string }
 	| { type: 'mutate'; mutationId: number; name: string; args?: unknown };
 
-/** Server → client. */
+/** Server → client. `version` is the change-feed watermark this frame brings. */
 export type ServerFrame<T = unknown> =
-	| { type: 'snapshot'; id: string; rows: T[] }
-	| { type: 'diff'; id: string; added: T[]; removed: T[]; changed: T[] }
+	| { type: 'snapshot'; id: string; rows: T[]; version?: number }
+	| {
+			type: 'diff';
+			id: string;
+			added: T[];
+			removed: T[];
+			changed: T[];
+			version?: number;
+	  }
 	| { type: 'error'; id?: string; message: string }
 	| { type: 'ack'; mutationId: number; result?: unknown }
 	| { type: 'reject'; mutationId: number; message: string };
@@ -51,6 +65,7 @@ const parseFrame = (raw: unknown): ClientFrame | undefined => {
 		id?: unknown;
 		collection?: unknown;
 		params?: unknown;
+		since?: unknown;
 		mutationId?: unknown;
 		name?: unknown;
 		args?: unknown;
@@ -62,7 +77,11 @@ const parseFrame = (raw: unknown): ClientFrame | undefined => {
 					type: 'subscribe',
 					id: frame.id,
 					collection: frame.collection,
-					params: frame.params
+					params: frame.params,
+					since:
+						typeof frame.since === 'number'
+							? frame.since
+							: undefined
 				}
 			: undefined;
 	}
@@ -149,24 +168,39 @@ export const createSyncConnection = ({
 				collection: frame.collection,
 				params: frame.params,
 				ctx,
-				onDiff: (diff) => {
+				since: frame.since,
+				onDiff: (diff, diffVersion) => {
 					send({
 						type: 'diff',
 						id: frame.id,
 						added: diff.added,
 						removed: diff.removed,
-						changed: diff.changed
+						changed: diff.changed,
+						version: diffVersion
 					});
 				}
 			});
 			subscriptions.set(frame.id, subscription);
-			// No await between subscribe resolving and this send, so the snapshot
-			// always precedes any diff for this subscription.
-			send({
-				type: 'snapshot',
-				id: frame.id,
-				rows: subscription.initial
-			});
+			// No await between subscribe resolving and this send, so the initial
+			// reply always precedes any diff for this subscription.
+			if (subscription.catchup !== undefined) {
+				// Resumed: a catch-up diff applied on top of the client's set.
+				send({
+					type: 'diff',
+					id: frame.id,
+					added: subscription.catchup.added,
+					removed: subscription.catchup.removed,
+					changed: subscription.catchup.changed,
+					version: subscription.version
+				});
+			} else {
+				send({
+					type: 'snapshot',
+					id: frame.id,
+					rows: subscription.initial,
+					version: subscription.version
+				});
+			}
 		} catch (error) {
 			send({
 				type: 'error',

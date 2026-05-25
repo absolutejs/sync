@@ -197,12 +197,17 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 	let closed = false;
 	let attempt = 0;
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	// Highest change-feed version applied; sent as `since` to resume on reconnect.
+	let appliedVersion = 0;
 
 	const applyFrame = (frame: ServerFrame<Row>) => {
 		if (frame.type === 'snapshot') {
 			confirmed.clear();
 			for (const row of frame.rows) {
 				confirmed.set(key(row), row);
+			}
+			if (frame.version !== undefined) {
+				appliedVersion = frame.version;
 			}
 			recompute({ status: 'ready', error: undefined });
 			reconcileSettled();
@@ -215,6 +220,9 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 			}
 			for (const row of frame.changed) {
 				confirmed.set(key(row), row);
+			}
+			if (frame.version !== undefined) {
+				appliedVersion = Math.max(appliedVersion, frame.version);
 			}
 			recompute();
 			reconcileSettled();
@@ -283,7 +291,9 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 					type: 'subscribe',
 					id: SUBSCRIPTION_ID,
 					collection: options.collection,
-					params: options.params
+					params: options.params,
+					// Resume from what we've applied (catch-up instead of snapshot).
+					since: appliedVersion > 0 ? appliedVersion : undefined
 				})
 			);
 			// Retry mutations that failed/queued while offline.

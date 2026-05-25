@@ -182,6 +182,8 @@ export const createSyncCollection = <T>(
 	let closed = false;
 	let attempt = 0;
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	// Highest change-feed version applied; sent as `since` to resume on reconnect.
+	let appliedVersion = 0;
 
 	const persist = () => {
 		void options.storage?.save(
@@ -211,6 +213,9 @@ export const createSyncCollection = <T>(
 			for (const row of frame.rows) {
 				confirmed.set(key(row), row);
 			}
+			if (frame.version !== undefined) {
+				appliedVersion = frame.version;
+			}
 			recompute({ status: 'ready', error: undefined });
 		} else if (frame.type === 'diff') {
 			for (const row of frame.removed) {
@@ -221,6 +226,9 @@ export const createSyncCollection = <T>(
 			}
 			for (const row of frame.changed) {
 				confirmed.set(key(row), row);
+			}
+			if (frame.version !== undefined) {
+				appliedVersion = Math.max(appliedVersion, frame.version);
 			}
 			recompute();
 		} else if (frame.type === 'error') {
@@ -272,7 +280,9 @@ export const createSyncCollection = <T>(
 					type: 'subscribe',
 					id: SUBSCRIPTION_ID,
 					collection: options.collection,
-					params: options.params
+					params: options.params,
+					// Resume from what we've applied (catch-up instead of snapshot).
+					since: appliedVersion > 0 ? appliedVersion : undefined
 				})
 			);
 			// Replay anything still pending across the (re)connect.
