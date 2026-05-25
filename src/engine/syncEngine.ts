@@ -46,6 +46,16 @@ export type SyncEngine = {
 		args: SubscribeArgs<T, P, Ctx>
 	) => Promise<Subscription<T>>;
 	/**
+	 * One-shot read: authorize and return a collection's current rows without
+	 * subscribing. Powers an Eden-typed HTTP hydrate route (and SSR). Rejects
+	 * with {@link UnauthorizedError} on deny.
+	 */
+	hydrate: (
+		collection: string,
+		params: unknown,
+		ctx: unknown
+	) => Promise<unknown[]>;
+	/**
 	 * Feed a committed change to `table` into the engine, fanning the resulting
 	 * diff to every live subscription of every collection that reads that table.
 	 * Call after a mutation, or wire a {@link ChangeSource} via `connectSource`.
@@ -223,6 +233,24 @@ export const createSyncEngine = (): SyncEngine => {
 					set.delete(subscription);
 				}
 			};
+		},
+
+		hydrate: async (collection, params, ctx) => {
+			const definition = registry.get(collection) as
+				| CollectionDefinition<unknown, unknown, unknown>
+				| undefined;
+			if (definition === undefined) {
+				throw new Error(`Unknown collection "${collection}"`);
+			}
+			if (definition.authorize !== undefined) {
+				const allowed = await definition.authorize(params, ctx);
+				if (!allowed) {
+					throw new UnauthorizedError(
+						`hydrate collection "${collection}"`
+					);
+				}
+			}
+			return [...(await definition.hydrate(params, ctx))];
 		},
 
 		applyChange: (table, change) =>

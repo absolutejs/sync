@@ -85,6 +85,7 @@
 		}
 	},
 	"devDependencies": {
+		"@elysiajs/eden": "^1.4.9",
 		"@types/bun": "latest",
 		"drizzle-orm": "^0.45.2",
 		"elysia": "latest",

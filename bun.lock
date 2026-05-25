@@ -5,6 +5,7 @@
     "": {
       "name": "@absolutejs/live",
       "devDependencies": {
+        "@elysiajs/eden": "^1.4.9",
         "@types/bun": "latest",
         "drizzle-orm": "^0.45.2",
         "elysia": "latest",
@@ -12,15 +13,19 @@
         "typescript": "latest",
       },
       "peerDependencies": {
+        "drizzle-orm": ">= 0.44.0",
         "elysia": ">= 1.4.26",
       },
       "optionalPeers": [
+        "drizzle-orm",
         "elysia",
       ],
     },
   },
   "packages": {
     "@borewit/text-codec": ["@borewit/text-codec@0.2.2", "", {}, "sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ=="],
+
+    "@elysiajs/eden": ["@elysiajs/eden@1.4.9", "", { "peerDependencies": { "elysia": ">=1.4.19" } }, "sha512-3CKVD4ycVjB8nCNssfmhnUuq3SzSHkUES3v5PNCFr9LxIrx39/HVRAZ8z2sLxrFqzUs48dCBZaxoZzJ5UUVHDA=="],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.49", "", {}, "sha512-brySQQs7Jtn0joV8Xh9ZV/hZb9Ozb0pmazDIASBkYKCjXrXU3mpcFahmK/z4YDhGkQvP9mWJbVyahdtU5wQA+A=="],
 
