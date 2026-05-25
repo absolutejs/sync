@@ -1,12 +1,16 @@
 import type { CollectionContext, CollectionDefinition } from './collection';
 import { createMaterializedView, isEmptyViewDiff } from './materializedView';
 import type { MaterializedView } from './materializedView';
+import type { MutationDefinition } from './mutation';
 import type { RowChange, RowKey, ViewDiff } from './types';
 
-/** Thrown by {@link SyncEngine.subscribe} when `authorize` denies the caller. */
+/**
+ * Thrown when `authorize` denies a subscribe or a mutation. The message names
+ * the denied action; the message always starts with "Not authorized".
+ */
 export class UnauthorizedError extends Error {
-	constructor(collection: string) {
-		super(`Not authorized to subscribe to collection "${collection}"`);
+	constructor(subject: string) {
+		super(`Not authorized: ${subject}`);
 		this.name = 'UnauthorizedError';
 	}
 }
@@ -50,6 +54,21 @@ export type SyncEngine = {
 	applyChange: <T>(collection: string, change: RowChange<T>) => Promise<void>;
 	/** Active subscription count, optionally for one collection. */
 	subscriptionCount: (collection?: string) => number;
+	/** Register a mutation definition (see {@link defineMutation}). */
+	registerMutation: <Args, Ctx = CollectionContext, Result = unknown>(
+		mutation: MutationDefinition<Args, Ctx, Result>
+	) => void;
+	/**
+	 * Run a registered mutation: authorize, invoke its handler (which writes and
+	 * emits changes via `applyChange`), and resolve with the handler's result.
+	 * Rejects with {@link UnauthorizedError} on deny, or an error for an unknown
+	 * mutation / a handler throw. Drive this from the transport's mutate frame.
+	 */
+	runMutation: (
+		name: string,
+		args: unknown,
+		ctx: unknown
+	) => Promise<unknown>;
 };
 
 type ActiveSubscription = {
@@ -79,6 +98,7 @@ export const createSyncEngine = (): SyncEngine => {
 	// row/param/context types share one map (the public `register`/`subscribe`
 	// surface stays fully typed).
 	const registry = new Map<string, CollectionDefinition<any, any, any>>();
+	const mutations = new Map<string, MutationDefinition<any, any, any>>();
 	const active = new Map<string, Set<ActiveSubscription>>();
 
 	const subsFor = (collection: string) => {
@@ -88,6 +108,36 @@ export const createSyncEngine = (): SyncEngine => {
 			active.set(collection, set);
 		}
 		return set;
+	};
+
+	const applyChange = async (
+		collection: string,
+		change: RowChange<unknown>
+	) => {
+		const set = active.get(collection);
+		if (set === undefined || set.size === 0) {
+			return;
+		}
+		for (const subscription of set) {
+			let diff;
+			if (subscription.incremental) {
+				try {
+					diff = subscription.view.apply(change);
+				} catch {
+					// The predicate couldn't decide this change (e.g. an operator
+					// the inferred matcher doesn't support) — degrade to a correct
+					// refetch rather than a wrong diff.
+					diff = subscription.view.reset(
+						await subscription.rehydrate()
+					);
+				}
+			} else {
+				diff = subscription.view.reset(await subscription.rehydrate());
+			}
+			if (!isEmptyViewDiff(diff)) {
+				subscription.onDiff(diff);
+			}
+		}
 	};
 
 	return {
@@ -106,7 +156,9 @@ export const createSyncEngine = (): SyncEngine => {
 			if (definition.authorize !== undefined) {
 				const allowed = await definition.authorize(params, ctx);
 				if (!allowed) {
-					throw new UnauthorizedError(collection);
+					throw new UnauthorizedError(
+						`subscribe to collection "${collection}"`
+					);
 				}
 			}
 
@@ -144,36 +196,8 @@ export const createSyncEngine = (): SyncEngine => {
 			};
 		},
 
-		applyChange: async (collection, change) => {
-			const set = active.get(collection);
-			if (set === undefined || set.size === 0) {
-				return;
-			}
-			for (const subscription of set) {
-				let diff;
-				if (subscription.incremental) {
-					try {
-						diff = subscription.view.apply(
-							change as RowChange<unknown>
-						);
-					} catch {
-						// The predicate couldn't decide this change (e.g. an
-						// operator the inferred matcher doesn't support) — degrade
-						// to a correct refetch rather than a wrong diff.
-						diff = subscription.view.reset(
-							await subscription.rehydrate()
-						);
-					}
-				} else {
-					diff = subscription.view.reset(
-						await subscription.rehydrate()
-					);
-				}
-				if (!isEmptyViewDiff(diff)) {
-					subscription.onDiff(diff);
-				}
-			}
-		},
+		applyChange: (collection, change) =>
+			applyChange(collection, change as RowChange<unknown>),
 
 		subscriptionCount: (collection) => {
 			if (collection !== undefined) {
@@ -184,6 +208,27 @@ export const createSyncEngine = (): SyncEngine => {
 				total += set.size;
 			}
 			return total;
+		},
+
+		registerMutation: (mutation) => {
+			mutations.set(mutation.name, mutation);
+		},
+
+		runMutation: async (name, args, ctx) => {
+			const mutation = mutations.get(name);
+			if (mutation === undefined) {
+				throw new Error(`Unknown mutation "${name}"`);
+			}
+			if (mutation.authorize !== undefined) {
+				const allowed = await mutation.authorize(args, ctx);
+				if (!allowed) {
+					throw new UnauthorizedError(`run mutation "${name}"`);
+				}
+			}
+			return mutation.handler(args, ctx, {
+				change: (collection, change) =>
+					applyChange(collection, change as RowChange<unknown>)
+			});
 		}
 	};
 };

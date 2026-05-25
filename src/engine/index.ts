@@ -20,6 +20,13 @@ export type { RowChange, RowKey, RowOp, ViewDiff } from './types';
 export { defineCollection } from './collection';
 export type { CollectionContext, CollectionDefinition } from './collection';
 
+export { defineMutation } from './mutation';
+export type {
+	MutationActions,
+	MutationDefinition,
+	MutationHandler
+} from './mutation';
+
 export { createSyncEngine, UnauthorizedError } from './syncEngine';
 export type { SubscribeArgs, Subscription, SyncEngine } from './syncEngine';
 

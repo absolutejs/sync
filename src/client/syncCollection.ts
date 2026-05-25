@@ -115,10 +115,11 @@ export const createSyncCollection = <T>(
 				rows.set(key(row), row);
 			}
 			commitRows();
-		} else {
+		} else if (frame.type === 'error') {
 			setState({ error: frame.message });
 			options.onError?.(frame.message);
 		}
+		// ack/reject are handled by the mutation layer.
 	};
 
 	const connect = () => {

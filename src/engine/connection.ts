@@ -8,13 +8,16 @@ import type { Subscription, SyncEngine } from './syncEngine';
 /** Client → server. */
 export type ClientFrame =
 	| { type: 'subscribe'; id: string; collection: string; params?: unknown }
-	| { type: 'unsubscribe'; id: string };
+	| { type: 'unsubscribe'; id: string }
+	| { type: 'mutate'; mutationId: number; name: string; args?: unknown };
 
 /** Server → client. */
 export type ServerFrame<T = unknown> =
 	| { type: 'snapshot'; id: string; rows: T[] }
 	| { type: 'diff'; id: string; added: T[]; removed: T[]; changed: T[] }
-	| { type: 'error'; id?: string; message: string };
+	| { type: 'error'; id?: string; message: string }
+	| { type: 'ack'; mutationId: number; result?: unknown }
+	| { type: 'reject'; mutationId: number; message: string };
 
 export type SyncConnectionOptions = {
 	engine: SyncEngine;
@@ -48,6 +51,9 @@ const parseFrame = (raw: unknown): ClientFrame | undefined => {
 		id?: unknown;
 		collection?: unknown;
 		params?: unknown;
+		mutationId?: unknown;
+		name?: unknown;
+		args?: unknown;
 	};
 	if (frame.type === 'subscribe') {
 		return typeof frame.id === 'string' &&
@@ -63,6 +69,17 @@ const parseFrame = (raw: unknown): ClientFrame | undefined => {
 	if (frame.type === 'unsubscribe') {
 		return typeof frame.id === 'string'
 			? { type: 'unsubscribe', id: frame.id }
+			: undefined;
+	}
+	if (frame.type === 'mutate') {
+		return typeof frame.mutationId === 'number' &&
+			typeof frame.name === 'string'
+			? {
+					type: 'mutate',
+					mutationId: frame.mutationId,
+					name: frame.name,
+					args: frame.args
+				}
 			: undefined;
 	}
 	return undefined;
@@ -88,6 +105,27 @@ export const createSyncConnection = ({
 		const frame = parseFrame(raw);
 		if (frame === undefined) {
 			send({ type: 'error', message: 'Malformed sync frame' });
+			return;
+		}
+
+		if (frame.type === 'mutate') {
+			try {
+				const result = await engine.runMutation(
+					frame.name,
+					frame.args,
+					ctx
+				);
+				// The mutation's diffs were sent during runMutation (over the same
+				// ordered socket), so the ack arrives after them.
+				send({ type: 'ack', mutationId: frame.mutationId, result });
+			} catch (error) {
+				send({
+					type: 'reject',
+					mutationId: frame.mutationId,
+					message:
+						error instanceof Error ? error.message : String(error)
+				});
+			}
 			return;
 		}
 
