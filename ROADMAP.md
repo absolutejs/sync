@@ -15,7 +15,7 @@ is achievable as a _library_ rather than a backend.
 | ElectricSQL          | Yes (Postgres logical replication)  | shapes, CRDT                        | Postgres only                          |
 | TanStack DB          | No (client lib)                     | differential-dataflow IVM           | Yes (BYO writes)                       |
 | LiveStore            | Client SQLite + event log           | event-sourced/materializers         | event-log                              |
-| **@absolutejs/sync** | **No — your DB via the ORM**        | **explicit → table → row (staged)** | **Yes, any DB Drizzle/Prisma support** |
+| **@absolutejs/sync** | **No — your DB via the ORM**        | **auto read-set + IVM, row-level**  | **Yes, any DB Drizzle/Prisma support** |
 
 We sit closest to TanStack DB (a library, BYO backend) but server-first on
 Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the existing
