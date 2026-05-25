@@ -98,9 +98,18 @@ DB (differential-dataflow IVM in a client store):
 ### Consistency & conflicts
 
 Server-authoritative with per-mutation ordering (a monotonic change-feed sequence);
-optimistic rollback on divergence. CRDT / event-ordering (LiveStore-style) stays
-optional and out of the MVP. No attempt at cross-table serializable transactions in
-the MVP — that's where owning storage wins and we don't.
+optimistic rollback on divergence. A mutation commits **atomically**: all of its
+changes share one version and reach each subscriber as a single net-merged diff
+(add-then-remove of a row cancels), so no client renders a torn intermediate state.
+
+Cross-table transactional consistency is not something we concede to engines that
+own the database — it's something we **inherit from yours**. Run a mutation's
+writes inside your DB's transaction; the engine buffers the change batch and emits
+it only on commit, so subscribers get an all-or-nothing update at the isolation
+level your database already enforces (serializable if you ask for it). Convex gives
+you this by owning the store; we give you the same guarantee on the
+Postgres/MySQL/SQLite you already run. Multi-writer offline merge (CRDT /
+event-ordering, LiveStore-style) is the next frontier to take — not a ceiling.
 
 ### Access control
 

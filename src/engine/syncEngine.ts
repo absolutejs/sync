@@ -133,18 +133,22 @@ type ActiveSubscription =
 			incremental: boolean;
 			/** Re-run the bound hydrate for the refetch fallback. */
 			rehydrate: () => Promise<Iterable<unknown>>;
+			/** Result-row identity (used to net a batch's diffs). */
+			key: (row: unknown) => RowKey;
 			onDiff: OnDiff;
 	  }
 	| {
 			kind: 'join';
 			collection: string;
 			join: JoinState;
+			key: (row: unknown) => RowKey;
 			onDiff: OnDiff;
 	  }
 	| {
 			kind: 'graph';
 			collection: string;
 			instance: GraphInstance<unknown>;
+			key: (row: unknown) => RowKey;
 			onDiff: OnDiff;
 	  };
 
@@ -225,64 +229,173 @@ export const createSyncEngine = (
 			? { op: 'delete', row: change.row }
 			: change;
 
-	const applyToSubscription = async (
+	const EMPTY_DIFF: ViewDiff<unknown> = {
+		added: [],
+		removed: [],
+		changed: []
+	};
+
+	/** Apply one change to a subscription's state and return its diff (no emit). */
+	const subscriptionDiff = async (
 		subscription: ActiveSubscription,
 		table: string,
-		change: RowChange<unknown>,
-		changeVersion: number
-	) => {
-		let diff: ViewDiff<unknown>;
+		change: RowChange<unknown>
+	): Promise<ViewDiff<unknown>> => {
 		if (subscription.kind === 'graph') {
-			diff = subscription.instance.applyChange(table, change);
-		} else if (subscription.kind === 'join') {
+			return subscription.instance.applyChange(table, change);
+		}
+		if (subscription.kind === 'join') {
 			const js = subscription.join;
 			if (table === js.leftTable) {
-				diff = js.op.applyLeft(sideChange(change, js.leftMatch));
-			} else if (table === js.rightTable) {
-				diff = js.op.applyRight(sideChange(change, js.rightMatch));
-			} else {
-				return;
+				return js.op.applyLeft(sideChange(change, js.leftMatch));
 			}
-		} else if (subscription.incremental) {
+			if (table === js.rightTable) {
+				return js.op.applyRight(sideChange(change, js.rightMatch));
+			}
+			return EMPTY_DIFF;
+		}
+		if (subscription.incremental) {
 			try {
-				diff = subscription.view.apply(change);
+				return subscription.view.apply(change);
 			} catch {
 				// The predicate couldn't decide this change (e.g. an operator the
 				// inferred matcher doesn't support) — degrade to a correct refetch
 				// rather than a wrong diff.
-				diff = subscription.view.reset(await subscription.rehydrate());
+				return subscription.view.reset(await subscription.rehydrate());
 			}
-		} else {
-			diff = subscription.view.reset(await subscription.rehydrate());
 		}
-		if (!isEmptyViewDiff(diff)) {
-			subscription.onDiff(diff, changeVersion);
+		return subscription.view.reset(await subscription.rehydrate());
+	};
+
+	/** Active subscriptions whose collection reads `table`. */
+	const subscriptionsForTable = function* (
+		table: string
+	): Generator<ActiveSubscription> {
+		const names = tableIndex.get(table);
+		if (names === undefined) {
+			return;
+		}
+		for (const name of names) {
+			const set = active.get(name);
+			if (set === undefined) {
+				continue;
+			}
+			yield* set;
 		}
 	};
 
-	const applyChange = async (table: string, change: RowChange<unknown>) => {
-		version += 1;
-		changeLog.push({ version, table, change });
+	/**
+	 * Net a batch's per-change diffs by key, relative to the pre-batch state, so a
+	 * mutation that touches the same row twice collapses to one coherent change:
+	 * add-then-remove cancels, add-then-update stays an add, remove-then-add
+	 * becomes a change.
+	 */
+	const mergeViewDiffs = (
+		diffs: ViewDiff<unknown>[],
+		key: (row: unknown) => RowKey
+	): ViewDiff<unknown> => {
+		type Net = { state: 'added' | 'changed' | 'removed'; row: unknown };
+		const net = new Map<RowKey, Net>();
+		for (const diff of diffs) {
+			for (const row of diff.removed) {
+				const previous = net.get(key(row));
+				if (previous?.state === 'added') {
+					net.delete(key(row));
+				} else {
+					net.set(key(row), { state: 'removed', row });
+				}
+			}
+			for (const row of diff.added) {
+				const previous = net.get(key(row));
+				net.set(key(row), {
+					state: previous?.state === 'removed' ? 'changed' : 'added',
+					row
+				});
+			}
+			for (const row of diff.changed) {
+				const previous = net.get(key(row));
+				net.set(key(row), {
+					state: previous?.state === 'added' ? 'added' : 'changed',
+					row
+				});
+			}
+		}
+		const added: unknown[] = [];
+		const changed: unknown[] = [];
+		const removed: unknown[] = [];
+		for (const { state, row } of net.values()) {
+			if (state === 'added') {
+				added.push(row);
+			} else if (state === 'changed') {
+				changed.push(row);
+			} else {
+				removed.push(row);
+			}
+		}
+		return { added, changed, removed };
+	};
+
+	const logChange = (changeVersion: number, entry: LoggedChange) => {
+		changeLog.push(entry);
 		if (changeLog.length > changeLogSize) {
 			changeLog.shift();
 		}
+	};
+
+	/** Apply a single committed change at its own version (CDC / direct writes). */
+	const applyChange = async (table: string, change: RowChange<unknown>) => {
+		version += 1;
 		const changeVersion = version;
-		const collectionNames = tableIndex.get(table);
-		if (collectionNames === undefined) {
+		logChange(changeVersion, { version: changeVersion, table, change });
+		for (const subscription of subscriptionsForTable(table)) {
+			const diff = await subscriptionDiff(subscription, table, change);
+			if (!isEmptyViewDiff(diff)) {
+				subscription.onDiff(diff, changeVersion);
+			}
+		}
+	};
+
+	/**
+	 * Apply a set of changes atomically: one version bump for the whole batch and
+	 * a single net-merged diff per affected subscription. Used by mutations so a
+	 * client never renders a torn intermediate state mid-mutation.
+	 */
+	const applyChangeBatch = async (
+		changes: { table: string; change: RowChange<unknown> }[]
+	) => {
+		if (changes.length === 0) {
 			return;
 		}
-		for (const name of collectionNames) {
-			const set = active.get(name);
-			if (set === undefined || set.size === 0) {
-				continue;
-			}
-			for (const subscription of set) {
-				await applyToSubscription(
+		version += 1;
+		const batchVersion = version;
+		const perSubscription = new Map<
+			ActiveSubscription,
+			ViewDiff<unknown>[]
+		>();
+		for (const { table, change } of changes) {
+			logChange(batchVersion, { version: batchVersion, table, change });
+			for (const subscription of subscriptionsForTable(table)) {
+				// Apply in order to keep operator state correct; collect to merge.
+				const diff = await subscriptionDiff(
 					subscription,
 					table,
-					change,
-					changeVersion
+					change
 				);
+				const list = perSubscription.get(subscription);
+				if (list === undefined) {
+					perSubscription.set(subscription, [diff]);
+				} else {
+					list.push(diff);
+				}
+			}
+		}
+		for (const [subscription, diffs] of perSubscription) {
+			const merged =
+				diffs.length === 1
+					? diffs[0]!
+					: mergeViewDiffs(diffs, subscription.key);
+			if (!isEmptyViewDiff(merged)) {
+				subscription.onDiff(merged, batchVersion);
 			}
 		}
 	};
@@ -382,6 +495,7 @@ export const createSyncEngine = (
 					? (row) => right.match!(row, params, ctx)
 					: undefined
 			},
+			key: definition.key as (row: unknown) => RowKey,
 			onDiff
 		};
 		set.add(subscription);
@@ -418,6 +532,7 @@ export const createSyncEngine = (
 			kind: 'graph',
 			collection,
 			instance,
+			key: definition.key as (row: unknown) => RowKey,
 			onDiff
 		};
 		set.add(subscription);
@@ -537,6 +652,7 @@ export const createSyncEngine = (
 				view,
 				incremental,
 				rehydrate,
+				key,
 				onDiff: typedOnDiff
 			};
 			subscribeSet.add(subscription);
@@ -619,10 +735,22 @@ export const createSyncEngine = (
 					throw new UnauthorizedError(`run mutation "${name}"`);
 				}
 			}
-			return mutation.handler(args, ctx, {
-				change: (collection, change) =>
-					applyChange(collection, change as RowChange<unknown>)
+			// Buffer the handler's changes, then commit them atomically: one
+			// version and one merged diff per subscription, so no client observes a
+			// torn intermediate state. A throwing handler commits nothing.
+			const buffered: { table: string; change: RowChange<unknown> }[] =
+				[];
+			const result = await mutation.handler(args, ctx, {
+				change: (collection, change) => {
+					buffered.push({
+						table: collection,
+						change: change as RowChange<unknown>
+					});
+					return Promise.resolve();
+				}
 			});
+			await applyChangeBatch(buffered);
+			return result;
 		}
 	};
 };
