@@ -1,4 +1,5 @@
 import { Elysia } from 'elysia';
+import { SYNC_OPEN_TOPIC } from './reactiveHub';
 import type { ReactiveEvent, ReactiveHub } from './reactiveHub';
 
 export type SyncRequestContext = {
@@ -63,7 +64,7 @@ export const sync = ({
 				};
 
 				send({
-					topic: '@absolutejs/sync:open',
+					topic: SYNC_OPEN_TOPIC,
 					at: Date.now(),
 					payload: { topics }
 				});

@@ -1,3 +1,10 @@
+/**
+ * Topic of the synthetic frame the SSE plugin emits when a stream opens (and
+ * re-opens after a reconnect). Clients use it to tell "the stream connected"
+ * apart from a real data-change event.
+ */
+export const SYNC_OPEN_TOPIC = '@absolutejs/sync:open';
+
 export type ReactiveEvent<TPayload = unknown> = {
 	topic: string;
 	at: number;
