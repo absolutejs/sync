@@ -41,10 +41,11 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   query results (predicate-matching IVM + collections + view syncer), a WebSocket
   diff transport (`syncSocket`), a client live-collection store
   (`createSyncCollection`), write-once predicate inference (Prisma), and
-  optimistic mutations with reconciliation + replay-on-reconnect. Remaining:
-  CDC change-source adapters and joins/aggregations (differential dataflow) — see
-  M5. Cross-reload offline persistence is a small follow-up (replay-on-reconnect
-  is in).
+  optimistic mutations with reconciliation + offline queue (replay-on-reconnect +
+  durable cross-reload storage). Plus Postgres CDC for out-of-band writes,
+  multi-table collections (joins via refetch), and incremental aggregations.
+  Remaining frontier: incremental equi-join (differential dataflow) and CDC for
+  other databases.
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 
@@ -105,8 +106,10 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
 - **M4 (done):** Tier 3 write path — server mutations (`defineMutation`/
   `runMutation`) + optimistic mutations, reconciliation (ack/reject), and
   replay-on-reconnect. (Cross-reload persistence: small follow-up.)
-- **M5:** CDC change-source adapters (Postgres first) for out-of-band writes;
-  differential-dataflow IVM for joins/aggregations.
+- **M5 (mostly done):** Postgres CDC change source (`LISTEN/NOTIFY`) via the
+  `ChangeSource` seam + `connectSource`; multi-table collections (joins correct via
+  refetch); incremental aggregations (`createAggregate`). Remaining: incremental
+  equi-join (the differential-dataflow frontier) and CDC for other DBs.
 
 ## Risks / open questions
 

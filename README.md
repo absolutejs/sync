@@ -13,22 +13,27 @@ database and ORM** (Drizzle _or_ Prisma, any DB they support).
   topics.
 - **`createLiveQuery`** — a client query that hydrates once, then refetches whenever
   one of its topics fires. Framework-agnostic (`get` + `subscribe`).
+- **Sync engine (`/engine`, `/postgres`)** — row-level reactive query results:
+  hydrate a collection once, then maintain it from `{ added, removed, changed }`
+  diffs over a WebSocket, with optimistic mutations, an offline queue, and access
+  control. CDC catches out-of-band writes; aggregations are incremental.
 - **`createWriteBehindCache`** — an in-memory hot cache with write-behind
   persistence, so a latency-sensitive hot path doesn't pay a round-trip to a remote
   store on every read/write.
 
-It is **not (yet) a full sync engine.** Convex, ElectricSQL, and Zero own or
-replicate the database (read-set tracking, IVM, a transaction log, client SQLite
-replicas). This package stays a _library_ over the store and transport you already
-have. Topic granularity is deliberately coarse (table/row) — it over-invalidates a
-little rather than tracking exact read sets, which is fine for the large majority of
-dashboards and stays DB-agnostic. Row-level reactive query results, optimistic
-mutations, and offline are the [roadmap](./ROADMAP.md) (Tier 3).
+Unlike Convex, ElectricSQL, or Zero, it does **not** own or replicate your database
+— it stays a _library_ over the store, ORM, and transport you already have. Tier 1/2
+keep granularity deliberately coarse (table/row topics, refetch on change); the Tier
+3 engine adds true row-level diffs and optimistic writes. Single-table filtered
+queries are matched incrementally; joins/aggregations are handled (joins via
+re-hydrate, aggregations incrementally), with incremental joins the one remaining
+differential-dataflow frontier.
 
 > Status: early (`0.0.1`). Tier 1 (hub, SSE plugin, browser subscriber,
-> write-behind cache) and Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`)
-> are in place. The ORM adapters ship as subpaths of this package, not a separate
-> one.
+> write-behind cache), Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`),
+> and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
+> mutations + offline queue, Postgres CDC, incremental aggregations) are in place.
+> Everything ships as subpaths of this one package.
 
 ## Install
 
@@ -129,6 +134,87 @@ What the adapters derive:
 The Prisma adapter parses Prisma's plain `where`/result objects, so it needs no
 `@prisma/client` import; the Drizzle adapter reads the schema's table objects.
 
+## Live collections — the sync engine (Tier 3)
+
+Row-level reactive results: the client holds a collection and the server pushes
+`{ added, removed, changed }` diffs over a WebSocket, instead of refetching. Define
+a collection once (the filter powers both the DB hydrate and the incremental
+matcher), expose it over `syncSocket`, and drive changes from mutations.
+
+```ts
+// server
+import { Elysia } from 'elysia';
+import { syncSocket } from '@absolutejs/sync';
+import { createSyncEngine, defineMutation } from '@absolutejs/sync/engine';
+import { prismaCollection } from '@absolutejs/sync/prisma';
+
+const engine = createSyncEngine();
+
+engine.register(
+	prismaCollection({
+		name: 'orders',
+		where: (params) => ({ userId: params.userId, status: 'open' }), // written once
+		find: (where) => prisma.order.findMany({ where }),
+		authorize: (params, ctx) => params.userId === ctx.userId // never leak rows
+	})
+);
+
+engine.registerMutation(
+	defineMutation({
+		name: 'createOrder',
+		handler: async (args, ctx, actions) => {
+			const order = await prisma.order.create({
+				data: { ...args, userId: ctx.userId }
+			});
+			await actions.change('orders', { op: 'insert', row: order });
+			return order;
+		}
+	})
+);
+
+new Elysia()
+	.use(
+		syncSocket({
+			engine,
+			resolveContext: (data) => ({ userId: data.userId })
+		})
+	)
+	.listen(3000);
+```
+
+```ts
+// browser
+import { createSyncCollection } from '@absolutejs/sync/client';
+
+const orders = createSyncCollection({
+	url: 'ws://localhost:3000/sync/ws',
+	collection: 'orders',
+	params: { userId }
+});
+
+orders.subscribe((state) => render(state.data)); // live: diff-driven, auto-reconnect
+
+// optimistic write — instant UI, reconciled (or rolled back) by the server
+await orders.mutate({
+	name: 'createOrder',
+	args: { total: 42 },
+	optimistic: (draft) => draft.set({ id: tempId, total: 42, status: 'open' })
+});
+```
+
+- **Incremental vs refetch.** A single-table filtered collection is matched
+  incrementally (only the changed rows move). Joins/aggregations and filters the
+  matcher can't evaluate fall back to a correct re-hydrate. `createAggregate`
+  (`/engine`) maintains `count`/`sum`/`avg`/`min`/`max` + `groupBy` incrementally.
+- **Out-of-band writes.** Writes that bypass mutations are caught by a
+  `ChangeSource` — e.g. `postgresChangeSource` (`/postgres`) over `LISTEN/NOTIFY`,
+  wired with `engine.connectSource(...)` and the trigger SQL from
+  `postgresNotifyTrigger`.
+- **Offline.** Pending mutations replay on reconnect; pass `storage`
+  (e.g. `localStorageMutationStorage`) to also survive a reload.
+- **Access control is mandatory.** Each collection's `authorize` gates subscribe and
+  its filter scopes rows, so a change to a row a caller can't see never reaches them.
+
 ## Write-behind cache — keep a remote store off your hot path
 
 ```ts
@@ -159,6 +245,7 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
 | `createReactiveHub()`                                                                      | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`). |
 | `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                       | Elysia plugin: SSE stream of hub events.                             |
+| `syncSocket({ engine, path?, resolveContext? })`                                           | Elysia WebSocket plugin for the sync engine.                         |
 | `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })` | In-memory cache + write-behind persistence.                          |
 
 ### `@absolutejs/sync/client`
@@ -168,16 +255,37 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 | `createSyncSubscriber({ topics, onEvent, url? })` | Browser SSE client.                                             |
 | `createLiveQuery({ topics, fetcher, ... })`       | Hydrate-once, refetch-on-event observable query store.          |
 | `jsonFetcher(url, init?)`                         | Default `fetcher`: GET + JSON parse, forwards the abort signal. |
+| `createSyncCollection({ url, collection, ... })`  | Live diff-driven collection store with optimistic `mutate`.     |
+| `localStorageMutationStorage(key)`                | `localStorage`-backed offline queue for `createSyncCollection`. |
+
+### `@absolutejs/sync/engine`
+
+| Export                                                                   | What it is                                                                                                          |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `createSyncEngine()`                                                     | Registry + view syncer: `register`, `subscribe`, `applyChange`, `connectSource`, `registerMutation`, `runMutation`. |
+| `defineCollection({ name, hydrate, key?, match?, authorize?, tables? })` | Define a syncable collection.                                                                                       |
+| `defineMutation({ name, handler, authorize? })`                          | Define a server mutation that emits changes.                                                                        |
+| `createAggregate({ key, groupBy?, value? })`                             | Incremental count/sum/avg/min/max by group.                                                                         |
+| `createMaterializedView({ key, match, equals? })`                        | The predicate-matching IVM primitive (`apply`/`reset` → diffs).                                                     |
+
+### `@absolutejs/sync/postgres`
+
+| Export                                                       | What it is                                                       |
+| ------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `postgresChangeSource({ listen, channel?, parse? })`         | CDC `ChangeSource` over `LISTEN/NOTIFY` (bring your own client). |
+| `postgresNotifyTrigger({ tables, channel?, functionName? })` | SQL to install the notify triggers (run once).                   |
 
 ### `@absolutejs/sync/drizzle` and `@absolutejs/sync/prisma`
 
-| Export                                                                | What it is                                         |
-| --------------------------------------------------------------------- | -------------------------------------------------- |
-| `deriveReadTopics(table\|model, where?, options?)`                    | Topics a read depends on (`{ topics, rowLevel }`). |
-| `publishChange(hub, table\|model, { keys?, op? })`                    | Publish the table topic + a row topic per key.     |
-| `publishRows(hub, table\|model, rows, { keyField?/keyColumn?, op? })` | Publish topics for returned/created records.       |
-| `publishWhere(hub, table\|model, where, { ..., op? })`                | Publish topics for an update/delete filter.        |
-| `tableTopic` / `keyTopic`                                             | The shared topic vocabulary both sides speak.      |
+| Export                                                                | What it is                                                 |
+| --------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `deriveReadTopics(table\|model, where?, options?)`                    | Topics a read depends on (`{ topics, rowLevel }`).         |
+| `publishChange(hub, table\|model, { keys?, op? })`                    | Publish the table topic + a row topic per key.             |
+| `publishRows(hub, table\|model, rows, { keyField?/keyColumn?, op? })` | Publish topics for returned/created records.               |
+| `publishWhere(hub, table\|model, where, { ..., op? })`                | Publish topics for an update/delete filter.                |
+| `tableTopic` / `keyTopic`                                             | The shared topic vocabulary both sides speak.              |
+| `prismaCollection({ name, where, find, ... })` (prisma)               | A sync-engine collection; one `where` → hydrate + matcher. |
+| `matchesWhere(where, row)` (prisma)                                   | Evaluate a Prisma `where` against a row (the matcher).     |
 
 ## License
 
