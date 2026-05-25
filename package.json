@@ -1,6 +1,6 @@
 {
 	"name": "@absolutejs/sync",
-	"version": "0.6.0",
+	"version": "0.7.0",
 	"description": "Lightweight reactive-push and write-behind-cache primitives for Elysia and the AbsoluteJS ecosystem — kill polling and keep a remote store off your hot path, without adopting a whole sync-engine backend.",
 	"repository": {
 		"type": "git",
@@ -17,6 +17,11 @@
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js",
 			"default": "./dist/index.js"
+		},
+		"./scheduled": {
+			"types": "./dist/scheduled.d.ts",
+			"import": "./dist/scheduled.js",
+			"default": "./dist/scheduled.js"
 		},
 		"./client": {
 			"types": "./dist/client/index.d.ts",

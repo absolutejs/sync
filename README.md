@@ -288,7 +288,7 @@ await orders.mutate({
   [`@absolutejs/queue`](https://github.com/absolutejs/queue).
 
     ```ts
-    import { scheduled } from '@absolutejs/sync';
+    import { scheduled } from '@absolutejs/sync/scheduled';
 
     engine.registerSchedule({
     	name: 'digest',
@@ -332,13 +332,13 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 
 ### `@absolutejs/sync`
 
-| Export                                                                                     | What it is                                                                                            |
-| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| `createReactiveHub()`                                                                      | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`).                                  |
-| `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                       | Elysia plugin: SSE stream of hub events.                                                              |
-| `syncSocket({ engine, path?, resolveContext? })`                                           | Elysia WebSocket plugin for the sync engine.                                                          |
-| `scheduled({ engine, prefix?, onError? })`                                                 | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). |
-| `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })` | In-memory cache + write-behind persistence.                                                           |
+| Export                                                                                     | What it is                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createReactiveHub()`                                                                      | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`).                                                                                             |
+| `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                       | Elysia plugin: SSE stream of hub events.                                                                                                                         |
+| `syncSocket({ engine, path?, resolveContext? })`                                           | Elysia WebSocket plugin for the sync engine.                                                                                                                     |
+| `scheduled({ engine, prefix?, onError? })` _(`/scheduled` subpath)_                        | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). Kept off the main entry so `syncSocket` needs no cron dep. |
+| `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })` | In-memory cache + write-behind persistence.                                                                                                                      |
 
 ### `@absolutejs/sync/client`
 

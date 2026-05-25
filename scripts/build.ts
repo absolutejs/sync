@@ -9,6 +9,7 @@ await rm(DIST, { force: true, recursive: true });
 const serverBuild = await Bun.build({
 	entrypoints: [
 		'src/index.ts',
+		'src/scheduled.ts',
 		'src/engine/index.ts',
 		'src/adapters/drizzle/index.ts',
 		'src/adapters/prisma/index.ts',
