@@ -339,15 +339,17 @@ mutate({
 
 ### `@absolutejs/sync/drizzle` and `@absolutejs/sync/prisma`
 
-| Export                                                                | What it is                                                 |
-| --------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `deriveReadTopics(table\|model, where?, options?)`                    | Topics a read depends on (`{ topics, rowLevel }`).         |
-| `publishChange(hub, table\|model, { keys?, op? })`                    | Publish the table topic + a row topic per key.             |
-| `publishRows(hub, table\|model, rows, { keyField?/keyColumn?, op? })` | Publish topics for returned/created records.               |
-| `publishWhere(hub, table\|model, where, { ..., op? })`                | Publish topics for an update/delete filter.                |
-| `tableTopic` / `keyTopic`                                             | The shared topic vocabulary both sides speak.              |
-| `prismaCollection({ name, where, find, ... })` (prisma)               | A sync-engine collection; one `where` → hydrate + matcher. |
-| `matchesWhere(where, row)` (prisma)                                   | Evaluate a Prisma `where` against a row (the matcher).     |
+| Export                                                                | What it is                                                  |
+| --------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `deriveReadTopics(table\|model, where?, options?)`                    | Topics a read depends on (`{ topics, rowLevel }`).          |
+| `publishChange(hub, table\|model, { keys?, op? })`                    | Publish the table topic + a row topic per key.              |
+| `publishRows(hub, table\|model, rows, { keyField?/keyColumn?, op? })` | Publish topics for returned/created records.                |
+| `publishWhere(hub, table\|model, where, { ..., op? })`                | Publish topics for an update/delete filter.                 |
+| `tableTopic` / `keyTopic`                                             | The shared topic vocabulary both sides speak.               |
+| `prismaCollection({ name, where, find, ... })` (prisma)               | A sync-engine collection; one `where` → hydrate + matcher.  |
+| `matchesWhere(where, row)` (prisma)                                   | Evaluate a Prisma `where` against a row (the matcher).      |
+| `drizzleCollection({ name, table, where, find, ... })` (drizzle)      | Same one-`where`→hydrate+matcher, for Drizzle.              |
+| `matchesDrizzleWhere(table, where, row)` (drizzle)                    | Evaluate a Drizzle SQL `where` against a row (the matcher). |
 
 ## License
 

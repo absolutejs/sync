@@ -40,7 +40,10 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
 - **Tier 3 — sync engine MVP — READ + WRITE PATHS DONE.** Row-level reactive
   query results (predicate-matching IVM + collections + view syncer), a WebSocket
   diff transport (`syncSocket`), a client live-collection store
-  (`createSyncCollection`), write-once predicate inference (Prisma), and
+  (`createSyncCollection`), write-once predicate inference for **both ORMs**
+  (`prismaCollection` / `drizzleCollection` derive the incremental matcher from
+  the same `where` that hydrates — one source of truth, refetch fallback when a
+  filter can't be evaluated in JS), and
   optimistic mutations with reconciliation + offline queue (replay-on-reconnect +
   durable cross-reload storage). Mutations **commit atomically** (one version, one
   net-merged diff per subscriber — no torn frames) and write through registered
@@ -138,7 +141,7 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
   example's dashboards.
 - **M3 (done):** Tier 3 read path — predicate-matching IVM + collections + view
   syncer + WebSocket diff transport + client live-collection store + write-once
-  predicate inference (Prisma). End-to-end verified.
+  predicate inference (Prisma + Drizzle). End-to-end verified.
 - **M4 (done):** Tier 3 write path — server mutations (`defineMutation`/
   `runMutation`) + optimistic mutations, reconciliation (ack/reject), and
   replay-on-reconnect. (Cross-reload persistence: small follow-up.)

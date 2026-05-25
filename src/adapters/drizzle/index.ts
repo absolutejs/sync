@@ -13,6 +13,13 @@
 
 export { keyTopic, tableTopic } from './topics';
 
+export { drizzleCollection } from './collection';
+export type { DrizzleCollectionOptions } from './collection';
+export {
+	matchesDrizzleWhere,
+	UnsupportedDrizzleFilterError
+} from './predicate';
+
 export { deriveReadTopics } from './read';
 export type { DeriveReadTopicsOptions, DerivedReadTopics } from './read';
 
