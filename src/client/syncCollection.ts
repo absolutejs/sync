@@ -66,6 +66,124 @@ export const localStorageMutationStorage = (key: string): MutationStorage => ({
 	}
 });
 
+/**
+ * A persisted snapshot of a collection's server-authoritative rows plus the
+ * change-feed `version` they were current as of — the cursor used to resume on
+ * the next connect (catch-up diff if the server's changelog still covers it, a
+ * fresh snapshot otherwise).
+ */
+export type CollectionCacheSnapshot<T> = {
+	rows: T[];
+	version: number;
+};
+
+/**
+ * Durable local cache of a collection's confirmed rows, so reads are instant on
+ * reload and available offline (local-first). Distinct from {@link
+ * MutationStorage}, which persists *unconfirmed writes*: the cache is the
+ * read side, the queue is the write side. On startup the cache hydrates the
+ * collection before the socket connects; the engine then resumes from the
+ * cached `version`.
+ */
+export type CollectionCache<T> = {
+	load: () =>
+		| CollectionCacheSnapshot<T>
+		| undefined
+		| Promise<CollectionCacheSnapshot<T> | undefined>;
+	save: (snapshot: CollectionCacheSnapshot<T>) => void | Promise<void>;
+	/** Drop the cached snapshot (optional). */
+	clear?: () => void | Promise<void>;
+};
+
+/**
+ * A {@link CollectionCache} backed by `localStorage` under `key`. Synchronous
+ * and capped (~5MB); fine for small collections. No-ops where `localStorage`
+ * is unavailable (e.g. SSR). For larger sets use {@link indexedDbCollectionCache}.
+ */
+export const localStorageCollectionCache = <T>(
+	key: string
+): CollectionCache<T> => ({
+	load: () => {
+		const raw = globalThis.localStorage?.getItem(key);
+		return raw
+			? (JSON.parse(raw) as CollectionCacheSnapshot<T>)
+			: undefined;
+	},
+	save: (snapshot) => {
+		globalThis.localStorage?.setItem(key, JSON.stringify(snapshot));
+	},
+	clear: () => {
+		globalThis.localStorage?.removeItem(key);
+	}
+});
+
+const openIndexedDb = (
+	databaseName: string,
+	storeName: string
+): Promise<IDBDatabase> =>
+	new Promise((resolve, reject) => {
+		const request = globalThis.indexedDB.open(databaseName, 1);
+		request.onupgradeneeded = () => {
+			request.result.createObjectStore(storeName);
+		};
+		request.onsuccess = () => resolve(request.result);
+		request.onerror = () => reject(request.error);
+	});
+
+/**
+ * A {@link CollectionCache} backed by IndexedDB — the durable, large-capacity
+ * local-first store. Asynchronous; one row per collection `key` in a shared
+ * object store. No-ops (resolving to `undefined`) where `indexedDB` is
+ * unavailable (e.g. SSR), so the collection falls back to the server snapshot.
+ */
+export const indexedDbCollectionCache = <T>({
+	key,
+	databaseName = 'absolutejs-sync',
+	storeName = 'collections'
+}: {
+	/** Distinct entry name within the store (e.g. the collection + params). */
+	key: string;
+	/** IndexedDB database name. Defaults to `absolutejs-sync`. */
+	databaseName?: string;
+	/** Object-store name. Defaults to `collections`. */
+	storeName?: string;
+}): CollectionCache<T> => {
+	let handle: Promise<IDBDatabase> | undefined;
+	const database = () => {
+		handle ??= openIndexedDb(databaseName, storeName);
+		return handle;
+	};
+	const withStore = async <R>(
+		mode: IDBTransactionMode,
+		run: (store: IDBObjectStore) => IDBRequest
+	): Promise<R | undefined> => {
+		if (globalThis.indexedDB === undefined) {
+			return undefined;
+		}
+		const db = await database();
+		return new Promise<R>((resolve, reject) => {
+			const request = run(
+				db.transaction(storeName, mode).objectStore(storeName)
+			);
+			request.onsuccess = () => resolve(request.result as R);
+			request.onerror = () => reject(request.error);
+		});
+	};
+
+	return {
+		load: () =>
+			withStore<CollectionCacheSnapshot<T>>('readonly', (store) =>
+				store.get(key)
+			),
+		save: async (snapshot) => {
+			await withStore('readwrite', (store) => store.put(snapshot, key));
+		},
+		clear: async () => {
+			await withStore('readwrite', (store) => store.delete(key));
+		}
+	};
+};
+
 export type SyncCollectionOptions<T> = {
 	/** WebSocket URL of the {@link syncSocket} endpoint (e.g. `ws://host/sync/ws`). */
 	url: string;
@@ -89,6 +207,14 @@ export type SyncCollectionOptions<T> = {
 	 * replays on connect. See {@link localStorageMutationStorage}.
 	 */
 	storage?: MutationStorage;
+	/**
+	 * Persist confirmed rows locally for instant reads on reload and offline
+	 * (local-first). Hydrated before the socket connects; the engine then
+	 * resumes from the cached version (catch-up diff, or a fresh snapshot if the
+	 * server's changelog no longer covers it). See {@link
+	 * localStorageCollectionCache} / {@link indexedDbCollectionCache}.
+	 */
+	cache?: CollectionCache<T>;
 	/** Called with each server error message. */
 	onError?: (error: unknown) => void;
 };
@@ -195,6 +321,24 @@ export const createSyncCollection = <T>(
 		);
 	};
 
+	// Coalesce a burst of confirmed changes (a frame of diffs) into one cache
+	// write per tick. Persists only the server-authoritative set — never the
+	// optimistic overlay (those live in the mutation queue instead).
+	let cacheScheduled = false;
+	const persistCache = () => {
+		if (options.cache === undefined || cacheScheduled) {
+			return;
+		}
+		cacheScheduled = true;
+		queueMicrotask(() => {
+			cacheScheduled = false;
+			void options.cache?.save({
+				rows: [...confirmed.values()],
+				version: appliedVersion
+			});
+		});
+	};
+
 	const settlePending = (mutationId: number) => {
 		const index = pending.findIndex(
 			(mutation) => mutation.mutationId === mutationId
@@ -216,6 +360,7 @@ export const createSyncCollection = <T>(
 			if (frame.version !== undefined) {
 				appliedVersion = frame.version;
 			}
+			persistCache();
 			recompute({ status: 'ready', error: undefined });
 		} else if (frame.type === 'diff') {
 			for (const row of frame.removed) {
@@ -230,7 +375,10 @@ export const createSyncCollection = <T>(
 			if (frame.version !== undefined) {
 				appliedVersion = Math.max(appliedVersion, frame.version);
 			}
-			recompute();
+			persistCache();
+			// A diff only arrives once subscribed — including the catch-up diff a
+			// resume replies with — so receiving one means we're live.
+			recompute({ status: 'ready', error: undefined });
 		} else if (frame.type === 'error') {
 			setState({ error: frame.message });
 			options.onError?.(frame.message);
@@ -310,11 +458,9 @@ export const createSyncCollection = <T>(
 		};
 	};
 
-	connect();
-
-	// Reload recovery: re-queue persisted unconfirmed mutations and replay them.
-	// They carry no optimistic effect or promise (the fresh snapshot is
-	// authoritative); resending produces the server diffs that bring them in.
+	// Reload recovery: re-queue persisted unconfirmed mutations so they replay on
+	// connect. They carry no optimistic effect or promise (the resumed/snapshot
+	// state is authoritative); resending produces the diffs that bring them in.
 	const hydratePersisted = async () => {
 		if (options.storage === undefined) {
 			return;
@@ -339,7 +485,45 @@ export const createSyncCollection = <T>(
 			}
 		}
 	};
-	void hydratePersisted();
+
+	// Local-first: load cached rows + version before connecting, so reads are
+	// instant on reload and available offline. The subscribe then resumes from
+	// the cached version — a catch-up diff if the server's changelog still
+	// covers it, else a fresh snapshot that replaces the stale cache.
+	const hydrateCache = async () => {
+		if (options.cache === undefined) {
+			return;
+		}
+		let snapshot: CollectionCacheSnapshot<T> | undefined;
+		try {
+			snapshot = await options.cache.load();
+		} catch {
+			return; // corrupt/unavailable cache: fall back to the server snapshot
+		}
+		// Don't clobber server data if a frame somehow already landed.
+		if (snapshot === undefined || appliedVersion > 0) {
+			return;
+		}
+		for (const row of snapshot.rows) {
+			confirmed.set(key(row), row);
+		}
+		appliedVersion = snapshot.version;
+		recompute(); // show cached rows immediately (status stays 'connecting')
+	};
+
+	if (options.cache === undefined) {
+		// No cache: preserve the original connect-then-hydrate ordering/timing.
+		connect();
+		void hydratePersisted();
+	} else {
+		// Cache: hydrate reads + queued writes first, then connect so the
+		// subscribe carries the cached resume version.
+		void (async () => {
+			await hydrateCache();
+			await hydratePersisted();
+			connect();
+		})();
+	}
 
 	return {
 		get: () => state,

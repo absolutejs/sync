@@ -221,8 +221,12 @@ await orders.mutate({
   `ChangeSource` — e.g. `postgresChangeSource` (`/postgres`) over `LISTEN/NOTIFY`,
   wired with `engine.connectSource(...)` and the trigger SQL from
   `postgresNotifyTrigger`.
-- **Offline.** Pending mutations replay on reconnect; pass `storage`
-  (e.g. `localStorageMutationStorage`) to also survive a reload.
+- **Offline & local-first.** Pending mutations replay on reconnect; pass `storage`
+  (e.g. `localStorageMutationStorage`) to let unconfirmed writes survive a reload.
+  Pass `cache` (`localStorageCollectionCache` or `indexedDbCollectionCache`) to
+  persist the confirmed rows too — reads are then instant on reload and available
+  offline, and the socket resumes from the cached version (a catch-up diff if the
+  server's changelog still covers it, a fresh snapshot otherwise).
 - **Access control is mandatory.** Each collection's `authorize` gates subscribe and
   its filter scopes rows, so a change to a row a caller can't see never reaches them.
 
@@ -269,7 +273,9 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 | `createSyncCollection({ url, collection, ... })`  | Live diff-driven collection store with optimistic `mutate`.                                                                                                        |
 | `createSyncClient({ url })`                       | One socket, many collections (`client.collection(...)`). Applies a multi-collection mutation's diffs as one **consistent frame** — no torn cross-collection paint. |
 | `createPresence({ url, room, state })`            | Join a presence room: see who's online / typing (`get` + `subscribe`) and publish your own state (`set`).                                                          |
-| `localStorageMutationStorage(key)`                | `localStorage`-backed offline queue for `createSyncCollection`.                                                                                                    |
+| `localStorageMutationStorage(key)`                | `localStorage`-backed offline write queue for `createSyncCollection`.                                                                                              |
+| `localStorageCollectionCache(key)`                | `localStorage`-backed local-first read cache: confirmed rows survive a reload, resume from the cached version.                                                     |
+| `indexedDbCollectionCache({ key, ... })`          | IndexedDB-backed local-first read cache — durable, large-capacity. Same resume semantics, async storage.                                                           |
 
 ### Framework bindings — `@absolutejs/sync/{react,vue,svelte,angular}`
 

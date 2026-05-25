@@ -8,9 +8,13 @@ export type { LiveQuery, LiveQueryOptions, LiveQueryState } from './liveQuery';
 
 export {
 	createSyncCollection,
+	indexedDbCollectionCache,
+	localStorageCollectionCache,
 	localStorageMutationStorage
 } from './syncCollection';
 export type {
+	CollectionCache,
+	CollectionCacheSnapshot,
 	MutateOptions,
 	MutationStorage,
 	OptimisticDraft,

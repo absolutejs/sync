@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createSyncCollection } from '../src/client/syncCollection';
+import type { SyncCollectionOptions } from '../src/client/syncCollection';
 import type { ServerFrame } from '../src/engine/connection';
 
 type Order = { id: number; status: string };
@@ -53,9 +54,7 @@ const lastSocket = () => {
 	return socket;
 };
 
-const make = (
-	extra: Partial<Parameters<typeof createSyncCollection>[0]> = {}
-) =>
+const make = (extra: Partial<SyncCollectionOptions<Order>> = {}) =>
 	createSyncCollection<Order>({
 		url: 'ws://localhost/sync/ws',
 		collection: 'orders',
