@@ -149,3 +149,58 @@ describe('createMaterializedView', () => {
 		expect(v.size()).toBe(1);
 	});
 });
+
+describe('MaterializedView.reset', () => {
+	test('diffs a fresh result set against what the view held', () => {
+		type Item = { id: number; label: string };
+		const v = createMaterializedView<Item>({
+			key: (row) => row.id,
+			match: () => true
+		});
+		v.hydrate([
+			{ id: 1, label: 'a' },
+			{ id: 2, label: 'b' },
+			{ id: 3, label: 'c' }
+		]);
+
+		// 1 unchanged, 2 dropped, 3 changed value, 4 appeared.
+		const changed3 = { id: 3, label: 'C' };
+		const diff = v.reset([
+			{ id: 1, label: 'a' },
+			changed3,
+			{ id: 4, label: 'd' }
+		]);
+
+		expect(diff.added).toEqual([{ id: 4, label: 'd' }]);
+		expect(diff.removed).toEqual([{ id: 2, label: 'b' }]);
+		expect(diff.changed).toEqual([changed3]);
+		expect(
+			v
+				.rows()
+				.map((row) => row.id)
+				.sort()
+		).toEqual([1, 3, 4]);
+	});
+
+	test('treats a shallow-equal row as unchanged', () => {
+		const v = view();
+		v.hydrate([open5(1)]);
+		const diff = v.reset([open5(1)]); // same values, new object
+
+		expect(diff.added).toEqual([]);
+		expect(diff.removed).toEqual([]);
+		expect(diff.changed).toEqual([]);
+	});
+
+	test('honours a custom equals', () => {
+		const v = createMaterializedView<{ id: number; v: number }>({
+			key: (row) => row.id,
+			match: () => true,
+			equals: (a, b) => a.id === b.id // ignore non-key fields
+		});
+		v.hydrate([{ id: 1, v: 1 }]);
+		const diff = v.reset([{ id: 1, v: 999 }]);
+
+		expect(diff.changed).toEqual([]); // equal by id, so not "changed"
+	});
+});

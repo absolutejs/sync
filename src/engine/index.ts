@@ -16,3 +16,9 @@ export type {
 	MaterializedViewOptions
 } from './materializedView';
 export type { RowChange, RowKey, RowOp, ViewDiff } from './types';
+
+export { defineCollection } from './collection';
+export type { CollectionContext, CollectionDefinition } from './collection';
+
+export { createSyncEngine, UnauthorizedError } from './syncEngine';
+export type { SubscribeArgs, Subscription, SyncEngine } from './syncEngine';

@@ -9,6 +9,11 @@ export type MaterializedViewOptions<T> = {
 	 * Drizzle/Prisma adapters can derive this from a query filter.)
 	 */
 	match: (row: T) => boolean;
+	/**
+	 * Equality used by {@link MaterializedView.reset} to detect changed rows.
+	 * Defaults to a shallow compare of own enumerable properties.
+	 */
+	equals?: (a: T, b: T) => boolean;
 };
 
 export type MaterializedView<T> = {
@@ -22,6 +27,12 @@ export type MaterializedView<T> = {
 	 * `changed` arrays mean the change did not affect this view.
 	 */
 	apply: (change: RowChange<T>) => ViewDiff<T>;
+	/**
+	 * Replace the result set with a fresh query result and return the diff versus
+	 * what the view previously held. Powers the refetch fallback for queries that
+	 * can't be matched incrementally.
+	 */
+	reset: (rows: Iterable<T>) => ViewDiff<T>;
 	/** Current result set, as an array. */
 	rows: () => T[];
 	/** Current result-set size. */
@@ -33,6 +44,30 @@ const emptyDiff = <T>(): ViewDiff<T> => ({
 	removed: [],
 	changed: []
 });
+
+const shallowEqual = (a: unknown, b: unknown): boolean => {
+	if (a === b) {
+		return true;
+	}
+	if (
+		typeof a !== 'object' ||
+		typeof b !== 'object' ||
+		a === null ||
+		b === null
+	) {
+		return false;
+	}
+	const aKeys = Object.keys(a);
+	const bKeys = Object.keys(b);
+	if (aKeys.length !== bKeys.length) {
+		return false;
+	}
+	return aKeys.every(
+		(key) =>
+			(a as Record<string, unknown>)[key] ===
+			(b as Record<string, unknown>)[key]
+	);
+};
 
 /** True when a diff carries no changes. */
 export const isEmptyViewDiff = <T>(diff: ViewDiff<T>): boolean =>
@@ -56,6 +91,7 @@ export const createMaterializedView = <T>(
 	options: MaterializedViewOptions<T>
 ): MaterializedView<T> => {
 	const { key, match } = options;
+	const equals = options.equals ?? shallowEqual;
 	const set = new Map<RowKey, T>();
 
 	return {
@@ -64,6 +100,32 @@ export const createMaterializedView = <T>(
 			for (const row of rows) {
 				set.set(key(row), row);
 			}
+		},
+		reset: (rows) => {
+			const next = new Map<RowKey, T>();
+			const added: T[] = [];
+			const changed: T[] = [];
+			for (const row of rows) {
+				const rowKey = key(row);
+				next.set(rowKey, row);
+				const previous = set.get(rowKey);
+				if (previous === undefined) {
+					added.push(row);
+				} else if (!equals(previous, row)) {
+					changed.push(row);
+				}
+			}
+			const removed: T[] = [];
+			for (const [rowKey, previous] of set) {
+				if (!next.has(rowKey)) {
+					removed.push(previous);
+				}
+			}
+			set.clear();
+			for (const [rowKey, row] of next) {
+				set.set(rowKey, row);
+			}
+			return { added, removed, changed };
 		},
 		apply: ({ op, row }) => {
 			const rowKey = key(row);
