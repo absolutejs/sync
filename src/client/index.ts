@@ -6,10 +6,15 @@ export type { SyncSubscriber, SyncSubscriberOptions } from './subscriber';
 export { createLiveQuery, jsonFetcher } from './liveQuery';
 export type { LiveQuery, LiveQueryOptions, LiveQueryState } from './liveQuery';
 
-export { createSyncCollection } from './syncCollection';
+export {
+	createSyncCollection,
+	localStorageMutationStorage
+} from './syncCollection';
 export type {
 	MutateOptions,
+	MutationStorage,
 	OptimisticDraft,
+	PendingMutationRecord,
 	SyncCollection,
 	SyncCollectionOptions,
 	SyncCollectionState,

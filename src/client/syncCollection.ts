@@ -35,6 +35,37 @@ export type MutateOptions<T> = {
 	optimistic?: (draft: OptimisticDraft<T>) => void;
 };
 
+/** A pending mutation persisted for replay across reloads. */
+export type PendingMutationRecord = {
+	mutationId: number;
+	name: string;
+	args: unknown;
+};
+
+/**
+ * Durable storage for the pending-mutation queue, so unconfirmed mutations
+ * survive a page reload (offline). The queue is replayed when the socket
+ * connects; records are dropped as they're acked.
+ */
+export type MutationStorage = {
+	load: () => PendingMutationRecord[] | Promise<PendingMutationRecord[]>;
+	save: (records: PendingMutationRecord[]) => void | Promise<void>;
+};
+
+/**
+ * A {@link MutationStorage} backed by `localStorage` under `key`. No-ops where
+ * `localStorage` is unavailable (e.g. SSR).
+ */
+export const localStorageMutationStorage = (key: string): MutationStorage => ({
+	load: () => {
+		const raw = globalThis.localStorage?.getItem(key);
+		return raw ? (JSON.parse(raw) as PendingMutationRecord[]) : [];
+	},
+	save: (records) => {
+		globalThis.localStorage?.setItem(key, JSON.stringify(records));
+	}
+});
+
 export type SyncCollectionOptions<T> = {
 	/** WebSocket URL of the {@link syncSocket} endpoint (e.g. `ws://host/sync/ws`). */
 	url: string;
@@ -53,6 +84,11 @@ export type SyncCollectionOptions<T> = {
 	reconnectMs?: number;
 	/** Maximum reconnect backoff (ms). Defaults to 10000. */
 	maxReconnectMs?: number;
+	/**
+	 * Persist the pending-mutation queue so it survives a reload (offline) and
+	 * replays on connect. See {@link localStorageMutationStorage}.
+	 */
+	storage?: MutationStorage;
 	/** Called with each server error message. */
 	onError?: (error: unknown) => void;
 };
@@ -147,6 +183,16 @@ export const createSyncCollection = <T>(
 	let attempt = 0;
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
+	const persist = () => {
+		void options.storage?.save(
+			pending.map((mutation) => ({
+				mutationId: mutation.mutationId,
+				name: mutation.name,
+				args: mutation.args
+			}))
+		);
+	};
+
 	const settlePending = (mutationId: number) => {
 		const index = pending.findIndex(
 			(mutation) => mutation.mutationId === mutationId
@@ -155,6 +201,7 @@ export const createSyncCollection = <T>(
 			return undefined;
 		}
 		const [mutation] = pending.splice(index, 1);
+		persist();
 		return mutation;
 	};
 
@@ -253,6 +300,35 @@ export const createSyncCollection = <T>(
 
 	connect();
 
+	// Reload recovery: re-queue persisted unconfirmed mutations and replay them.
+	// They carry no optimistic effect or promise (the fresh snapshot is
+	// authoritative); resending produces the server diffs that bring them in.
+	const hydratePersisted = async () => {
+		if (options.storage === undefined) {
+			return;
+		}
+		const records = await options.storage.load();
+		for (const record of records) {
+			if (pending.some((m) => m.mutationId === record.mutationId)) {
+				continue;
+			}
+			pending.push({
+				mutationId: record.mutationId,
+				name: record.name,
+				args: record.args,
+				resolve: () => {},
+				reject: () => {}
+			});
+			mutationSeq = Math.max(mutationSeq, record.mutationId);
+		}
+		if (connected) {
+			for (const mutation of pending) {
+				sendMutate(mutation);
+			}
+		}
+	};
+	void hydratePersisted();
+
 	return {
 		get: () => state,
 		subscribe: (listener) => {
@@ -272,6 +348,7 @@ export const createSyncCollection = <T>(
 					reject
 				};
 				pending.push(mutation);
+				persist();
 				recompute(); // apply the optimistic overlay immediately
 				sendMutate(mutation);
 			}),
@@ -296,6 +373,7 @@ export const createSyncCollection = <T>(
 			for (const mutation of pending.splice(0)) {
 				mutation.reject(new Error('sync collection closed'));
 			}
+			persist();
 			setState({ status: 'closed' });
 			listeners.clear();
 		}
