@@ -43,11 +43,13 @@ Bun/Elysia, integrated with the AbsoluteJS multi-framework SSR story and the exi
   (`createSyncCollection`), write-once predicate inference (Prisma), and
   optimistic mutations with reconciliation + offline queue (replay-on-reconnect +
   durable cross-reload storage). Plus Postgres CDC for out-of-band writes,
-  multi-table collections (joins via refetch), incremental aggregations, an
-  end-to-end typed client via Eden + TypeBox (`hydrateRoute`/`mutateRoute` +
-  `syncStore`), and a **version cursor** for resumable reconnects (catch-up diffs
-  from a bounded change log). Remaining frontier: incremental equi-join
-  (differential dataflow) and CDC for other databases.
+  incremental aggregations (`createAggregate`) and **incremental equi-joins**
+  (`createEquiJoin` + `defineJoinCollection` — a change to either side moves only
+  the affected pairs, with per-side access scoping), an end-to-end typed client via
+  Eden + TypeBox (`hydrateRoute`/`mutateRoute` + `syncStore`), and a **version
+  cursor** for resumable reconnects (catch-up diffs from a bounded change log).
+  Remaining frontier: multi-way joins / aggregations-over-joins (a general
+  differential-dataflow graph) and CDC for databases other than Postgres.
 
 ## Tier 3 MVP architecture (Bun + Elysia, BYO DB)
 
@@ -109,9 +111,11 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
   `runMutation`) + optimistic mutations, reconciliation (ack/reject), and
   replay-on-reconnect. (Cross-reload persistence: small follow-up.)
 - **M5 (mostly done):** Postgres CDC change source (`LISTEN/NOTIFY`) via the
-  `ChangeSource` seam + `connectSource`; multi-table collections (joins correct via
-  refetch); incremental aggregations (`createAggregate`). Remaining: incremental
-  equi-join (the differential-dataflow frontier) and CDC for other DBs.
+  `ChangeSource` seam + `connectSource`; incremental aggregations
+  (`createAggregate`); **incremental equi-joins** (`createEquiJoin` +
+  `defineJoinCollection`, with per-side access scoping). Remaining: a general
+  differential-dataflow graph (multi-way joins, aggregations-over-joins) and CDC
+  for databases other than Postgres.
 
 ## Risks / open questions
 

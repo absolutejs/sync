@@ -1,4 +1,10 @@
-import type { CollectionContext, CollectionDefinition } from './collection';
+import type {
+	CollectionContext,
+	CollectionDefinition,
+	JoinCollectionDefinition
+} from './collection';
+import { createEquiJoin } from './equiJoin';
+import type { EquiJoin } from './equiJoin';
 import { createMaterializedView, isEmptyViewDiff } from './materializedView';
 import type { MaterializedView } from './materializedView';
 import type { MutationDefinition } from './mutation';
@@ -49,6 +55,10 @@ export type SyncEngine = {
 	register: <T, P = void, Ctx = CollectionContext>(
 		collection: CollectionDefinition<T, P, Ctx>
 	) => void;
+	/** Register an incremental join collection (see {@link defineJoinCollection}). */
+	registerJoin: <L, R, Out, P = void, Ctx = CollectionContext>(
+		collection: JoinCollectionDefinition<L, R, Out, P, Ctx>
+	) => void;
 	/**
 	 * Open a live subscription: authorize, hydrate the initial set, and stream
 	 * diffs as changes arrive. Rejects with {@link UnauthorizedError} on deny.
@@ -98,15 +108,34 @@ export type SyncEngine = {
 	) => Promise<unknown>;
 };
 
-type ActiveSubscription = {
-	collection: string;
-	view: MaterializedView<unknown>;
-	/** Incremental (has a predicate) vs refetch fallback. */
-	incremental: boolean;
-	/** Re-run the bound hydrate for the refetch fallback. */
-	rehydrate: () => Promise<Iterable<unknown>>;
-	onDiff: (diff: ViewDiff<unknown>, version: number) => void;
+type OnDiff = (diff: ViewDiff<unknown>, version: number) => void;
+
+type JoinState = {
+	op: EquiJoin<unknown, unknown, unknown>;
+	leftTable: string;
+	rightTable: string;
+	/** Per-side filters (bound to params/ctx) — a failing change leaves the join. */
+	leftMatch?: (row: unknown) => boolean;
+	rightMatch?: (row: unknown) => boolean;
 };
+
+type ActiveSubscription =
+	| {
+			kind: 'view';
+			collection: string;
+			view: MaterializedView<unknown>;
+			/** Incremental (has a predicate) vs refetch fallback. */
+			incremental: boolean;
+			/** Re-run the bound hydrate for the refetch fallback. */
+			rehydrate: () => Promise<Iterable<unknown>>;
+			onDiff: OnDiff;
+	  }
+	| {
+			kind: 'join';
+			collection: string;
+			join: JoinState;
+			onDiff: OnDiff;
+	  };
 
 type LoggedChange = {
 	version: number;
@@ -141,7 +170,11 @@ export const createSyncEngine = (
 	// Heterogeneous registry: `any` here is what lets collections of different
 	// row/param/context types share one map (the public `register`/`subscribe`
 	// surface stays fully typed).
-	const registry = new Map<string, CollectionDefinition<any, any, any>>();
+	const registry = new Map<
+		string,
+		| CollectionDefinition<any, any, any>
+		| JoinCollectionDefinition<any, any, any, any, any>
+	>();
 	const mutations = new Map<string, MutationDefinition<any, any, any>>();
 	const active = new Map<string, Set<ActiveSubscription>>();
 	// Which collections read each table — so a table change fans to all of them.
@@ -162,13 +195,41 @@ export const createSyncEngine = (
 		return set;
 	};
 
+	const addTableIndex = (table: string, name: string) => {
+		let set = tableIndex.get(table);
+		if (set === undefined) {
+			set = new Set();
+			tableIndex.set(table, set);
+		}
+		set.add(name);
+	};
+
+	/** A side change that fails its filter becomes a leave (delete from the join). */
+	const sideChange = (
+		change: RowChange<unknown>,
+		match?: (row: unknown) => boolean
+	): RowChange<unknown> =>
+		change.op !== 'delete' && match !== undefined && !match(change.row)
+			? { op: 'delete', row: change.row }
+			: change;
+
 	const applyToSubscription = async (
 		subscription: ActiveSubscription,
+		table: string,
 		change: RowChange<unknown>,
 		changeVersion: number
 	) => {
-		let diff;
-		if (subscription.incremental) {
+		let diff: ViewDiff<unknown>;
+		if (subscription.kind === 'join') {
+			const js = subscription.join;
+			if (table === js.leftTable) {
+				diff = js.op.applyLeft(sideChange(change, js.leftMatch));
+			} else if (table === js.rightTable) {
+				diff = js.op.applyRight(sideChange(change, js.rightMatch));
+			} else {
+				return;
+			}
+		} else if (subscription.incremental) {
 			try {
 				diff = subscription.view.apply(change);
 			} catch {
@@ -202,7 +263,12 @@ export const createSyncEngine = (
 				continue;
 			}
 			for (const subscription of set) {
-				await applyToSubscription(subscription, change, changeVersion);
+				await applyToSubscription(
+					subscription,
+					table,
+					change,
+					changeVersion
+				);
 			}
 		}
 	};
@@ -252,27 +318,114 @@ export const createSyncEngine = (
 		return { added: [], removed, changed };
 	};
 
+	const subscribeJoin = async (
+		collection: string,
+		definition: JoinCollectionDefinition<
+			unknown,
+			unknown,
+			unknown,
+			unknown,
+			unknown
+		>,
+		params: unknown,
+		ctx: unknown,
+		onDiff: OnDiff,
+		set: Set<ActiveSubscription>
+	): Promise<Subscription<unknown>> => {
+		if (definition.authorize !== undefined) {
+			const allowed = await definition.authorize(params, ctx);
+			if (!allowed) {
+				throw new UnauthorizedError(
+					`subscribe to collection "${collection}"`
+				);
+			}
+		}
+		const { left, right } = definition;
+		const op = createEquiJoin<unknown, unknown, unknown>({
+			leftKey: left.key,
+			rightKey: right.key,
+			leftOn: left.on,
+			rightOn: right.on,
+			select: definition.select
+		});
+		op.hydrate(
+			[...(await left.hydrate(params, ctx))],
+			[...(await right.hydrate(params, ctx))]
+		);
+		const atVersion = version;
+
+		const subscription: ActiveSubscription = {
+			kind: 'join',
+			collection,
+			join: {
+				op,
+				leftTable: left.table,
+				rightTable: right.table,
+				leftMatch: left.match
+					? (row) => left.match!(row, params, ctx)
+					: undefined,
+				rightMatch: right.match
+					? (row) => right.match!(row, params, ctx)
+					: undefined
+			},
+			onDiff
+		};
+		set.add(subscription);
+
+		return {
+			initial: op.rows(),
+			version: atVersion,
+			unsubscribe: () => {
+				set.delete(subscription);
+			}
+		};
+	};
+
 	return {
 		register: (collection) => {
 			registry.set(collection.name, collection);
-			const tables = collection.tables ?? [collection.name];
-			for (const table of tables) {
-				let set = tableIndex.get(table);
-				if (set === undefined) {
-					set = new Set();
-					tableIndex.set(table, set);
-				}
-				set.add(collection.name);
+			for (const table of collection.tables ?? [collection.name]) {
+				addTableIndex(table, collection.name);
 			}
 		},
 
+		registerJoin: (collection) => {
+			registry.set(collection.name, collection);
+			addTableIndex(collection.left.table, collection.name);
+			addTableIndex(collection.right.table, collection.name);
+		},
+
 		subscribe: async ({ collection, params, ctx, onDiff, since }) => {
-			const definition = registry.get(collection) as
-				| CollectionDefinition<unknown, unknown, unknown>
-				| undefined;
-			if (definition === undefined) {
+			const registered = registry.get(collection);
+			if (registered === undefined) {
 				throw new Error(`Unknown collection "${collection}"`);
 			}
+
+			const typedOnDiff = onDiff as OnDiff;
+			const subscribeSet = subsFor(collection);
+
+			if ((registered as { kind?: string }).kind === 'join') {
+				const joined = await subscribeJoin(
+					collection,
+					registered as JoinCollectionDefinition<
+						unknown,
+						unknown,
+						unknown,
+						unknown,
+						unknown
+					>,
+					params,
+					ctx,
+					typedOnDiff,
+					subscribeSet
+				);
+				return joined as Subscription<never>;
+			}
+			const definition = registered as CollectionDefinition<
+				unknown,
+				unknown,
+				unknown
+			>;
 
 			if (definition.authorize !== undefined) {
 				const allowed = await definition.authorize(params, ctx);
@@ -307,20 +460,17 @@ export const createSyncEngine = (
 			const atVersion = version;
 
 			const subscription: ActiveSubscription = {
+				kind: 'view',
 				collection,
 				view,
 				incremental,
 				rehydrate,
-				onDiff: onDiff as (
-					diff: ViewDiff<unknown>,
-					version: number
-				) => void
+				onDiff: typedOnDiff
 			};
-			const set = subsFor(collection);
-			set.add(subscription);
+			subscribeSet.add(subscription);
 
 			const unsubscribe = () => {
-				set.delete(subscription);
+				subscribeSet.delete(subscription);
 			};
 
 			if (resuming) {

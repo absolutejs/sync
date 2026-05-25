@@ -28,8 +28,13 @@ export type {
 	ViewDiff
 } from './types';
 
-export { defineCollection } from './collection';
-export type { CollectionContext, CollectionDefinition } from './collection';
+export { defineCollection, defineJoinCollection } from './collection';
+export type {
+	CollectionContext,
+	CollectionDefinition,
+	JoinCollectionDefinition,
+	JoinSide
+} from './collection';
 
 export { defineMutation } from './mutation';
 export type {
