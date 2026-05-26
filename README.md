@@ -29,7 +29,8 @@ queries are matched incrementally; joins (inner and left), aggregations, and
 top-N ordering are maintained incrementally through a composable operator graph
 (`query(...).filter().join().leftJoin().groupBy().orderBy()`).
 
-> Status: early (`0.0.1`). Tier 1 (hub, SSE plugin, browser subscriber,
+> Status: **1.0** — public API frozen across all subpaths. See
+> [`CHANGELOG.md`](./CHANGELOG.md). Tier 1 (hub, SSE plugin, browser subscriber,
 > write-behind cache), Tier 2 (Drizzle + Prisma topic adapters, `createLiveQuery`),
 > and Tier 3 (sync engine: collections, WebSocket diff transport, optimistic
 > mutations + offline queue, a local-first client cache, declarative row-level
