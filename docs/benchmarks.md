@@ -96,6 +96,31 @@ The thesis: you get Convex/Zero-style live queries, optimistic writes, and
 conflict-free collaboration **without adopting a new backend** — it rides the
 database, ORM, and server you already run.
 
+## Propagation latency — write → remote-subscriber-receive
+
+Same workload, but the metric is the qualitative thing live-query engines
+exist for: *two* clients connect, one mutates, the other has a subscription
+on `counter` — measure the time from issuing the mutation to the *subscriber*
+observing the new value:
+
+| Backend          | Where             | p50      | p95      | p99    |
+| ---------------- | ----------------- | -------- | -------- | ------ |
+| @absolutejs/sync | local (WS + PG)   | **11.0** | **15.8** | 23.3   |
+| Convex           | cloud (HTTPS)     | 69.4     | 86.9     | 105.6  |
+
+Sync's propagation adds only ~1.5 ms over its own write-ack — fan-out is
+in-process; the subscriber's WS gets the diff frame on the same tick. Convex's
+propagation adds ~17 ms over its write-ack — the recomputed result has to
+make a second public-internet hop to push to the subscriber. That overhead is
+structural to a hosted-backend deployment, not a Convex flaw.
+
+Zero is unmeasured: v1.5 deprecates the old `definePermissions` model and is
+mid-transition to cookie-based auth — against a `zero-cache` with deployed
+permissions and `auth: undefined`, the materialized view stays at
+`resultType: 'unknown'` and never receives row data (mutations still ack +
+write to PG). Re-run is queued once the auth-transition lands. Script:
+[`propagation-zero.ts`](https://github.com/absolutejs/benchmarks/blob/main/sync/scripts/propagation-zero.ts).
+
 > To add measured competitor numbers, stand up Zero (`zero-cache` + a logical-
 > replication Postgres) and/or Convex (`npx convex dev` or the self-hosted image),
 > port the `bench/run.ts` workload to each, and run on the same hardware.
