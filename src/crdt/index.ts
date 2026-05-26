@@ -10,6 +10,13 @@
  * and have each client merge the broadcast state into its local edits.
  */
 
+export { orSet } from './orSet';
+export type { OrSetState } from './orSet';
+export { lwwMap } from './lwwMap';
+export type { LwwMapEntry, LwwMapState } from './lwwMap';
+export { createList, listOf, mergeListState } from './list';
+export type { ListCrdt, ListElement, ListState } from './list';
+
 const sumValues = (counts: Record<string, number>) =>
 	Object.values(counts).reduce((total, value) => total + value, 0);
 
