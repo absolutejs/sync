@@ -467,6 +467,23 @@ Conflict-free replicated data types — pure, **zero-dependency**, and isomorphi
 | `drizzleCollection({ name, table, where, find, ... })` (drizzle)      | Same one-`where`→hydrate+matcher, for Drizzle.              |
 | `matchesDrizzleWhere(table, where, row)` (drizzle)                    | Evaluate a Drizzle SQL `where` against a row (the matcher). |
 
+## Benchmarks
+
+Run `bun run bench/run.ts`. Highlights (Bun 1.3, full results + methodology in
+[`docs/benchmarks.md`](./docs/benchmarks.md)):
+
+- **Delta uploads scale flat.** One keystroke on a 10,000-char doc: a full-state
+  upload is ~877 KB; the delta is ~105 bytes — an **8,350×** reduction (and ~84×
+  even at 100 chars). The server keeps full state, so late joiners still hydrate
+  in one shot.
+- **~50,000 mutations/sec** (write + emit) locally; diff fan-out is linear in
+  subscriber count.
+- **Tombstone compaction** halves a delete-heavy document's stored state.
+
+`docs/benchmarks.md` also has an architectural comparison with Convex and Zero —
+the short version: live queries, optimistic writes, and conflict-free editing
+**without adopting a new backend** (it rides your own DB/ORM/server).
+
 ## License
 
 MIT
