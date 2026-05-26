@@ -146,6 +146,8 @@ export type CrdtMergeable<State> = {
 export type TextCrdtAdapter<State> = CrdtMergeable<State> & {
 	create: (replica: string, initial?: State) => CrdtText<State>;
 	textOf: (state: State) => string;
+	/** Optionally bound state growth (e.g. drop unreferenced tombstones). */
+	compact?: (state: State) => State;
 };
 
 /* ─── Collaborative text (RGA) — the first-party backend ─── */
@@ -177,11 +179,18 @@ const compare = (a: TextElement, b: TextElement) => {
 
 /** Flatten the sequence into document order (an iterative RGA pre-order walk). */
 const linearize = (elements: TextElement[]): TextElement[] => {
+	const present = new Set(elements.map((element) => element.id));
 	const children = new Map<string | null, TextElement[]>();
 	for (const element of elements) {
-		const list = children.get(element.after);
+		// An element whose anchor was compacted/GC'd away (or never seen) is an
+		// orphan — re-root it deterministically instead of dropping its content.
+		const anchor =
+			element.after !== null && !present.has(element.after)
+				? null
+				: element.after;
+		const list = children.get(anchor);
 		if (list === undefined) {
-			children.set(element.after, [element]);
+			children.set(anchor, [element]);
 		} else {
 			list.push(element);
 		}
@@ -224,6 +233,55 @@ export const mergeTextState = (a: TextState, b: TextState): TextState => {
 		);
 	}
 	return { elements: [...byId.values()] };
+};
+
+/** How many tombstones (deleted-but-retained elements) a state carries. Use it
+ * to decide when to {@link compact} (e.g. a server-side threshold). */
+export const tombstoneCount = (state: TextState): number =>
+	state.elements.reduce(
+		(total, element) => (element.deleted ? total + 1 : total),
+		0
+	);
+
+/**
+ * Drop tombstones that no remaining element anchors to (`after`), bounding state
+ * growth from deletions — the visible text is unchanged. Pure.
+ *
+ * Future inserts only ever anchor to *visible* elements, so a tombstone nothing
+ * currently references will never be referenced again; removing it is safe for
+ * the canonical (server-held) state. Run it server-side on the stored state
+ * (e.g. once `tombstoneCount` crosses a threshold); clients adopt the compacted
+ * state on the next broadcast. {@link textOf}/{@link mergeTextState} and the
+ * linearizer tolerate a stale client that briefly references a compacted
+ * tombstone (its insert is re-rooted deterministically, not lost).
+ */
+export const compact = (state: TextState): TextState => {
+	const byId = new Map(
+		state.elements.map((element) => [element.id, element])
+	);
+	// Keep a tombstone only if it lies on the `after`-chain from a live element
+	// (so positions are preserved); a deleted run that nothing live anchors
+	// through is dropped. Walk each live element's chain of tombstone anchors.
+	const keep = new Set<string>();
+	for (const element of state.elements) {
+		if (element.deleted) {
+			continue;
+		}
+		let anchor = element.after;
+		while (anchor !== null && !keep.has(anchor)) {
+			const target = byId.get(anchor);
+			if (target === undefined || !target.deleted) {
+				break;
+			}
+			keep.add(anchor);
+			anchor = target.after;
+		}
+	}
+	return {
+		elements: state.elements.filter(
+			(element) => !element.deleted || keep.has(element.id)
+		)
+	};
 };
 
 /** The RGA text CRDT — {@link CrdtText} plus direct positional edits. */
@@ -358,6 +416,7 @@ export const createTextCrdt = (
  * adapter from `sync-adapters` (e.g. `@absolutejs/sync-yjs`) for the same shape.
  */
 export const rgaText: TextCrdtAdapter<TextState> = {
+	compact,
 	create: createTextCrdt,
 	empty: () => ({ elements: [] }),
 	merge: mergeTextState,

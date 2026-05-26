@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import {
+	compact,
 	counter,
 	createTextCrdt,
 	lww,
 	mergeTextState,
 	rgaText,
 	textOf,
+	tombstoneCount,
 	type TextState
 } from '../src/crdt';
 
@@ -185,5 +187,58 @@ describe('text CRDT delta-state', () => {
 		a.delete(1, 1); // delete 'b'
 		b.merge(a.takeDelta());
 		expect(b.text()).toBe('ac');
+	});
+});
+
+describe('text CRDT compaction', () => {
+	test('drops unreferenced tombstones, preserving the visible text', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'hello world');
+		a.delete(5, 6); // delete the trailing " world"
+		const before = a.state();
+		expect(tombstoneCount(before)).toBe(6);
+
+		const after = compact(before);
+		expect(tombstoneCount(after)).toBe(0);
+		expect(textOf(after)).toBe('hello');
+	});
+
+	test('keeps tombstones that are still anchors for live text', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'ab');
+		a.delete(0, 1); // delete 'a' — but 'b' is anchored after it
+		const after = compact(a.state());
+		expect(textOf(after)).toBe('b');
+		expect(tombstoneCount(after)).toBe(1); // the anchor must stay
+	});
+
+	test('a compacted state still merges and converges', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'hello world');
+		a.delete(5, 6);
+		const compacted = compact(a.state());
+
+		const b = createTextCrdt('b', compacted);
+		b.insert(5, '!');
+		a.merge(b.state());
+		b.merge(compact(a.state()));
+		expect(a.text()).toBe(b.text());
+		expect(b.text()).toBe('hello!');
+	});
+
+	test('linearize re-roots an orphan whose anchor is gone (no content lost)', () => {
+		const orphan: TextState = {
+			elements: [
+				{
+					id: 'x:1',
+					replica: 'x',
+					clock: 1,
+					after: 'gone:9',
+					value: 'Z',
+					deleted: false
+				}
+			]
+		};
+		expect(textOf(orphan)).toBe('Z');
 	});
 });
