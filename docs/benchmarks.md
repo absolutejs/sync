@@ -47,24 +47,37 @@ Fan-out cost is linear in subscriber count, as expected for per-subscriber diffi
 ## How it compares to Convex, Zero, and TanStack DB
 
 **Measured head-to-head** lives in [`absolutejs/benchmarks`](https://github.com/absolutejs/benchmarks)
-under `sync/` — same workload (a shared counter), same harness, same hardware.
-Headline (Bun 1.3, WSL2 dev box):
+under `sync/` — same workload (a shared counter, incremented + acked), same
+harness, **same Postgres backing every local backend**, same hardware (Bun 1.3,
+WSL2 dev box):
 
-| Backend          | Where                           | round-trip p50 | round-trip p95 | writes/sec |
-| ---------------- | ------------------------------- | -------------- | -------------- | ---------- |
-| @absolutejs/sync | local (WS, loopback)            | **0.82 ms**    | **3.7 ms**     | **853**    |
-| TanStack DB      | local (REST + queryCollection)  | 2.53 ms        | 9.1 ms         | 271        |
-| Convex           | cloud, US East (HTTPS)          | 52.8 ms        | 66.2 ms        | 18         |
-| Zero             | local (zero-cache + PG) — scaffolded | _pending_  | —              | —          |
+| Backend          | Where                                      | p50 (ms) | p95 (ms) | writes/sec (seq) |
+| ---------------- | ------------------------------------------ | -------- | -------- | ---------------- |
+| @absolutejs/sync | local (WS) + Postgres                      | **9.5**  | **18.0** | **96**           |
+| TanStack DB      | local (REST + queryCollection) + Postgres  | 17.5     | 30.3     | 53               |
+| Convex           | cloud, US East (HTTPS)                     | 52.8     | 66.2     | 18               |
+| Zero             | local (zero-cache + push server + PG)      | 66.9     | 104.9    | 14               |
 
-Read the table with the conditions in mind: `@absolutejs/sync` is a **library**
-in your own server (writes never leave loopback); Convex is a **hosted cloud
-backend** (every write is a public-internet round-trip — most of the ~55 ms is
-network); TanStack DB is a **client store + sync coordinator** over your
-backend; Zero is the closest architectural rival (its own zero-cache + your
-Postgres). The point isn't "X is faster than Y" — it's the **deployment-model
-gap**: you get the live-query, optimistic-write, CRDT story without adopting a
-new backend.
+**Pipelined throughput** (same workload, K writes in flight):
+
+| Backend     | seq | c=4 | c=16 | c=64 | scaling (1→64) |
+| ----------- | --- | --- | ---- | ---- | -------------- |
+| **sync**    | 54  | 99  | 188  | **305** | **5.6×**    |
+| TanStack DB | 73  | 175 | 278  | 297  | 4.1×           |
+| Convex      | 18  | 34  | 42   | 43   | 2.4× (saturates) |
+| Zero        | 16  | 24  | 24   | 32   | 2.0× (saturates) |
+
+Read the table with the conditions in mind. `@absolutejs/sync` is a **library**
+in your own Elysia server (writes never leave loopback); TanStack DB is a
+**client store + sync coordinator** that POSTs each write over HTTP; Zero is the
+**closest architectural rival** but its v1.5 mutation path goes through two
+hops (client → zero-cache → push server → PG); Convex is a **hosted cloud
+backend** (every write is a public-internet round-trip — most of the ~53 ms is
+the WSL→US-East hop, not engine cost; a US-East-deployed app would close most
+of that gap — see [`bench-convex-us-east.yml`](https://github.com/absolutejs/benchmarks/blob/main/.github/workflows/bench-convex-us-east.yml)).
+The honest thesis isn't "X is N× faster" — it's that sync's single-process write
+path (WS → engine → PG, no extra hop) gives you live queries + optimistic writes
++ CRDTs **without adopting a new backend**.
 
 | Dimension             | @absolutejs/sync                                                              | Convex                        | Zero (Rocicorp)                      |
 | --------------------- | ----------------------------------------------------------------------------- | ----------------------------- | ------------------------------------ |
