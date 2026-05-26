@@ -44,16 +44,27 @@ Type N chars, delete the trailing half, then `compact`:
 
 Fan-out cost is linear in subscriber count, as expected for per-subscriber diffing.
 
-## How it compares to Convex and Zero
+## How it compares to Convex, Zero, and TanStack DB
 
-A fair _measured_ head-to-head is awkward: `@absolutejs/sync` is a **library over
-your own database**, while Convex is a **hosted reactive backend** and Zero is a
-**sync service** with its own cache process — different deployment models, so
-"requests/sec" isn't apples-to-apples. The numbers above are measured for sync;
-the table below is an **architectural** comparison from each project's public
-documentation (not measured competitor benchmarks — running their backends needs
-accounts/infra outside this repo; the methodology here is reproducible if you want
-to add them).
+**Measured head-to-head** lives in [`absolutejs/benchmarks`](https://github.com/absolutejs/benchmarks)
+under `sync/` — same workload (a shared counter), same harness, same hardware.
+Headline (Bun 1.3, WSL2 dev box):
+
+| Backend          | Where                           | round-trip p50 | round-trip p95 | writes/sec |
+| ---------------- | ------------------------------- | -------------- | -------------- | ---------- |
+| @absolutejs/sync | local (WS, loopback)            | **0.82 ms**    | **3.7 ms**     | **853**    |
+| TanStack DB      | local (REST + queryCollection)  | 2.53 ms        | 9.1 ms         | 271        |
+| Convex           | cloud, US East (HTTPS)          | 52.8 ms        | 66.2 ms        | 18         |
+| Zero             | local (zero-cache + PG) — scaffolded | _pending_  | —              | —          |
+
+Read the table with the conditions in mind: `@absolutejs/sync` is a **library**
+in your own server (writes never leave loopback); Convex is a **hosted cloud
+backend** (every write is a public-internet round-trip — most of the ~55 ms is
+network); TanStack DB is a **client store + sync coordinator** over your
+backend; Zero is the closest architectural rival (its own zero-cache + your
+Postgres). The point isn't "X is faster than Y" — it's the **deployment-model
+gap**: you get the live-query, optimistic-write, CRDT story without adopting a
+new backend.
 
 | Dimension             | @absolutejs/sync                                                              | Convex                        | Zero (Rocicorp)                      |
 | --------------------- | ----------------------------------------------------------------------------- | ----------------------------- | ------------------------------------ |
