@@ -89,8 +89,13 @@ export class SyncCollectionService implements OnDestroy {
 		}
 
 		const setText = (next: string) => controller?.setText(next);
+		const anchorAt = (index: number) => controller?.anchorAt(index) ?? null;
+		const indexOfAnchor = (anchor: string | null) =>
+			controller?.indexOfAnchor(anchor) ?? 0;
 
 		return {
+			anchorAt,
+			indexOfAnchor,
 			setText,
 			status: computed(() => status()),
 			text: computed(() => text())

@@ -46,6 +46,11 @@ export type CollaborativeText = {
 	subscribe: (run: (state: CollaborativeTextState) => void) => () => void;
 	/** Reconcile the local text to `next` and broadcast the merged state. */
 	setText: (next: string) => void;
+	/** Stable anchor for a caret at visible `index` — broadcast it (e.g. via
+	 * presence) for collaborative cursors that survive concurrent edits. */
+	anchorAt: (index: number) => string | null;
+	/** Current visible index of a caret anchored after `anchor`. */
+	indexOfAnchor: (anchor: string | null) => number;
 	close: () => void;
 };
 
@@ -122,6 +127,8 @@ export const createCollaborativeText = <State = TextState>(
 				name: mutation
 			});
 		},
+		anchorAt: (index) => crdt.anchorAt?.(index) ?? null,
+		indexOfAnchor: (anchor) => crdt.indexOfAnchor?.(anchor) ?? 0,
 		close() {
 			unsubscribe();
 			collection.close();

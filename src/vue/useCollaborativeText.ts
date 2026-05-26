@@ -43,6 +43,9 @@ export const useCollaborativeText = <State = TextState>(
 	onUnmounted(destroy);
 
 	const setText = (next: string) => controller?.setText(next);
+	const anchorAt = (index: number) => controller?.anchorAt(index) ?? null;
+	const indexOfAnchor = (anchor: string | null) =>
+		controller?.indexOfAnchor(anchor) ?? 0;
 
-	return { destroy, setText, status, text };
+	return { anchorAt, destroy, indexOfAnchor, setText, status, text };
 };

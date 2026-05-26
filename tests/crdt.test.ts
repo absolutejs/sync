@@ -242,3 +242,32 @@ describe('text CRDT compaction', () => {
 		expect(textOf(orphan)).toBe('Z');
 	});
 });
+
+describe('text CRDT cursor anchoring', () => {
+	test('a caret anchor survives a concurrent insert before it', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'hello');
+		const anchor = a.anchorAt(5); // caret after "hello"
+		expect(a.indexOfAnchor(anchor)).toBe(5);
+
+		a.insert(0, 'XX'); // a remote insert at the start → "XXhello"
+		// The caret is still after the same character, now at index 7 — not 5.
+		expect(a.indexOfAnchor(anchor)).toBe(7);
+	});
+
+	test('null anchor is the document start', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'abc');
+		expect(a.anchorAt(0)).toBeNull();
+		expect(a.indexOfAnchor(null)).toBe(0);
+	});
+
+	test('a deleted anchor resolves to the next visible position', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'abc');
+		const anchor = a.anchorAt(1); // caret after 'a'
+		expect(a.indexOfAnchor(anchor)).toBe(1);
+		a.delete(0, 1); // delete 'a'
+		expect(a.indexOfAnchor(anchor)).toBe(0);
+	});
+});

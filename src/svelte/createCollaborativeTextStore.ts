@@ -43,6 +43,9 @@ export const createCollaborativeTextStore = <State = TextState>(
 			};
 		},
 		setText: (next: string) => controller?.setText(next),
+		anchorAt: (index: number) => controller?.anchorAt(index) ?? null,
+		indexOfAnchor: (anchor: string | null) =>
+			controller?.indexOfAnchor(anchor) ?? 0,
 		destroy() {
 			controller?.close();
 			controller = null;

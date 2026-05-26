@@ -44,6 +44,21 @@ export const useCollaborativeText = <State = TextState>(
 		(next: string) => controllerRef.current?.setText(next),
 		[]
 	);
+	const anchorAt = useCallback(
+		(index: number) => controllerRef.current?.anchorAt(index) ?? null,
+		[]
+	);
+	const indexOfAnchor = useCallback(
+		(anchor: string | null) =>
+			controllerRef.current?.indexOfAnchor(anchor) ?? 0,
+		[]
+	);
 
-	return { setText, status: state.status, text: state.text };
+	return {
+		anchorAt,
+		indexOfAnchor,
+		setText,
+		status: state.status,
+		text: state.text
+	};
 };

@@ -130,6 +130,14 @@ export type CrdtText<State> = {
 	 * full state. Optional: backends without delta support fall back to `state()`.
 	 */
 	takeDelta?: () => State;
+	/**
+	 * The stable anchor for a caret at visible `index` — the id of the element the
+	 * caret sits after (`null` = document start). Broadcast this instead of a raw
+	 * index so a caret survives concurrent edits. Optional (text backends provide it).
+	 */
+	anchorAt?: (index: number) => string | null;
+	/** The current visible index of a caret anchored after `anchor` (see {@link anchorAt}). */
+	indexOfAnchor?: (anchor: string | null) => number;
 };
 
 /**
@@ -299,6 +307,10 @@ export type TextCrdt = CrdtText<TextState> & {
 	delete: (index: number, count: number) => void;
 	/** Locally-authored changes since the last call, then clears the buffer. */
 	takeDelta: () => TextState;
+	/** The stable element-id anchor for a caret at visible `index`. */
+	anchorAt: (index: number) => string | null;
+	/** The current visible index of a caret anchored after `anchor`. */
+	indexOfAnchor: (anchor: string | null) => number;
 };
 
 /**
@@ -413,6 +425,33 @@ export const createTextCrdt = (
 			pending.clear();
 
 			return delta;
+		},
+		anchorAt: (index) => {
+			if (index <= 0) {
+				return null;
+			}
+			const seen = visible();
+
+			return seen[Math.min(index, seen.length) - 1]?.id ?? null;
+		},
+		indexOfAnchor: (anchor) => {
+			if (anchor === null) {
+				return 0;
+			}
+			// Count visible elements up to (and including) the anchor — the caret
+			// renders right after it. A deleted/compacted anchor resolves to the
+			// next visible position, so a caret never lands on stale text.
+			let visibleCount = 0;
+			for (const element of linearize([...elements.values()])) {
+				if (!element.deleted) {
+					visibleCount += 1;
+				}
+				if (element.id === anchor) {
+					return visibleCount;
+				}
+			}
+
+			return visibleCount;
 		}
 	};
 };
