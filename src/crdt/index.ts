@@ -114,8 +114,15 @@ export type CrdtText<State> = {
 	setText: (next: string) => void;
 	/** Merge another replica's state in (e.g. a broadcast from the server). */
 	merge: (state: State) => void;
-	/** The serializable state to persist/broadcast. */
+	/** The full serializable state to persist/broadcast (for hydration). */
 	state: () => State;
+	/**
+	 * The locally-authored changes since the last call (a delta-state), then clears
+	 * the buffer. A delta merges exactly like a full state (union), so a client can
+	 * upload just its new ops — O(edit) instead of O(doc) — while the server keeps
+	 * full state. Optional: backends without delta support fall back to `state()`.
+	 */
+	takeDelta?: () => State;
 };
 
 /**
@@ -225,6 +232,8 @@ export type TextCrdt = CrdtText<TextState> & {
 	insert: (index: number, value: string) => void;
 	/** Tombstone `count` visible characters from `index`. */
 	delete: (index: number, count: number) => void;
+	/** Locally-authored changes since the last call, then clears the buffer. */
+	takeDelta: () => TextState;
 };
 
 /**
@@ -238,6 +247,10 @@ export const createTextCrdt = (
 	initial?: TextState
 ): TextCrdt => {
 	const elements = new Map<string, TextElement>();
+	// Elements this replica created or tombstoned since the last takeDelta — the
+	// delta to broadcast. Local edits add here; `merge` (remote) deliberately
+	// does not, so a client only ever re-broadcasts its own ops.
+	const pending = new Map<string, TextElement>();
 	let clock = 0;
 	if (initial !== undefined) {
 		for (const element of initial.elements) {
@@ -263,6 +276,7 @@ export const createTextCrdt = (
 				deleted: false
 			};
 			elements.set(element.id, element);
+			pending.set(element.id, element);
 			after = element.id;
 		}
 	};
@@ -272,7 +286,9 @@ export const createTextCrdt = (
 		for (let offset = 0; offset < count; offset += 1) {
 			const target = seen[index + offset];
 			if (target !== undefined) {
-				elements.set(target.id, { ...target, deleted: true });
+				const tombstoned = { ...target, deleted: true };
+				elements.set(target.id, tombstoned);
+				pending.set(target.id, tombstoned);
 			}
 		}
 	};
@@ -326,7 +342,13 @@ export const createTextCrdt = (
 				insert(prefix, inserted);
 			}
 		},
-		state: () => ({ elements: [...elements.values()] })
+		state: () => ({ elements: [...elements.values()] }),
+		takeDelta: () => {
+			const delta = { elements: [...pending.values()] };
+			pending.clear();
+
+			return delta;
+		}
 	};
 };
 

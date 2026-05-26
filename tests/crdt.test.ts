@@ -140,3 +140,50 @@ describe('rgaText adapter', () => {
 		expect(rgaText.textOf(merged)).toBe('hi');
 	});
 });
+
+describe('text CRDT delta-state', () => {
+	test('takeDelta returns the local ops, then clears the buffer', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'hi');
+		expect(a.takeDelta().elements).toHaveLength(2);
+		// Second call is empty — the buffer was cleared.
+		expect(a.takeDelta().elements).toHaveLength(0);
+	});
+
+	test('a delta carries only locally-authored ops, not merged-in ones', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'a');
+		a.takeDelta();
+		const b = createTextCrdt('b');
+		b.insert(0, 'b');
+		a.merge(b.state()); // remote op merged in
+		// merge must not refill the local delta buffer.
+		expect(a.takeDelta().elements).toHaveLength(0);
+	});
+
+	test('applying deltas converges to the same text as merging full states', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'hello');
+		const deltaA = a.takeDelta();
+		const b = createTextCrdt('b');
+		b.insert(0, 'world');
+		const deltaB = b.takeDelta();
+
+		const viaDeltas = createTextCrdt('s1');
+		viaDeltas.merge(deltaB);
+		viaDeltas.merge(deltaA);
+		const viaFull = createTextCrdt('s2');
+		viaFull.merge(a.state());
+		viaFull.merge(b.state());
+		expect(viaDeltas.text()).toBe(viaFull.text());
+	});
+
+	test('a delete delta propagates the tombstone', () => {
+		const a = createTextCrdt('a');
+		a.insert(0, 'abc');
+		const b = createTextCrdt('b', a.takeDelta());
+		a.delete(1, 1); // delete 'b'
+		b.merge(a.takeDelta());
+		expect(b.text()).toBe('ac');
+	});
+});

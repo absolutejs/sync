@@ -113,8 +113,12 @@ export const createCollaborativeText = <State = TextState>(
 			crdt.setText(next);
 			current = { status: current.status, text: next };
 			emit();
+			// Upload only this edit's ops when the backend supports delta-state
+			// (O(edit)); otherwise the full state. The server merges either the
+			// same way (union) and keeps full state for late-joiner hydration.
+			const payload = crdt.takeDelta ? crdt.takeDelta() : crdt.state();
 			void collection.mutate({
-				args: { [keyField]: options.id, [options.field]: crdt.state() },
+				args: { [keyField]: options.id, [options.field]: payload },
 				name: mutation
 			});
 		},
