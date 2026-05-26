@@ -55,7 +55,8 @@ WSL2 dev box):
 | ---------------- | ------------------------------------------ | -------- | -------- | ---------------- |
 | @absolutejs/sync | local (WS) + Postgres                      | **9.5**  | **18.0** | **96**           |
 | TanStack DB      | local (REST + queryCollection) + Postgres  | 17.5     | 30.3     | 53               |
-| Convex           | cloud, US East (HTTPS)                     | 52.8     | 66.2     | 18               |
+| Convex           | cloud, dev WSL → Convex                    | 52.8     | 66.2     | 18               |
+| Convex           | cloud, GH Actions runner → Convex          | 76.6     | 83.2     | 13               |
 | Zero             | local (zero-cache + push server + PG)      | 66.9     | 104.9    | 14               |
 
 **Pipelined throughput** (same workload, K writes in flight):
@@ -72,9 +73,11 @@ in your own Elysia server (writes never leave loopback); TanStack DB is a
 **client store + sync coordinator** that POSTs each write over HTTP; Zero is the
 **closest architectural rival** but its v1.5 mutation path goes through two
 hops (client → zero-cache → push server → PG); Convex is a **hosted cloud
-backend** (every write is a public-internet round-trip — most of the ~53 ms is
-the WSL→US-East hop, not engine cost; a US-East-deployed app would close most
-of that gap — see [`bench-convex-us-east.yml`](https://github.com/absolutejs/benchmarks/blob/main/.github/workflows/bench-convex-us-east.yml)).
+backend** (every write is a public-internet round-trip — we re-ran the same
+bench from a cloud VM via GitHub Actions to remove the consumer-ISP variable
+and p50 settled at **76.6 ms**, very tight distribution, confirming the floor
+is the network round-trip itself, not the engine — see
+[`bench-convex-us-east.yml`](https://github.com/absolutejs/benchmarks/blob/main/.github/workflows/bench-convex-us-east.yml)).
 The honest thesis isn't "X is N× faster" — it's that sync's single-process write
 path (WS → engine → PG, no extra hop) gives you live queries + optimistic writes
 + CRDTs **without adopting a new backend**.
