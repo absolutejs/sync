@@ -96,11 +96,25 @@ CRDTs **without adopting a new backend**. Not "5× faster" out of context
 | Conflict handling     | Optional CRDTs (RGA text, OR-Set, LWW-map, list; Yjs/Automerge/Loro adapters) | Transactional (server LWW)    | Server-authoritative                 |
 | Offline / local-first | Yes — local cache + offline queue + CRDT merge                                | Limited                       | Yes — local cache                    |
 | Per-keystroke payload | Delta-state O(edit)                                                           | n/a (function call)           | Mutation + query refresh             |
+| Typed API client      | Eden Treaty: `treaty<typeof app>` infers args + return from your routes       | Generated `api` codegen step  | ZQL builder                          |
+| OpenAPI / Scalar UI   | Auto-mounted at `/openapi` by `@absolutejs/absolute` in dev                   | Convex dashboard              | n/a                                  |
 | Lock-in               | None — it's a dependency                                                      | Adopt the Convex platform     | Adopt the zero-cache service         |
 
 The thesis: you get Convex/Zero-style live queries, optimistic writes, and
 conflict-free collaboration **without adopting a new backend** — it rides the
 database, ORM, and server you already run.
+
+**On end-to-end types** (the "Convex generates an `api`" question): sync gets
+the same DX via a different stack. Server side, `hydrateRoute(engine,
+collection, auth)` + `mutateRoute(engine, mutation, auth)` turn engine pieces
+into ordinary Elysia routes with TypeBox schemas. Client side,
+`treaty<typeof app>` from `@elysiajs/eden` gives a fully-typed client — no
+codegen step. `syncStore({ hydrate: () => api.x.get(), mutate: a =>
+api.y.post(a), diffs: {...} })` layers optimism + reconnect + offline on top of
+those Eden calls, with row + result types inferred end-to-end. Full spec at
+[`eden-typed-sync.md`](./eden-typed-sync.md). Equivalent DX to Convex's `api`
+codegen, different machinery — Eden + TypeBox do the typing where Convex has
+its own codegen step.
 
 ## Propagation latency — write → remote-subscriber-receive
 
