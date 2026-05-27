@@ -24,7 +24,11 @@ import {
 	isSerializationFailure,
 	RetriesExhaustedError
 } from './retry';
-import { makeSandboxedHandler } from './sandbox';
+import {
+	type HandlerMetricsHook,
+	type HandlerMetricsRecord,
+	makeSandboxedHandler
+} from './sandbox';
 import type {
 	PermissionsDefinition,
 	ReadRule,
@@ -496,6 +500,23 @@ export type SyncEngineOptions = {
 		max?: number;
 		ttlMs?: number;
 	};
+	/**
+	 * Per-call telemetry for `sandboxedHandler` mutations. When set, every
+	 * sandboxed call fires `onMetrics(record)` after completion with
+	 * `{ id, mutationName, durationMs, cpuMs, heapBytes, ok, errorName,
+	 * errorMessage, timestamp }`. Wire to a sync collection, your
+	 * observability backend, a Drizzle table, anything you want.
+	 *
+	 * Hook failures are swallowed (a misbehaving metrics sink must NOT
+	 * crash the caller's mutation). Adding the hook switches the runner
+	 * to `callable.callWithMetrics`, which is a small per-call cost
+	 * (~0.05 ms) — disable for hot-path mutations that don't need it.
+	 *
+	 * Off by default.
+	 *
+	 * @see {@link HandlerMetricsRecord}
+	 */
+	handlerMetrics?: HandlerMetricsHook;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -2089,7 +2110,13 @@ export const createSyncEngine = (
 					mutation.name,
 					makeSandboxedHandler(
 						mutation.sandboxedHandler,
-						mutation.sandbox
+						mutation.sandbox,
+						options.handlerMetrics === undefined
+							? undefined
+							: {
+									mutationName: mutation.name,
+									onMetrics: options.handlerMetrics
+								}
 					)
 				);
 			}

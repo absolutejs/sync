@@ -194,6 +194,150 @@ describe('sandboxed mutations', () => {
 		expect(result).toBe(42);
 	});
 
+	test('handlerMetrics hook fires on success with cpuMs + heapBytes', async () => {
+		const records: Array<Record<string, unknown>> = [];
+		const engine = createSyncEngine({
+			handlerMetrics: (record) => {
+				records.push(record);
+			}
+		});
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'instrumentedPure',
+				sandbox: { memoryLimit: 64, timeout: 2000 },
+				sandboxedHandler: `(args) => args.n + 1`
+			})
+		);
+		const result = await engine.runMutation(
+			'instrumentedPure',
+			{ n: 41 },
+			{}
+		);
+		expect(result).toBe(42);
+		expect(records.length).toBe(1);
+		const r = records[0] as {
+			id: string;
+			mutationName: string;
+			ok: boolean;
+			cpuMs: number;
+			heapBytes: number;
+			durationMs: number;
+			timestamp: number;
+		};
+		expect(r.mutationName).toBe('instrumentedPure');
+		expect(r.ok).toBe(true);
+		expect(typeof r.id).toBe('string');
+		expect(r.cpuMs).toBeGreaterThanOrEqual(0);
+		expect(r.heapBytes).toBeGreaterThan(0);
+		expect(r.durationMs).toBeGreaterThan(0);
+		expect(r.timestamp).toBeGreaterThan(0);
+	});
+
+	test('handlerMetrics hook fires on failure with errorName + errorMessage; original error still throws', async () => {
+		const records: Array<Record<string, unknown>> = [];
+		const engine = createSyncEngine({
+			handlerMetrics: (record) => {
+				records.push(record);
+			}
+		});
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'instrumentedFails',
+				sandbox: { timeout: 2000 },
+				sandboxedHandler: `() => { throw new Error('measured failure'); }`
+			})
+		);
+		const err = (await rejection(
+			engine.runMutation('instrumentedFails', {}, {})
+		)) as Error;
+		expect(err.message).toContain('measured failure');
+		expect(records.length).toBe(1);
+		const r = records[0] as {
+			ok: boolean;
+			errorName?: string;
+			errorMessage?: string;
+		};
+		expect(r.ok).toBe(false);
+		expect(r.errorName).toBe('Error');
+		expect(r.errorMessage).toContain('measured failure');
+	});
+
+	test('handlerMetrics hook crashes do not crash the mutation', async () => {
+		const engine = createSyncEngine({
+			handlerMetrics: () => {
+				throw new Error('observer exploded');
+			}
+		});
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'instrumentedResilient',
+				sandbox: { timeout: 2000 },
+				sandboxedHandler: `() => 7`
+			})
+		);
+		// Mutation must still return its real value even though the
+		// hook throws.
+		const result = await engine.runMutation(
+			'instrumentedResilient',
+			{},
+			{}
+		);
+		expect(result).toBe(7);
+	});
+
+	test('handlerMetrics async hook rejection is also swallowed', async () => {
+		const engine = createSyncEngine({
+			handlerMetrics: async () => {
+				throw new Error('async observer exploded');
+			}
+		});
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'instrumentedAsyncResilient',
+				sandbox: { timeout: 2000 },
+				sandboxedHandler: `() => 'still ok'`
+			})
+		);
+		const result = await engine.runMutation(
+			'instrumentedAsyncResilient',
+			{},
+			{}
+		);
+		expect(result).toBe('still ok');
+		// Give the async rejection a tick to fire so we know it was
+		// caught rather than turning into an unhandled rejection.
+		await new Promise((r) => setTimeout(r, 10));
+	});
+
+	test('handlerMetrics records one entry per call across many calls', async () => {
+		const records: Array<{ mutationName: string; ok: boolean }> = [];
+		const engine = createSyncEngine({
+			handlerMetrics: (record) => {
+				records.push(record);
+			}
+		});
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'instrumentedCounted',
+				sandbox: { memoryLimit: 128, timeout: 2000 },
+				sandboxedHandler: `(args) => args.n * 2`
+			})
+		);
+		for (let i = 0; i < 10; i++) {
+			await engine.runMutation('instrumentedCounted', { n: i }, {});
+		}
+		expect(records.length).toBe(10);
+		for (const r of records) {
+			expect(r.mutationName).toBe('instrumentedCounted');
+			expect(r.ok).toBe(true);
+		}
+	});
+
 	test("explicit `backend: 'worker'` matches the default (current behaviour)", async () => {
 		const engine = createSyncEngine();
 		engine.register(itemsCollection('items'));

@@ -49,6 +49,64 @@ import type { MutationActions } from './mutation';
 
 type IsolatedJscModule = typeof import('@absolutejs/isolated-jsc');
 
+/**
+ * Per-call metrics record emitted by `sandboxedHandler` when the engine
+ * is configured with {@link SyncEngineOptions.handlerMetrics}. One record
+ * per invocation, fired AFTER the call completes (success or failure).
+ *
+ * Use this for per-tenant dashboards ("which tenant is burning the most
+ * CPU?"), runtime alerting ("this handler is timing out repeatedly"),
+ * cost attribution, and post-mortem replay of slow / failed mutations.
+ *
+ * Sample wiring pattern — publish to a sync collection users can
+ * subscribe to like any other:
+ *
+ * ```ts
+ * const engine = createSyncEngine({
+ *   handlerMetrics: (record) => {
+ *     metricsCollection.insert(record);  // your own collection / sink
+ *   },
+ * });
+ * ```
+ */
+export type HandlerMetricsRecord = {
+	/** Globally-unique id for this call (random). Useful as a join key. */
+	id: string;
+	/** Name passed to `defineMutation`. */
+	mutationName: string;
+	/** Wall-clock duration from call entry to result resolution (ms). */
+	durationMs: number;
+	/**
+	 * CPU time spent inside the JSC sandbox (ms). Comes from
+	 * `Script.runWithMetrics` — does NOT include host-side message-passing
+	 * overhead on the Worker backend. Sub-millisecond runs round to 0.
+	 */
+	cpuMs: number;
+	/**
+	 * Heap size (bytes) measured immediately after the script returned.
+	 * Not the run's peak — a true peak needs continuous polling.
+	 */
+	heapBytes: number;
+	/** `true` if the handler returned normally; `false` if it threw. */
+	ok: boolean;
+	/** Error name (`TimeoutError`, `MemoryLimitError`, `Error`, …) on failure. */
+	errorName?: string;
+	/** Error message on failure. */
+	errorMessage?: string;
+	/** `Date.now()` at the moment the call ended. */
+	timestamp: number;
+};
+
+/**
+ * Per-call hook invoked once each `sandboxedHandler` invocation finishes
+ * (success or failure). Synchronous return is the common case; an async
+ * return is awaited but its rejection is swallowed (a metrics hook that
+ * crashes must NOT also crash the caller's mutation path).
+ */
+export type HandlerMetricsHook = (
+	record: HandlerMetricsRecord
+) => void | Promise<void>;
+
 /** Per-mutation sandbox configuration. */
 export type SandboxConfig = {
 	/** Heap memory cap (MB). Default 32. */
@@ -201,7 +259,20 @@ const compile = async (
  */
 export const makeSandboxedHandler = (
 	source: string,
-	config: SandboxConfig = {}
+	config: SandboxConfig = {},
+	/**
+	 * Optional hook + tagging. When `onMetrics` is supplied, every call
+	 * uses `callable.callWithMetrics` (slightly costlier) and fires the
+	 * hook on completion. Without it, the cheap `callable.call` path is
+	 * used and nothing changes vs the pre-1.7.6 contract.
+	 *
+	 * `mutationName` only matters when `onMetrics` is set — it's the
+	 * `mutationName` field of the emitted record.
+	 */
+	metricsHook?: {
+		mutationName: string;
+		onMetrics: HandlerMetricsHook;
+	}
 ): ((
 	args: unknown,
 	ctx: unknown,
@@ -223,12 +294,76 @@ export const makeSandboxedHandler = (
 		const compiled = await getCompiled();
 		const callId = compiled.nextCallId++;
 		compiled.callMap.set(callId, actions);
+
+		// Fast path: no metrics hook → no per-call overhead.
+		if (metricsHook === undefined) {
+			try {
+				return await compiled.callable.call([callId, args, ctx], {
+					timeout: compiled.timeoutMs
+				});
+			} finally {
+				compiled.callMap.delete(callId);
+			}
+		}
+
+		// Metrics path: switch to `callWithMetrics` so we get cpuMs +
+		// heapBytes from the isolate side. Errors get a synthesized
+		// record before re-throwing so the caller still sees the error.
+		const startedAt = performance.now();
+		const id = makeRandomId();
 		try {
-			return await compiled.callable.call([callId, args, ctx], {
-				timeout: compiled.timeoutMs
+			const { result, metrics } = await compiled.callable.callWithMetrics(
+				[callId, args, ctx],
+				{ timeout: compiled.timeoutMs }
+			);
+			fireMetrics(metricsHook.onMetrics, {
+				cpuMs: metrics.cpuMs,
+				durationMs: performance.now() - startedAt,
+				heapBytes: metrics.heapBytes,
+				id,
+				mutationName: metricsHook.mutationName,
+				ok: true,
+				timestamp: Date.now()
 			});
+			return result;
+		} catch (error) {
+			fireMetrics(metricsHook.onMetrics, {
+				cpuMs: 0,
+				durationMs: performance.now() - startedAt,
+				errorMessage:
+					error instanceof Error ? error.message : String(error),
+				errorName: error instanceof Error ? error.name : 'Error',
+				heapBytes: 0,
+				id,
+				mutationName: metricsHook.mutationName,
+				ok: false,
+				timestamp: Date.now()
+			});
+			throw error;
 		} finally {
 			compiled.callMap.delete(callId);
 		}
 	};
+};
+
+const makeRandomId = (): string =>
+	`hm_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+
+const fireMetrics = (
+	hook: HandlerMetricsHook,
+	record: HandlerMetricsRecord
+): void => {
+	let outcome: void | Promise<void>;
+	try {
+		outcome = hook(record);
+	} catch {
+		// Hook threw synchronously — swallow. The caller's mutation must
+		// not fail because the metrics sink failed.
+		return;
+	}
+	if (outcome instanceof Promise) {
+		outcome.catch(() => {
+			// Async rejection — same policy: swallow.
+		});
+	}
 };

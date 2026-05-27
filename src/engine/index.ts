@@ -115,7 +115,11 @@ export type {
 	TransactionRunner
 } from './mutation';
 
-export type { SandboxConfig } from './sandbox';
+export type {
+	HandlerMetricsHook,
+	HandlerMetricsRecord,
+	SandboxConfig
+} from './sandbox';
 
 export {
 	exponentialBackoff,

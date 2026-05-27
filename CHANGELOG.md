@@ -4,6 +4,43 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.6] — 2026-05-27
+
+### Added
+
+- **Per-call telemetry for `sandboxedHandler`.** New
+  `createSyncEngine({ handlerMetrics: (record) => void })` option fires
+  a `HandlerMetricsRecord` after every sandboxed-mutation invocation
+  (success or failure) with:
+
+  ```ts
+  type HandlerMetricsRecord = {
+    id: string;            // random per-call id
+    mutationName: string;
+    durationMs: number;    // wall-clock host-side
+    cpuMs: number;         // inside the JSC sandbox
+    heapBytes: number;     // measured right after the script returned
+    ok: boolean;
+    errorName?: string;    // present when ok === false
+    errorMessage?: string;
+    timestamp: number;     // Date.now() at call end
+  };
+  ```
+
+  Wire to anything: a sync collection (per-tenant dashboards), your
+  observability backend, a Drizzle table for cost attribution, or
+  stderr for spot-checks. The runner switches to
+  `callable.callWithMetrics` when the hook is set (~0.05 ms per call
+  cost — disable for hot-path mutations that don't need it). Without
+  the hook, the per-call hot path is unchanged.
+
+  Hook failures are swallowed by design: a misbehaving metrics sink
+  must NOT crash the caller's mutation.
+
+  Closes the "per-tenant observability is universally weak" gap
+  surfaced by the competitive deep dive — none of the peer sync
+  engines ship this primitive.
+
 ## [1.7.5] — 2026-05-27
 
 ### Changed (performance)
