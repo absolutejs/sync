@@ -4,6 +4,39 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.1.0] — 2026-05-27
+
+### Changed
+
+- **Reactive subscription fan-out is no longer O(N) in subscribers.** The
+  engine now memoises each reactive query's rerun per change batch, keyed by
+  `(collection, params, ctx)`. Subscribers sharing equivalent keys (e.g.
+  many tabs of the same view, many clients of the same anonymous query)
+  share a single rerun of the query body instead of each triggering their
+  own. Each subscription still diffs the shared result against its own
+  current state and receives its own per-sub frame.
+
+  Measured against the existing reactive-read bench (one writer mutates,
+  N subscribers receive — slowest-tail latency per write):
+
+  | subscribers | tail p50 before (1.0) | tail p50 after (1.1) | speedup     |
+  | ----------- | --------------------- | -------------------- | ----------- |
+  | 1           | 7.3 ms                | 11.3 ms              | ~same       |
+  | 10          | 28.2 ms               | 12.5 ms              | 2.3×        |
+  | 100         | 161.4 ms              | 27.6 ms              | **5.9×**    |
+  | 1,000       | 1,645.3 ms            | **81.2 ms**          | **20.3×**   |
+
+  At 1,000 subscribers the tail dropped from ~1.6 s to ~80 ms; p99 from
+  ~2,650 ms to ~93 ms (28×). The cost shape changed from linear O(N) to
+  near-constant in the number of subscribers — what's left is per-WS frame
+  write, the focus of the next pass.
+
+  Correctness: subscribers with different `ctx` references still get
+  independent reruns (a per-user query body can depend on `ctx.userId`).
+  The dedup key uses stable JSON when possible and falls back to per-object
+  identity for values JSON can't represent, so an exotic `ctx` never silently
+  shares results with a different one.
+
 ## [1.0.0] — 2026-05-26
 
 API freeze. The package has been in production-quality shape across the recent

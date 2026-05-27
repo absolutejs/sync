@@ -314,6 +314,12 @@ type ActiveSubscription =
 				readKeys: Set<string>;
 				rangeDeps: RangeDep[];
 			}>;
+			/**
+			 * Stable key over `(collection, params, ctx)`. Subscriptions sharing
+			 * the same key are equivalent on the read side, so a single rerun
+			 * per change batch can serve all of them (see `reactivePairs`).
+			 */
+			rerunKey: string;
 			/** Current result set, keyed (diffed against the next re-run). */
 			current: Map<RowKey, unknown>;
 			/** Full-table dependencies (from `db.all`). */
@@ -404,6 +410,59 @@ const shallowEqual = (a: unknown, b: unknown): boolean => {
 		)
 	);
 };
+
+/**
+ * Per-object stable identifier — paired with {@link stableSubKey} so two
+ * subscriptions that share the same `(collection, params, ctx)` get the same
+ * key and have their reactive rerun deduplicated within a change batch (the
+ * fan-out fix in {@link reactivePairs}). Falls back to an incrementing id
+ * stored on a WeakMap for values JSON can't represent (functions, classes,
+ * cyclic structures), so identity-equal ctxs still share a key while
+ * different-identity ones don't accidentally merge.
+ */
+const subKeyIds = new WeakMap<object, string>();
+let subKeyCounter = 0;
+const stableValueKey = (value: unknown): string => {
+	if (value === undefined) return 'u';
+	if (value === null) return 'n';
+	const tag = typeof value;
+	if (tag === 'string') return `s:${value as string}`;
+	if (tag === 'number' || tag === 'boolean' || tag === 'bigint') {
+		return `${tag[0]}:${String(value)}`;
+	}
+	if (tag !== 'object') return `${tag[0]}:fn`;
+	try {
+		// Stable ordering: sort keys before serialising so { a, b } and { b, a }
+		// produce the same string. JSON.stringify with a replacer keeps it tight.
+		return `o:${JSON.stringify(value, (_k, v): unknown => {
+			if (v === null || typeof v !== 'object' || Array.isArray(v)) return v;
+			const record = v as Record<string, unknown>;
+			const sorted: Record<string, unknown> = {};
+			for (const key of Object.keys(record).sort()) {
+				sorted[key] = record[key];
+			}
+
+			return sorted;
+		})}`;
+	} catch {
+		// Cyclic or unserializable — fall back to per-object identity.
+		const obj = value as object;
+		let id = subKeyIds.get(obj);
+		if (id === undefined) {
+			subKeyCounter += 1;
+			id = `i${subKeyCounter}`;
+			subKeyIds.set(obj, id);
+		}
+
+		return `i:${id}`;
+	}
+};
+
+const stableSubKey = (
+	collection: string,
+	params: unknown,
+	ctx: unknown
+): string => `${collection}|${stableValueKey(params)}|${stableValueKey(ctx)}`;
 
 /** Shallow-equal ignoring the search score field — used to suppress re-emitting
  * a search result whose only change is BM25 score drift as the corpus grows. */
@@ -1015,11 +1074,26 @@ export const createSyncEngine = (
 		changes: ReactiveChange[]
 	): Promise<[ActiveSubscription, ViewDiff<unknown>][]> => {
 		const pairs: [ActiveSubscription, ViewDiff<unknown>][] = [];
+		// Dedupe: subscriptions sharing the same `(collection, params, ctx)`
+		// only need ONE rerun per change batch. With 1000 subs on the same
+		// query, this drops per-change CPU from O(N) reruns to O(1) — every
+		// sub then diffs the shared result against its own `current` and
+		// receives its own per-sub frame (which the transport still writes
+		// per-WS, see #22 batch-frame fan-out for the next step).
+		const sharedRuns = new Map<
+			string,
+			Promise<Awaited<ReturnType<ReactiveSub['rerun']>>>
+		>();
 		for (const sub of reactiveSubs) {
 			if (!isReactiveAffected(sub, changes)) {
 				continue;
 			}
-			const { rows, readTables, readKeys, rangeDeps } = await sub.rerun();
+			let runPromise = sharedRuns.get(sub.rerunKey);
+			if (runPromise === undefined) {
+				runPromise = sub.rerun();
+				sharedRuns.set(sub.rerunKey, runPromise);
+			}
+			const { rows, readTables, readKeys, rangeDeps } = await runPromise;
 			sub.readTables = readTables;
 			sub.readKeys = readKeys;
 			sub.rangeDeps = rangeDeps;
@@ -1384,6 +1458,7 @@ export const createSyncEngine = (
 			collection,
 			key: definition.key,
 			rerun,
+			rerunKey: stableSubKey(collection, params, ctx),
 			current,
 			readTables: first.readTables,
 			readKeys: first.readKeys,

@@ -354,3 +354,142 @@ describe('reactive queries (read-set tracking)', () => {
 		).rejects.toThrow('No reader registered');
 	});
 });
+
+describe('reactive queries — fan-out dedup', () => {
+	test('one rerun per (collection, params, ctx) per change batch, regardless of subscriber count', async () => {
+		// 50 subscribers with equivalent (collection, params, ctx). One mutation
+		// should cause exactly ONE rerun of the query body, not 50 — that's the
+		// per-query-diff-sharing fix in syncEngine.reactivePairs.
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		engine.registerWriter<Message>('messages', {
+			delete: () => {},
+			insert: (row) => {
+				store.messages.set(row.id, row);
+
+				return row;
+			},
+			update: (row) => {
+				store.messages.set(row.id, row);
+
+				return row;
+			}
+		});
+
+		let rerunCount = 0;
+		engine.registerReactive(
+			defineReactiveQuery<Message>({
+				key: (message) => message.id,
+				name: 'allMessages',
+				run: ({ db }) => {
+					rerunCount += 1;
+
+					return db.all<Message>('messages');
+				}
+			})
+		);
+		engine.registerMutation(
+			defineMutation({
+				handler: (args: Message, _ctx, actions) =>
+					actions.insert<Message>('messages', args),
+				name: 'addMessage'
+			})
+		);
+
+		// Subscribe 50 equivalent listeners. Each subscribe does its own initial
+		// run, so reset the counter once they're all settled.
+		const subs: Array<{ unsubscribe: () => void }> = [];
+		for (let index = 0; index < 50; index += 1) {
+			subs.push(
+				await engine.subscribe<Message>({
+					collection: 'allMessages',
+					ctx: {},
+					onDiff: () => {},
+					params: undefined
+				})
+			);
+		}
+		rerunCount = 0;
+
+		// One mutation → all 50 subs need a re-run, but the engine should
+		// dedupe them all into ONE call to the query body.
+		await engine.runMutation(
+			'addMessage',
+			{ id: 1, room: 'r', text: 'hi' },
+			{}
+		);
+		expect(rerunCount).toBe(1);
+
+		for (const sub of subs) sub.unsubscribe();
+	});
+
+	test('different ctxs still produce independent reruns (correctness)', async () => {
+		// Two subs with different `ctx` references must NOT share a rerun —
+		// the query body could legitimately produce different results per ctx.
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		engine.registerWriter<Message>('messages', {
+			delete: () => {},
+			insert: (row) => {
+				store.messages.set(row.id, row);
+
+				return row;
+			},
+			update: (row) => {
+				store.messages.set(row.id, row);
+
+				return row;
+			}
+		});
+
+		const rerunCalls: unknown[] = [];
+		engine.registerReactive(
+			defineReactiveQuery<Message, void, { user: string }>({
+				key: (message) => message.id,
+				name: 'allMessages',
+				run: ({ ctx, db }) => {
+					rerunCalls.push(ctx);
+
+					return db.all<Message>('messages');
+				}
+			})
+		);
+		engine.registerMutation(
+			defineMutation({
+				handler: (args: Message, _ctx, actions) =>
+					actions.insert<Message>('messages', args),
+				name: 'addMessage'
+			})
+		);
+
+		await engine.subscribe<Message>({
+			collection: 'allMessages',
+			ctx: { user: 'alice' },
+			onDiff: () => {},
+			params: undefined
+		});
+		await engine.subscribe<Message>({
+			collection: 'allMessages',
+			ctx: { user: 'bob' },
+			onDiff: () => {},
+			params: undefined
+		});
+		rerunCalls.length = 0;
+
+		await engine.runMutation(
+			'addMessage',
+			{ id: 1, room: 'r', text: 'hi' },
+			{}
+		);
+		// Two distinct ctxs → two reruns (one per ctx), each with the right ctx.
+		expect(rerunCalls).toHaveLength(2);
+		expect(rerunCalls).toContainEqual({ user: 'alice' });
+		expect(rerunCalls).toContainEqual({ user: 'bob' });
+	});
+});
