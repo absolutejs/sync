@@ -177,4 +177,37 @@ describe('sandboxed mutations', () => {
 		const result = await engine.runMutation('works', {}, {});
 		expect(result).toBe(42);
 	});
+
+	test('read-only handler can opt into the FFI backend (no actions calls)', async () => {
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'pureDouble',
+				// No `actions.*` calls — FFI is safe here. Sandbox computes
+				// a derived value and returns it.
+				sandboxedHandler: `(args) => args.n * 2`,
+				sandbox: { backend: 'ffi', memoryLimit: 128, timeout: 1000 }
+			})
+		);
+		const result = await engine.runMutation('pureDouble', { n: 21 }, {});
+		expect(result).toBe(42);
+	});
+
+	test("explicit `backend: 'worker'` matches the default (current behaviour)", async () => {
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'explicitWorker',
+				sandboxedHandler: `async (args, ctx, actions) => {
+					await actions.change('items', { op: 'insert', row: { id: 99, n: args.n } });
+					return 'ok';
+				}`,
+				sandbox: { backend: 'worker', memoryLimit: 128, timeout: 5000 }
+			})
+		);
+		const result = await engine.runMutation('explicitWorker', { n: 7 }, {});
+		expect(result).toBe('ok');
+	});
 });

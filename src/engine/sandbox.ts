@@ -12,13 +12,27 @@
  * - First call per mutation pays a Worker spawn + compile (~30 ms). Every
  *   subsequent call reuses the isolate and only spends ~0.5 ms creating a
  *   fresh context.
- * - Timeout terminates the isolate (v1 of isolated-jsc trade-off — the
- *   sandbox runner detects this and lazily re-spawns on the next call).
+ * - Timeout terminates the isolate (the sandbox runner detects this and
+ *   lazily re-spawns on the next call). On the FFI backend timeouts throw
+ *   a TerminationException without killing the isolate; sync's runner
+ *   treats both shapes the same.
  * - Each per-call context retains some JSC metadata until the isolate's
- *   next GC sweep. Empirically ~2 MB residual per call. For long-lived
- *   mutations choose `memoryLimit` ≥ 128 (the default 32 trips after a
- *   few dozen calls without pressure for GC). v2 will let us trigger
- *   sweep explicitly from the host; for now, size up.
+ *   next GC sweep. Empirically ~2 MB residual per call (Worker backend).
+ *   For long-lived mutations choose `memoryLimit` ≥ 128 (the default 32
+ *   trips after a few dozen calls without pressure for GC).
+ *
+ * **Backend default: `'worker'`** — required so far because the `actions`
+ * machinery (insert/update/delete/change) crosses the host boundary as
+ * **async** References (they return Promises that go through the engine's
+ * writer + diff path). The isolated-jsc FFI backend only supports SYNC
+ * host fns today (per its 0.3 documented limit); calling
+ * `actions.insert(...)` from a sandboxed handler on FFI would surface as
+ * a Promise-cannot-unwrap error. Pin to Worker.
+ *
+ * Read-only sandboxed mutations that don't call `actions.*` (e.g. compute
+ * a derived value from `args` + `ctx` and `return` it) CAN opt into FFI
+ * via `sandbox: { backend: 'ffi' }` — they get the ~300 KB cold heap and
+ * interrupt-driven timeouts. Document this clearly when you do.
  *
  * The runner is built lazily per-mutation: nothing is spawned until the
  * mutation actually runs for the first time. No engine teardown hook is
@@ -39,6 +53,22 @@ export type SandboxConfig = {
 	memoryLimit?: number;
 	/** Wall-clock cap per call (ms). Default 5000. */
 	timeout?: number;
+	/**
+	 * isolated-jsc backend. Defaults to `'worker'` because the engine's
+	 * `actions.insert/update/delete/change` cross the sandbox boundary as
+	 * async References — and isolated-jsc's FFI backend doesn't pump
+	 * async host fns (its 0.3 documented limit). The Worker backend
+	 * supports both sync and async host fns.
+	 *
+	 * Opt into `'ffi'` only for **read-only** sandboxed handlers — ones
+	 * that compute a derived value from `args` + `ctx` and return it
+	 * without calling any `actions.*`. Those get the FFI cold-heap
+	 * (~300 KB vs ~46 MB) + interrupt-driven timeout benefits.
+	 *
+	 * `'auto'` resolves to FFI when libJSC is reachable and Worker
+	 * otherwise; same async-actions caveat applies on the FFI path.
+	 */
+	backend?: 'auto' | 'ffi' | 'worker';
 };
 
 type CompiledMutation = {
@@ -97,6 +127,9 @@ const compile = async (
 ): Promise<CompiledMutation> => {
 	const { createIsolate } = await loadIsolatedJsc();
 	const isolate = await createIsolate({
+		// Pinned to Worker by default. See SandboxConfig.backend JSDoc for
+		// why FFI is opt-in (actions References are async).
+		backend: config.backend ?? 'worker',
 		memoryLimit: config.memoryLimit ?? 32
 	});
 	const script = await isolate.compileScript(wrap(source));
