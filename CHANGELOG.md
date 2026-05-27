@@ -4,6 +4,46 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.0] — 2026-05-27
+
+### Changed
+
+- **`sandboxedHandler` backend pinned to `'worker'` by default.**
+  `@absolutejs/isolated-jsc` 0.2 introduced an FFI backend and changed
+  its `createIsolate` default from Worker-only to `'auto'` (FFI when
+  reachable). The engine's `actions.insert/update/delete/change` cross
+  the sandbox boundary as **async** References, and the FFI backend
+  doesn't pump async host fns (per its 0.3 documented limit). Without
+  this pin, bumping `@absolutejs/isolated-jsc` to 0.3 in a downstream
+  app would surface "Promise that doesn't settle synchronously" errors
+  on the first `actions.*` call from a sandboxed handler. We now pass
+  `backend: 'worker'` explicitly. Behavioural no-op for existing
+  installs.
+
+### Added
+
+- **`SandboxConfig.backend: 'auto' | 'ffi' | 'worker'`** — opt into the
+  FFI backend for **read-only** sandboxed handlers (ones that compute a
+  derived value from `args` + `ctx` and `return` it without calling
+  `actions.*`). FFI gives those a ~300 KB cold heap (vs ~46 MB on
+  Worker) and interrupt-driven timeouts (the isolate survives a
+  TimeoutError instead of dying). Defaults to `'worker'`.
+
+    ```ts
+    defineMutation({
+    	name: 'computeRiskScore',
+    	sandboxedHandler: `(args, ctx) => args.amount > ctx.dailyLimit ? 'high' : 'low'`,
+    	sandbox: { backend: 'ffi', memoryLimit: 128, timeout: 1000 }
+    });
+    ```
+
+### Bumped
+
+- Peer dependency `@absolutejs/isolated-jsc` from `>= 0.0.1` to
+  `>= 0.3.0`. Required for the `backend` option to exist on
+  `createIsolate`; `0.3` also closes the indirect-eval residuals our
+  earlier docs flagged.
+
 ## [1.6.0] — 2026-05-27
 
 ### Added
@@ -45,14 +85,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-    ```ts
-    import { syncCdc } from '@absolutejs/sync';
-    new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-    ```
+        ```ts
+        import { syncCdc } from '@absolutejs/sync';
+        new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+        ```
 
-    New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-    `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-    `MissedChangesError`, `CdcConsumerSlowError`.
+        New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+        `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+        `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 
