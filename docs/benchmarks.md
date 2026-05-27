@@ -179,6 +179,31 @@ recommended pattern.** See the
 [Operator-graph queries](/documentation/sync-graph) docs view for
 worked examples.
 
+## Subscription fan-out — 1.1.0 dropped 1k-sub tail by 20×+
+
+The original reactive-read bench measured a linear O(N) tail in
+subscriber count: one mutation reaching 1,000 listeners on the same
+query took ~1.6 s tail latency in 1.0 because every subscriber
+triggered its own rerun of the query body. 1.1.0 dedupes reactive
+query reruns per change batch keyed by `(collection, params, ctx)` —
+equivalent subscribers share a single rerun.
+
+| subscribers | tail p50 1.0 | tail p50 **1.1** | speedup |
+| ----------- | ------------ | ---------------- | ------- |
+| 1           | 7.3 ms       | 5.1 ms           | ~same   |
+| 10          | 28.2 ms      | 5.9 ms           | 4.8×    |
+| 100         | 161.4 ms     | 10.2 ms          | 15.8×   |
+| 1,000       | 1,645.3 ms   | **66.2 ms**      | **24.8×** |
+
+p99 at 1k subs dropped from ~2,650 ms to ~82 ms (32×). Shape changed
+from linear O(N) to near-constant. The remaining ~66 ms at 1k subs is
+per-WS-frame write — the engine still writes 1,000 frames serially
+after the (now-shared) rerun completes; batch-framed fan-out is the
+next item on the roadmap. Correctness: different `ctx` references
+still produce independent reruns (per-user query bodies stay
+isolated). Full bench harness in
+[absolutejs/benchmarks/sync/scripts/reactive/subscription-scaling.ts](https://github.com/absolutejs/benchmarks/blob/main/sync/scripts/reactive/subscription-scaling.ts).
+
 > To add measured competitor numbers, stand up Zero (`zero-cache` + a logical-
 > replication Postgres) and/or Convex (`npx convex dev` or the self-hosted image),
 > port the `bench/run.ts` workload to each, and run on the same hardware.
