@@ -6,7 +6,7 @@
       "name": "@absolutejs/live",
       "devDependencies": {
         "@absolutejs/absolute": "^0.19.0-beta.1051",
-        "@absolutejs/isolated-jsc": "0.5.0",
+        "@absolutejs/isolated-jsc": "0.6.0",
         "@angular/core": "^21.0.0",
         "@elysiajs/cron": "^1.4.2",
         "@elysiajs/eden": "^1.4.9",
@@ -45,7 +45,7 @@
   "packages": {
     "@absolutejs/absolute": ["@absolutejs/absolute@0.19.0-beta.1051", "", { "dependencies": { "@elysiajs/openapi": "^1.4.15", "@elysiajs/server-timing": "^1.4.0", "@elysiajs/static": "^1.4.0", "zustand": "^5.0.12" }, "optionalDependencies": { "@absolutejs/native-darwin-arm64": "0.19.0-beta.1008", "@absolutejs/native-darwin-x64": "0.19.0-beta.1008", "@absolutejs/native-linux-arm64": "0.19.0-beta.1008", "@absolutejs/native-linux-x64": "0.19.0-beta.1008", "@absolutejs/native-windows-arm64": "0.19.0-beta.1008", "@absolutejs/native-windows-x64": "0.19.0-beta.1008" }, "peerDependencies": { "@angular/animations": "^21.0.0", "@angular/common": "^21.0.0", "@angular/compiler": "^21.0.0", "@angular/compiler-cli": "^21.0.0", "@angular/core": "^21.0.0", "@angular/platform-browser": "^21.0.0", "@angular/platform-server": "^21.0.0", "@angular/router": "^21.0.0", "@angular/ssr": "^21.0.0", "@vue/compiler-sfc": "^3.5.27", "elysia": "^1.4.0", "less": "^4.6.0", "postcss": "^8.5.0", "react": "^19.2.0", "react-dom": "^19.2.0", "react-router": "^7.0.0", "rxjs": "^7.8.0", "sass": "^1.99.0", "sharp": ">=0.33.0", "stylus": "^0.64.0", "svelte": "^5.35.2", "tailwindcss": "^4.1.0", "typescript": "^5.9.3", "vue": "^3.5.27" }, "optionalPeers": ["@angular/animations", "@angular/common", "@angular/compiler", "@angular/compiler-cli", "@angular/core", "@angular/platform-browser", "@angular/platform-server", "@angular/router", "@angular/ssr", "@vue/compiler-sfc", "less", "postcss", "react", "react-dom", "react-router", "rxjs", "sass", "sharp", "stylus", "svelte", "tailwindcss", "typescript", "vue"], "bin": { "absolute": "dist/cli/index.js" } }, "sha512-HIsTygZDmr1EbQkLPUuW63efZze1f7qN2ZC4qxEAUcKgCbQKX4+7RSdD4FzVd0jiqtZsr9JpSS0x0/rzSyLMUQ=="],
 
-    "@absolutejs/isolated-jsc": ["@absolutejs/isolated-jsc@0.5.0", "", { "peerDependencies": { "bun-types": ">= 1.3.0" } }, "sha512-jtSmncm9apWSChqVPcVe098HfiX7HzKFQua4VF+xm0S3oj4aZ8pL8Itz4jAZ5DebXExTYdRlLM37xAYA/zee6A=="],
+    "@absolutejs/isolated-jsc": ["@absolutejs/isolated-jsc@0.6.0", "", { "peerDependencies": { "bun-types": ">= 1.3.0" } }, "sha512-/jmQ+RmaPtogrLUbThCOfIAM0FtTdyERZZbk+LQiUuNVcNpJS4sE5RcxtMyk9CDnjKfWaiitdZdGkMDAnP2NGw=="],
 
     "@absolutejs/native-darwin-arm64": ["@absolutejs/native-darwin-arm64@0.19.0-beta.1008", "", { "os": "darwin", "cpu": "arm64" }, "sha512-bztRSnYXrD2O5UL9IUTP/Bc2Pd36sxmEd8elxjBPkgcB4iW9RmGUhCBGOMvGTKuEzHjWaJVVa1na6L9q12AxdA=="],
 

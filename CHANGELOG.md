@@ -4,6 +4,44 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.4] — 2026-05-27
+
+### Changed (performance)
+
+- **`sandboxedHandler` switched to `Context.compileCallable`.**
+  isolated-jsc 0.6 added a `Context.compileCallable(source)` primitive:
+  compile a function expression once, call it many times with different
+  args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
+  postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
+
+  The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+  with a router Reference installed on a reused context, plus a
+  promise queue to serialize calls into that slot. 1.7.4 throws all of
+  that out:
+
+  - Each mutation is compiled to a `Callable` once at registration.
+    Source becomes `function(args, ctx, __dispatch) { ... return
+    userFn(args, ctx, actions); }` where `actions` is an in-VM shim
+    over `__dispatch`.
+  - Per call: build a fresh dispatch `Reference` closed over this
+    call's `actions`, invoke `callable.call([args, ctx, dispatch])`.
+  - No shared slot → no serialization queue. Concurrent same-mutation
+    calls are safe by construction (each has its own dispatch
+    Reference closed over its own `actions`).
+  - No reused context recycling — the callable's underlying function
+    is reused; per-call work doesn't create JSC metadata that needs
+    GCing.
+
+  Behavioural notes: handler errors still propagate as `Error` objects
+  with `.message` and `.name`. Timeouts still terminate the isolate
+  on Worker; on FFI they throw `TimeoutError` and the isolate stays
+  alive (next call respawns the context). No public API changes.
+
+### Bumped
+
+- Peer dep `@absolutejs/isolated-jsc` `>= 0.5.0` → `>= 0.6.0`.
+  Required for `Context.compileCallable`.
+
 ## [1.7.3] — 2026-05-27
 
 ### Changed (performance)
