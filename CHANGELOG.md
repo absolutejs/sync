@@ -4,6 +4,41 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.4.0] — 2026-05-27
+
+### Added
+
+- **Sandboxed mutation handlers.** `defineMutation` now accepts a
+  `sandboxedHandler: string` (mutually exclusive with `handler`) that runs
+  inside an [`@absolutejs/isolated-jsc`](https://github.com/absolutejs/isolated-jsc)
+  Isolate — a separate JavaScriptCore VM with its own heap. Per-mutation
+  `sandbox: { memoryLimit, timeout }` caps CPU/memory. Use for
+  multi-tenant PaaS handlers, plugin systems, AI-generated code, or as
+  defense-in-depth on first-party logic.
+
+    ```ts
+    defineMutation({
+    	name: 'transfer',
+    	sandbox: { memoryLimit: 32, timeout: 1000 },
+    	sandboxedHandler: `async (args, ctx, actions) => {
+    		// Runs in a fresh JSC heap. Only args, ctx, and actions are reachable.
+    		await actions.update('accounts', { id: args.from, balance: ... });
+    		await actions.update('accounts', { id: args.to, balance: ... });
+    	}`
+    });
+    ```
+
+    First call per mutation pays a Worker spawn + compile (~30 ms); every
+    subsequent call reuses the isolate (~0.5 ms cold-context spin-up). Timeout
+    terminates the isolate; the next call transparently re-spawns.
+    `@absolutejs/isolated-jsc` is an **optional** peer dependency — install
+    only if you use `sandboxedHandler`.
+
+- **Registration validation.** `registerMutation` now throws if a
+  definition has neither `handler` nor `sandboxedHandler`, or if it has
+  both. (Previously the missing-handler case crashed at first invocation
+  with a less helpful error.)
+
 ## [1.3.0] — 2026-05-27
 
 ### Added
@@ -11,7 +46,7 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 - **Cross-client reactive query cache.** Subscriptions sharing the same
   `(collection, params, ctx)` now reuse a cached snapshot on initial
   subscribe instead of each re-running the query body. 1.1 deduped reruns
-  within a single write batch; 1.3 lifts that sharing *across* batches.
+  within a single write batch; 1.3 lifts that sharing _across_ batches.
   Behaviour, in one line: with N fresh subscribers to the same query, the
   query body runs **once** at the first subscribe; subscribers 2…N hit
   the cache. An overlapping write invalidates the entry (same
@@ -19,60 +54,60 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   by that write refreshes the cache so the next subscriber is a hit
   again.
 
-  Configurable via the new `reactiveCache` option on `createSyncEngine`:
+    Configurable via the new `reactiveCache` option on `createSyncEngine`:
 
-  ```ts
-  createSyncEngine({
-    reactiveCache: {
-      max: 256,      // LRU bound (default 256). 0 disables the cache.
-      ttlMs: 60_000  // TTL (default 60s). 0 disables the TTL.
-    }
-  });
-  ```
+    ```ts
+    createSyncEngine({
+    	reactiveCache: {
+    		max: 256, // LRU bound (default 256). 0 disables the cache.
+    		ttlMs: 60_000 // TTL (default 60s). 0 disables the TTL.
+    	}
+    });
+    ```
 
-  Defaults are bounded by design — no engine should leak memory on a
-  query that's never re-subscribed. Different `ctx` references stay
-  isolated (per-user query bodies are unaffected).
+    Defaults are bounded by design — no engine should leak memory on a
+    query that's never re-subscribed. Different `ctx` references stay
+    isolated (per-user query bodies are unaffected).
 
-  This is the same pattern Convex uses to coalesce queries across all
-  online clients ("every specific combination of (query code, parameters,
-  database read set) executes only once"). Sync's read-set tracking +
-  stable sub-key were already there; this PR just lifts the existing
-  per-batch `sharedRuns` map to a persistent one with invalidation +
-  bounded eviction.
+    This is the same pattern Convex uses to coalesce queries across all
+    online clients ("every specific combination of (query code, parameters,
+    database read set) executes only once"). Sync's read-set tracking +
+    stable sub-key were already there; this PR just lifts the existing
+    per-batch `sharedRuns` map to a persistent one with invalidation +
+    bounded eviction.
 
-  4 new tests in `tests/reactiveQuery.test.ts`: cache hit on second
-  subscribe, invalidation on overlapping write + refresh on the rerun,
-  `max: 0` disables, different ctxs miss independently.
+    4 new tests in `tests/reactiveQuery.test.ts`: cache hit on second
+    subscribe, invalidation on overlapping write + refresh on the rerun,
+    `max: 0` disables, different ctxs miss independently.
 
 ## [1.2.0] — 2026-05-27
 
 ### Added
 
 - **`disconnect()` on client + collection.** Force-close the underlying
-  WebSocket *without* tearing down state. The auto-reconnect loop fires
+  WebSocket _without_ tearing down state. The auto-reconnect loop fires
   after `reconnectMs`, each entry's `appliedVersion` is preserved, and the
   resumed subscribe carries `since` so the engine replies with a catch-up
   diff (or a fresh snapshot if the change log no longer covers the gap).
 
-  This exposes the existing resume-via-`since` path (already shipped, see
-  `engine.subscribe`'s `since` parameter + the change-log + the catch-up
-  diff builder) so tests, benches, and apps can simulate an offline blip
-  cleanly. Pairs with the auto-reconnect loop that's been in place since
-  the WebSocket client landed.
+    This exposes the existing resume-via-`since` path (already shipped, see
+    `engine.subscribe`'s `since` parameter + the change-log + the catch-up
+    diff builder) so tests, benches, and apps can simulate an offline blip
+    cleanly. Pairs with the auto-reconnect loop that's been in place since
+    the WebSocket client landed.
 
-  ```ts
-  const tasks = createSyncCollection<Task>({ collection: 'tasks', url });
-  // …client has appliedVersion = N…
-  tasks.disconnect();   // closes the WS without losing state
-  // …server applies M more changes while we're "offline"…
-  // auto-reconnect fires, subscribe carries since: N,
-  // engine replies with a catch-up diff covering (N, N+M]
-  ```
+    ```ts
+    const tasks = createSyncCollection<Task>({ collection: 'tasks', url });
+    // …client has appliedVersion = N…
+    tasks.disconnect(); // closes the WS without losing state
+    // …server applies M more changes while we're "offline"…
+    // auto-reconnect fires, subscribe carries since: N,
+    // engine replies with a catch-up diff covering (N, N+M]
+    ```
 
-  No behavioural change for clients that don't call `disconnect()`. The
-  existing `close()` semantics (tear down everything, stop reconnecting)
-  are unchanged.
+    No behavioural change for clients that don't call `disconnect()`. The
+    existing `close()` semantics (tear down everything, stop reconnecting)
+    are unchanged.
 
 ## [1.1.0] — 2026-05-27
 
@@ -86,26 +121,26 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   own. Each subscription still diffs the shared result against its own
   current state and receives its own per-sub frame.
 
-  Measured against the existing reactive-read bench (one writer mutates,
-  N subscribers receive — slowest-tail latency per write):
+    Measured against the existing reactive-read bench (one writer mutates,
+    N subscribers receive — slowest-tail latency per write):
 
-  | subscribers | tail p50 before (1.0) | tail p50 after (1.1) | speedup     |
-  | ----------- | --------------------- | -------------------- | ----------- |
-  | 1           | 7.3 ms                | 11.3 ms              | ~same       |
-  | 10          | 28.2 ms               | 12.5 ms              | 2.3×        |
-  | 100         | 161.4 ms              | 27.6 ms              | **5.9×**    |
-  | 1,000       | 1,645.3 ms            | **81.2 ms**          | **20.3×**   |
+    | subscribers | tail p50 before (1.0) | tail p50 after (1.1) | speedup   |
+    | ----------- | --------------------- | -------------------- | --------- |
+    | 1           | 7.3 ms                | 11.3 ms              | ~same     |
+    | 10          | 28.2 ms               | 12.5 ms              | 2.3×      |
+    | 100         | 161.4 ms              | 27.6 ms              | **5.9×**  |
+    | 1,000       | 1,645.3 ms            | **81.2 ms**          | **20.3×** |
 
-  At 1,000 subscribers the tail dropped from ~1.6 s to ~80 ms; p99 from
-  ~2,650 ms to ~93 ms (28×). The cost shape changed from linear O(N) to
-  near-constant in the number of subscribers — what's left is per-WS frame
-  write, the focus of the next pass.
+    At 1,000 subscribers the tail dropped from ~1.6 s to ~80 ms; p99 from
+    ~2,650 ms to ~93 ms (28×). The cost shape changed from linear O(N) to
+    near-constant in the number of subscribers — what's left is per-WS frame
+    write, the focus of the next pass.
 
-  Correctness: subscribers with different `ctx` references still get
-  independent reruns (a per-user query body can depend on `ctx.userId`).
-  The dedup key uses stable JSON when possible and falls back to per-object
-  identity for values JSON can't represent, so an exotic `ctx` never silently
-  shares results with a different one.
+    Correctness: subscribers with different `ctx` references still get
+    independent reruns (a per-user query body can depend on `ctx.userId`).
+    The dedup key uses stable JSON when possible and falls back to per-object
+    identity for values JSON can't represent, so an exotic `ctx` never silently
+    shares results with a different one.
 
 ## [1.0.0] — 2026-05-26
 

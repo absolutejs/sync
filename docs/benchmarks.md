@@ -51,23 +51,23 @@ under `sync/` — same workload (a shared counter, incremented + acked), same
 harness, **same Postgres backing every local backend**, same hardware (Bun 1.3,
 WSL2 dev box):
 
-| Backend          | Where                                      | p50 (ms) | p95 (ms) | writes/sec (seq) |
-| ---------------- | ------------------------------------------ | -------- | -------- | ---------------- |
-| @absolutejs/sync | local (WS) + Postgres                      | **9.5**  | **18.0** | **96**           |
-| TanStack DB      | local (REST + queryCollection) + Postgres  | 17.5     | 30.3     | 53               |
-| Convex           | **self-hosted, loopback Docker**           | 15.9     | 21.3     | 61               |
-| Convex           | cloud, dev WSL → Convex                    | 52.8     | 66.2     | 18               |
-| Convex           | cloud, GH Actions runner → Convex          | 76.6     | 83.2     | 13               |
-| Zero             | local (zero-cache + push server + PG)      | 66.9     | 104.9    | 14               |
+| Backend          | Where                                     | p50 (ms) | p95 (ms) | writes/sec (seq) |
+| ---------------- | ----------------------------------------- | -------- | -------- | ---------------- |
+| @absolutejs/sync | local (WS) + Postgres                     | **9.5**  | **18.0** | **96**           |
+| TanStack DB      | local (REST + queryCollection) + Postgres | 17.5     | 30.3     | 53               |
+| Convex           | **self-hosted, loopback Docker**          | 15.9     | 21.3     | 61               |
+| Convex           | cloud, dev WSL → Convex                   | 52.8     | 66.2     | 18               |
+| Convex           | cloud, GH Actions runner → Convex         | 76.6     | 83.2     | 13               |
+| Zero             | local (zero-cache + push server + PG)     | 66.9     | 104.9    | 14               |
 
 **Pipelined throughput** (same workload, K writes in flight):
 
-| Backend     | seq | c=4 | c=16 | c=64 | scaling (1→64) |
-| ----------- | --- | --- | ---- | ---- | -------------- |
-| **sync**    | 54  | 99  | 188  | **305** | **5.6×**    |
-| TanStack DB | 73  | 175 | 278  | 297  | 4.1×           |
-| Convex      | 18  | 34  | 42   | 43   | 2.4× (saturates) |
-| Zero        | 16  | 24  | 24   | 32   | 2.0× (saturates) |
+| Backend     | seq | c=4 | c=16 | c=64    | scaling (1→64)   |
+| ----------- | --- | --- | ---- | ------- | ---------------- |
+| **sync**    | 54  | 99  | 188  | **305** | **5.6×**         |
+| TanStack DB | 73  | 175 | 278  | 297     | 4.1×             |
+| Convex      | 18  | 34  | 42   | 43      | 2.4× (saturates) |
+| Zero        | 16  | 24  | 24   | 32      | 2.0× (saturates) |
 
 Read the table with the conditions in mind. The **self-hosted Convex row** is
 the honest engine-vs-engine comparison — both running on loopback, no network.
@@ -119,17 +119,17 @@ its own codegen step.
 ## Propagation latency — write → remote-subscriber-receive
 
 Same workload, but the metric is the qualitative thing live-query engines
-exist for: *two* clients connect, one mutates, the other has a subscription
-on `counter` — measure the time from issuing the mutation to the *subscriber*
+exist for: _two_ clients connect, one mutates, the other has a subscription
+on `counter` — measure the time from issuing the mutation to the _subscriber_
 observing the new value:
 
-| Backend          | Where                                  | p50      | p95      | p99    |
-| ---------------- | -------------------------------------- | -------- | -------- | ------ |
-| @absolutejs/sync | single engine, local (WS + PG)         | **11.0** | **15.8** | 23.3   |
-| @absolutejs/sync | 2-engine cluster, in-memory bus, local | **6.2**  | **11.1** | 14.0   |
-| @absolutejs/sync | 2-engine cluster, **PG-NOTIFY bus**, local | **11.8** | **17.6** | 24.4 |
-| Convex           | self-hosted, loopback Docker           | 19.8     | 28.5     | 36.8   |
-| Convex           | cloud (HTTPS)                          | 69.4     | 86.9     | 105.6  |
+| Backend          | Where                                      | p50      | p95      | p99   |
+| ---------------- | ------------------------------------------ | -------- | -------- | ----- |
+| @absolutejs/sync | single engine, local (WS + PG)             | **11.0** | **15.8** | 23.3  |
+| @absolutejs/sync | 2-engine cluster, in-memory bus, local     | **6.2**  | **11.1** | 14.0  |
+| @absolutejs/sync | 2-engine cluster, **PG-NOTIFY bus**, local | **11.8** | **17.6** | 24.4  |
+| Convex           | self-hosted, loopback Docker               | 19.8     | 28.5     | 36.8  |
+| Convex           | cloud (HTTPS)                              | 69.4     | 86.9     | 105.6 |
 
 Sync's propagation adds only ~1.5 ms over its own write-ack — fan-out is
 in-process; the subscriber's WS gets the diff frame on the same tick. Convex
@@ -150,7 +150,7 @@ oversized batches spill to a `sync_cluster_spill` table with a
 pick the bus your stack already uses.
 
 Caveat: per-instance version cursors mean a client that reconnects to
-a *different* instance falls back to a fresh snapshot (correct, not
+a _different_ instance falls back to a fresh snapshot (correct, not
 catch-up diff). Use sticky sessions for cross-instance reconnect-as-
 diff; or accept the cold-hydration cost on cross-instance reconnect.
 
@@ -171,8 +171,8 @@ Convex pushes the **whole new query result** on every change (their own
 the [object-sync-engine roadmap](https://stack.convex.dev/object-sync-engine)
 admission). The gap scales with K, the rows held by the subscriber:
 
-| K rows held | sync (diff frame) | Convex (full-result frame) | ratio |
-| ----------- | ----------------- | -------------------------- | ----- |
+| K rows held | sync (diff frame) | Convex (full-result frame) | ratio      |
+| ----------- | ----------------- | -------------------------- | ---------- |
 | 100         | **117 B**         | 11,547 B                   | **99×**    |
 | 1,000       | **118 B**         | 113,905 B                  | **965×**   |
 | 5,000       | **118 B**         | 576,830 B                  | **4,888×** |
@@ -201,10 +201,10 @@ engine compiles into an incremental operator graph. The source's
 `hydrate` pushes the filter to SQL; `match` scopes incremental changes;
 the `orderBy` operator maintains a sorted result incrementally.
 
-| rows in table | live update (default `db.all` + JS filter) | live update (`defineGraphCollection`) | speedup |
-| ------------- | ------------------------------------------ | ------------------------------------- | ------- |
-| 1,000         | 21.8 ms                                    | **10.5 ms**                           | 2.1×    |
-| 10,000        | 72.5 ms                                    | **16.6 ms**                           | 4.4×    |
+| rows in table | live update (default `db.all` + JS filter) | live update (`defineGraphCollection`) | speedup   |
+| ------------- | ------------------------------------------ | ------------------------------------- | --------- |
+| 1,000         | 21.8 ms                                    | **10.5 ms**                           | 2.1×      |
+| 10,000        | 72.5 ms                                    | **16.6 ms**                           | 4.4×      |
 | 100,000       | 577.9 ms                                   | **41.8 ms**                           | **13.8×** |
 
 At 100k rows the 42 ms live-update is essentially "WS roundtrip + PG
@@ -225,11 +225,11 @@ triggered its own rerun of the query body. 1.1.0 dedupes reactive
 query reruns per change batch keyed by `(collection, params, ctx)` —
 equivalent subscribers share a single rerun.
 
-| subscribers | tail p50 1.0 | tail p50 **1.1** | speedup |
-| ----------- | ------------ | ---------------- | ------- |
-| 1           | 7.3 ms       | 5.1 ms           | ~same   |
-| 10          | 28.2 ms      | 5.9 ms           | 4.8×    |
-| 100         | 161.4 ms     | 10.2 ms          | 15.8×   |
+| subscribers | tail p50 1.0 | tail p50 **1.1** | speedup   |
+| ----------- | ------------ | ---------------- | --------- |
+| 1           | 7.3 ms       | 5.1 ms           | ~same     |
+| 10          | 28.2 ms      | 5.9 ms           | 4.8×      |
+| 100         | 161.4 ms     | 10.2 ms          | 15.8×     |
 | 1,000       | 1,645.3 ms   | **66.2 ms**      | **24.8×** |
 
 p99 at 1k subs dropped from ~2,650 ms to ~82 ms (32×). Shape changed
@@ -243,8 +243,8 @@ isolated). Full bench harness in
 
 ## Subscribe-storm — 1.3.0's cross-client query cache
 
-Where the fan-out bench above measures *one write → N subscribers*,
-this measures the *N fresh subscribers → same query* path: do any of
+Where the fan-out bench above measures _one write → N subscribers_,
+this measures the _N fresh subscribers → same query_ path: do any of
 them actually hit the database? Convex coalesces queries across all
 online clients ("every specific combination of (query code, parameters,
 database read set) executes only once"). Sync 1.1 deduped reactive
@@ -252,7 +252,7 @@ reruns within a single write batch; 1.3 lifts that **across** batches
 via a cross-client query result cache, keyed by
 `(collection, params, ctx)`.
 
-| N subscribers | cache=on ready (ms) | cache=on DB hits | cache=off ready (ms) | cache=off DB hits | speedup |
+| N subscribers | cache=on ready (ms) | cache=on DB hits | cache=off ready (ms) | cache=off DB hits | speedup   |
 | ------------- | ------------------- | ---------------- | -------------------- | ----------------- | --------- |
 | 1             | 56                  | 1                | 53                   | 1                 | warmup    |
 | 10            | 54                  | **0**            | 103                  | 10                | DB: 10→0  |
@@ -272,12 +272,13 @@ pass `{ max: 0 }` to disable.
 ## Reconnect catch-up via `since` — 1.2.0 makes offline cheap
 
 The resume path was already shipped end-to-end (server-side change log
-+ catch-up diff builder, client-side `appliedVersion` + auto-reconnect
-that sends `since`). 1.2.0 adds `disconnect()` to `SyncClient` and
-`SyncCollection` — closes the WS without losing state so the next
-auto-reconnect carries `since` and the engine sends a catch-up diff
-rather than a full snapshot. Useful for tests, benches, and apps that
-want to simulate an offline blip cleanly.
+
+- catch-up diff builder, client-side `appliedVersion` + auto-reconnect
+  that sends `since`). 1.2.0 adds `disconnect()` to `SyncClient` and
+  `SyncCollection` — closes the WS without losing state so the next
+  auto-reconnect carries `since` and the engine sends a catch-up diff
+  rather than a full snapshot. Useful for tests, benches, and apps that
+  want to simulate an offline blip cleanly.
 
 Measured catch-up after K missed writes (time from "WS reopening" to
 "subscriber sees the new value"):
