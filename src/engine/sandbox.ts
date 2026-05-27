@@ -67,12 +67,6 @@ export type SandboxConfig = {
 	backend?: 'auto' | 'ffi' | 'worker';
 };
 
-type CompiledMutation = {
-	isolate: Isolate;
-	script: Script;
-	timeoutMs: number;
-};
-
 let isolatedJscModule: IsolatedJscModule | undefined;
 const loadIsolatedJsc = async (): Promise<IsolatedJscModule> => {
 	if (isolatedJscModule !== undefined) return isolatedJscModule;
@@ -91,8 +85,10 @@ const loadIsolatedJsc = async (): Promise<IsolatedJscModule> => {
 /**
  * Wraps user source as a callable. The user supplies an expression that
  * evaluates to `(args, ctx, actions) => Result` (sync or async); we evaluate
- * it, build `actions` from the individually-installed References (sidestepping
- * isolated-jsc not yet supporting nested Reference values), and invoke.
+ * it, build `actions` as a thin in-VM shim that dispatches through the
+ * `__syncAction` router Reference (installed once per isolate, shared
+ * across calls), and invoke. One Reference instead of four, installed
+ * once instead of per-call.
  *
  * The user source is interpolated directly — backticks and `${...}` in it
  * are fine because JSC's eval consumes the raw text, not a template literal.
@@ -108,20 +104,74 @@ const wrap = (source: string): string => `
 			);
 		}
 		const actions = {
-			insert: __syncActionInsert,
-			update: __syncActionUpdate,
-			delete: __syncActionDelete,
-			change: __syncActionChange
+			insert: (table, data) => __syncAction('insert', table, data),
+			update: (table, data) => __syncAction('update', table, data),
+			delete: (table, row) => __syncAction('delete', table, row),
+			change: (collection, change) => __syncAction('change', collection, change)
 		};
 		return await userFn(args, ctx, actions);
 	})()
 `;
 
+/**
+ * How many sandboxed calls a single context can serve before we recycle
+ * it (dispose + create + re-install the router). Per-call JSC metadata
+ * accumulates in the reused context until GC sweeps it; recycling caps
+ * that without paying per-call context-create cost. Empirical: ~2 MB
+ * residual per call (Worker backend); 256 calls × 2 MB ≈ 512 MB before
+ * sweep, well under the 1 GB cap most workloads run with.
+ */
+const DEFAULT_RECYCLE_CONTEXT_AFTER = 256;
+
+type CompiledMutation = {
+	context: Context;
+	/** Shared slot the router Reference reads on each `__syncAction` call. */
+	currentActions: { value: MutationActions | undefined };
+	isolate: Isolate;
+	/** Promise queue for serialising calls — keeps the shared slot coherent. */
+	runQueue: Promise<unknown>;
+	script: Script;
+	/** Calls served by the current `context`; recycled at the threshold. */
+	servedCalls: number;
+	timeoutMs: number;
+};
+
+const installRouter = async (
+	context: Context,
+	currentActions: { value: MutationActions | undefined },
+	Reference: typeof import('@absolutejs/isolated-jsc').Reference
+): Promise<void> => {
+	const router = new Reference(((
+		op: unknown,
+		...rest: unknown[]
+	): Promise<unknown> | unknown => {
+		const a = currentActions.value;
+		if (a === undefined) {
+			throw new Error(
+				'__syncAction invoked outside an active sandboxed call (shared-slot router)'
+			);
+		}
+		switch (op) {
+			case 'insert':
+				return a.insert(rest[0] as string, rest[1]);
+			case 'update':
+				return a.update(rest[0] as string, rest[1]);
+			case 'delete':
+				return a.delete(rest[0] as string, rest[1]);
+			case 'change':
+				return a.change(rest[0] as string, rest[1] as never);
+			default:
+				throw new Error(`unknown sandbox action op: ${String(op)}`);
+		}
+	}) as (...rawArgs: unknown[]) => unknown);
+	await context.setGlobal('__syncAction', router);
+};
+
 const compile = async (
 	source: string,
 	config: SandboxConfig
 ): Promise<CompiledMutation> => {
-	const { createIsolate } = await loadIsolatedJsc();
+	const { createIsolate, Reference } = await loadIsolatedJsc();
 	const isolate = await createIsolate({
 		// `'auto'` since isolated-jsc 0.4 (async host-fn pump on FFI).
 		// See SandboxConfig.backend JSDoc for the per-backend trade-offs.
@@ -129,13 +179,31 @@ const compile = async (
 		memoryLimit: config.memoryLimit ?? 32
 	});
 	const script = await isolate.compileScript(wrap(source));
-	return { isolate, script, timeoutMs: config.timeout ?? 5000 };
+	const context = await isolate.createContext();
+	const currentActions: { value: MutationActions | undefined } = {
+		value: undefined
+	};
+	await installRouter(context, currentActions, Reference);
+	return {
+		context,
+		currentActions,
+		isolate,
+		runQueue: Promise.resolve(undefined),
+		script,
+		servedCalls: 0,
+		timeoutMs: config.timeout ?? 5000
+	};
 };
 
 /**
  * Build a lazy runner for one mutation's sandboxed source. The first call
- * compiles + spawns; subsequent calls reuse the isolate. If the isolate has
- * been disposed (timeout, memory cap), the next call re-spawns transparently.
+ * compiles + spawns; subsequent calls reuse the isolate AND the context
+ * (the router Reference is installed once on isolate creation; per-call
+ * cost is just two `setGlobal`s for `args` + `ctx`). Calls are serialised
+ * via a promise queue so the shared-slot router stays coherent. The
+ * context is recycled every {@link DEFAULT_RECYCLE_CONTEXT_AFTER} calls
+ * to bound JSC per-call metadata accumulation. If the isolate has been
+ * disposed (timeout, memory cap), the next call re-spawns transparently.
  */
 export const makeSandboxedHandler = (
 	source: string,
@@ -157,48 +225,40 @@ export const makeSandboxedHandler = (
 		return pending;
 	};
 
-	return async (args, ctx, actions) => {
+	const recycleContextIfNeeded = async (
+		compiled: CompiledMutation
+	): Promise<void> => {
+		if (compiled.servedCalls < DEFAULT_RECYCLE_CONTEXT_AFTER) return;
 		const { Reference } = await loadIsolatedJsc();
+		await compiled.context.dispose().catch(() => {});
+		compiled.context = await compiled.isolate.createContext();
+		await installRouter(compiled.context, compiled.currentActions, Reference);
+		compiled.servedCalls = 0;
+	};
+
+	return async (args, ctx, actions) => {
 		const compiled = await getCompiled();
-		const context = await compiled.isolate.createContext();
-		try {
-			await context.setGlobal('args', args);
-			await context.setGlobal('ctx', ctx);
-			await context.setGlobal(
-				'__syncActionInsert',
-				new Reference(((table: unknown, data: unknown) =>
-					actions.insert(table as string, data)) as (
-					...args: unknown[]
-				) => unknown)
-			);
-			await context.setGlobal(
-				'__syncActionUpdate',
-				new Reference(((table: unknown, data: unknown) =>
-					actions.update(table as string, data)) as (
-					...args: unknown[]
-				) => unknown)
-			);
-			await context.setGlobal(
-				'__syncActionDelete',
-				new Reference(((table: unknown, row: unknown) =>
-					actions.delete(table as string, row)) as (
-					...args: unknown[]
-				) => unknown)
-			);
-			await context.setGlobal(
-				'__syncActionChange',
-				new Reference(((collection: unknown, change: unknown) =>
-					actions.change(collection as string, change as never)) as (
-					...args: unknown[]
-				) => unknown)
-			);
-			return await compiled.script.run(context, {
-				timeout: compiled.timeoutMs
-			});
-		} finally {
-			// Best-effort context dispose. If the isolate self-died on
-			// timeout/memory, this is a no-op that swallows the rejection.
-			await context.dispose().catch(() => {});
-		}
+		// Chain on the queue — the shared slot is only valid during the
+		// active call, so the next call must wait for the current one to
+		// finish setting + reading + clearing it. `.catch(() => undefined)`
+		// keeps the queue alive after a rejection.
+		const prev = compiled.runQueue;
+		const turn = prev.then(async () => {
+			await recycleContextIfNeeded(compiled);
+			compiled.currentActions.value = actions;
+			try {
+				await compiled.context.setGlobal('args', args);
+				await compiled.context.setGlobal('ctx', ctx);
+				const result = await compiled.script.run(compiled.context, {
+					timeout: compiled.timeoutMs
+				});
+				return result;
+			} finally {
+				compiled.currentActions.value = undefined;
+				compiled.servedCalls += 1;
+			}
+		});
+		compiled.runQueue = turn.catch(() => undefined);
+		return turn;
 	};
 };

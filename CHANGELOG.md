@@ -4,6 +4,39 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.2] — 2026-05-27
+
+### Changed (performance)
+
+- **`sandboxedHandler` warm-dispatch redesign — router Reference, reused
+  context, serialized queue.** Profiling the FFI backend hot path showed
+  53% of per-call time was spent installing four `actions.*` References
+  (one per `setGlobal`, repeated every call), plus 8% on creating a
+  fresh context per call. Refactor:
+  - Install **one** `__syncAction(op, ...args)` router Reference per
+    isolate at compile time (instead of four per call). The in-VM
+    `actions` object is now a thin in-JS shim that dispatches through
+    the router.
+  - Reuse a single per-mutation context across calls; recycle every
+    256 calls to bound JSC per-call metadata accumulation.
+  - Serialize calls via a promise queue so the shared "current actions"
+    slot stays coherent under concurrent invocations.
+
+  Per-call hot path drops from `createContext` + 6 `setGlobal` to
+  2 `setGlobal` (only the volatile `args` + `ctx`). Empirical on the
+  Worker vs FFI sandbox bench (see `benchmarks/sync/RESULTS.md`):
+
+  | Backend | warm p50 (1.7.1) | warm p50 (1.7.2) | speedup |
+  | ------- | ---------------- | ---------------- | ------- |
+  | worker  | 0.94 ms          | (≈ same)         | —       |
+  | ffi     | 4.69 ms          | ≈ 1.5 ms         | ~3×     |
+
+  Behavioural notes: a single mutation's sandboxed calls are now
+  serialized; concurrent same-mutation invocations queue behind each
+  other (they already shared one isolate, so the practical impact is
+  small). Per-call context recycle is hidden from the caller. No
+  public-API changes.
+
 ## [1.7.1] — 2026-05-27
 
 ### Changed
