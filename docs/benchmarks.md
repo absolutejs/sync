@@ -241,6 +241,34 @@ still produce independent reruns (per-user query bodies stay
 isolated). Full bench harness in
 [absolutejs/benchmarks/sync/scripts/reactive/subscription-scaling.ts](https://github.com/absolutejs/benchmarks/blob/main/sync/scripts/reactive/subscription-scaling.ts).
 
+## Subscribe-storm — 1.3.0's cross-client query cache
+
+Where the fan-out bench above measures *one write → N subscribers*,
+this measures the *N fresh subscribers → same query* path: do any of
+them actually hit the database? Convex coalesces queries across all
+online clients ("every specific combination of (query code, parameters,
+database read set) executes only once"). Sync 1.1 deduped reactive
+reruns within a single write batch; 1.3 lifts that **across** batches
+via a cross-client query result cache, keyed by
+`(collection, params, ctx)`.
+
+| N subscribers | cache=on ready (ms) | cache=on DB hits | cache=off ready (ms) | cache=off DB hits | speedup |
+| ------------- | ------------------- | ---------------- | -------------------- | ----------------- | --------- |
+| 1             | 56                  | 1                | 53                   | 1                 | warmup    |
+| 10            | 54                  | **0**            | 103                  | 10                | DB: 10→0  |
+| 100           | 151                 | **0**            | 229                  | 100               | DB: 100→0 |
+| 1,000         | 830                 | **0**            | 1,437                | 1,000             | DB: 1k→0  |
+
+The wall-clock improvement is ~1.5–1.9× because per-subscriber WS
+handshake + snapshot frame transport cost still dominates. The
+DB-side cost is what matters at scale: at 1k subs the cache turns 1,000
+PG queries into 1. Cache entries are invalidated when a write overlaps
+the read set (same `isReactiveAffected` check live subs use); the
+batch's rerun refreshes the cache so the next subscriber after a write
+is still a hit. Different `ctx` references stay isolated. Configurable
+via `createSyncEngine({ reactiveCache: { max: 256, ttlMs: 60_000 } })`;
+pass `{ max: 0 }` to disable.
+
 ## Reconnect catch-up via `since` — 1.2.0 makes offline cheap
 
 The resume path was already shipped end-to-end (server-side change log
