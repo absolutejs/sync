@@ -117,6 +117,13 @@ export type {
 
 export type { SandboxConfig } from './sandbox';
 
+export {
+	exponentialBackoff,
+	isSerializationFailure,
+	RetriesExhaustedError
+} from './retry';
+export type { ExponentialBackoffOptions, RetryPolicy } from './retry';
+
 export { createSyncEngine, SchemaError, UnauthorizedError } from './syncEngine';
 export type {
 	CrdtFields,

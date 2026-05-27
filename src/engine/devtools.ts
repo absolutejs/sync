@@ -41,4 +41,16 @@ export type EngineInspection = {
  */
 export type EngineActivity =
 	| { type: 'change'; at: number; table: string; op: RowOp; version: number }
-	| { type: 'mutation'; at: number; name: string; status: 'ok' | 'error' };
+	| { type: 'mutation'; at: number; name: string; status: 'ok' | 'error' }
+	| {
+			/** Emitted between attempts of a retried mutation. `attempt` is the
+			 * attempt that just failed (1-indexed); `delayMs` is the wait before
+			 * the next attempt. Surfaces OCC retries to observability. */
+			type: 'mutationRetry';
+			at: number;
+			name: string;
+			attempt: number;
+			delayMs: number;
+			errorName: string;
+			errorMessage: string;
+	  };
