@@ -147,6 +147,13 @@ export type MysqlBinlogChangeSourceOptions = {
 	) => Promise<() => void | Promise<void>> | (() => void | Promise<void>);
 	/** Override the event normalizer (defaults to {@link normalizeBinlogEvent}). */
 	normalize?: (event: BinlogRowEvent) => ParsedChange[];
+	/**
+	 * Called when a binlog event normalises to zero changes (unknown op type,
+	 * non-object rows, etc). Default: silently dropped. Provide this to log
+	 * skipped events so you notice schema changes / new event types as they
+	 * appear.
+	 */
+	onSkip?: (event: BinlogRowEvent, reason: 'normalized-empty') => void;
 };
 
 /**
@@ -158,12 +165,18 @@ export const mysqlBinlogChangeSource = (
 	options: MysqlBinlogChangeSourceOptions
 ): ChangeSource => {
 	const normalize = options.normalize ?? normalizeBinlogEvent;
+	const onSkip = options.onSkip;
 	let unsubscribe: (() => void | Promise<void>) | undefined;
 
 	return {
 		start: async (emit) => {
 			unsubscribe = await options.subscribe((event) => {
-				for (const parsed of normalize(event)) {
+				const parsedChanges = normalize(event);
+				if (parsedChanges.length === 0) {
+					onSkip?.(event, 'normalized-empty');
+					return;
+				}
+				for (const parsed of parsedChanges) {
 					void emit(parsed.table, parsed.change);
 				}
 			});

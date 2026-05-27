@@ -124,13 +124,24 @@ export {
 } from './retry';
 export type { ExponentialBackoffOptions, RetryPolicy } from './retry';
 
-export { createSyncEngine, SchemaError, UnauthorizedError } from './syncEngine';
+export {
+	CdcConsumerSlowError,
+	createSyncEngine,
+	MissedChangesError,
+	SchemaError,
+	UnauthorizedError
+} from './syncEngine';
 export type {
 	CrdtFields,
+	LoggedChange,
+	StreamChangesOptions,
 	SubscribeArgs,
 	Subscription,
 	SyncEngine
 } from './syncEngine';
+
+export { syncCdc } from './cdc';
+export type { SyncCdcOptions } from './cdc';
 export type { CrdtMergeable } from '../crdt';
 export { defineSchema, field } from './schema';
 export type { FieldValidator, SchemaDefinition, TableSchema } from './schema';
