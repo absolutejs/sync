@@ -232,6 +232,18 @@ export type SyncCollection<T> = {
 	 * mutations are replayed when the socket reconnects, so they survive a drop.
 	 */
 	mutate: <R = unknown>(options: MutateOptions<T>) => Promise<R>;
+	/**
+	 * Force-close the underlying WebSocket without tearing down state. The
+	 * auto-reconnect loop fires after `reconnectMs`; the collection's
+	 * `appliedVersion` is preserved so the resumed subscribe carries `since`
+	 * and the engine replies with a catch-up diff (or a fresh snapshot if
+	 * the change log no longer covers the gap).
+	 *
+	 * Useful for simulating an offline blip in tests and benches that need
+	 * to measure resume cost specifically (vs cold-hydration on a fresh
+	 * collection). No-op if the collection has been `close()`d.
+	 */
+	disconnect: () => void;
 	/** Unsubscribe on the server, close the socket, and stop reconnecting. */
 	close: () => void;
 };
@@ -548,6 +560,22 @@ export const createSyncCollection = <T>(
 				recompute(); // apply the optimistic overlay immediately
 				sendMutate(mutation);
 			}),
+		disconnect: () => {
+			// Force-close the WS without tearing down state. The existing
+			// `ws.onclose` handler schedules a reconnect via the auto-
+			// reconnect loop (unless the collection has been `close()`d).
+			// `appliedVersion` is preserved, so the resumed subscribe carries
+			// `since` and the engine sends a catch-up diff (or snapshot if
+			// the change log can't cover the gap).
+			if (closed || socket === undefined) {
+				return;
+			}
+			try {
+				socket.close();
+			} catch {
+				// already closing/closed
+			}
+		},
 		close: () => {
 			if (closed) {
 				return;

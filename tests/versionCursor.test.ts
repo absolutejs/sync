@@ -174,7 +174,15 @@ class FakeWebSocket {
 	send(data: string) {
 		this.sent.push(data);
 	}
-	close() {}
+	close() {
+		// Real WebSocket impls fire onclose asynchronously when close() is
+		// called locally — model that here so the client-side `disconnect()`
+		// path (which calls socket.close()) walks the same code as a network
+		// drop. Existing tests that explicitly drive `onclose` via
+		// fireClose() are unaffected (they call onclose directly, this just
+		// adds another path that ends up there).
+		this.onclose?.({});
+	}
 	open() {
 		this.onopen?.({});
 	}
@@ -241,5 +249,78 @@ describe('client resume on reconnect', () => {
 				.sort()
 		).toEqual([1, 2]);
 		store.close();
+	});
+});
+
+describe('client disconnect() preserves state and resumes via since', () => {
+	test('disconnect() closes the WS without dropping appliedVersion; reconnect carries since', async () => {
+		const store = createSyncCollection<Order>({
+			url: 'ws://x',
+			collection: 'orders',
+			webSocketImpl: Impl,
+			reconnectMs: 5
+		});
+		const first = lastSocket();
+		first.open();
+		first.emit({
+			type: 'snapshot',
+			id: 's',
+			rows: [open(1, 5)],
+			version: 5
+		});
+		expect(store.get().data.map((r) => r.id)).toEqual([1]);
+
+		// Public disconnect — same effect as the WS being closed by the network,
+		// but triggered from the client side without losing appliedVersion.
+		store.disconnect();
+		await sleep(20);
+
+		const second = lastSocket();
+		expect(second).not.toBe(first);
+		second.open();
+		// The resumed subscribe must carry `since` so the engine sends a
+		// catch-up diff, not a fresh snapshot.
+		expect(second.subscribeFrame().since).toBe(5);
+
+		// The catch-up diff lands on top of the retained confirmed state.
+		second.emit({
+			type: 'diff',
+			id: 's',
+			added: [open(2, 5)],
+			removed: [],
+			changed: [],
+			version: 6
+		});
+		expect(
+			store
+				.get()
+				.data.map((r) => r.id)
+				.sort()
+		).toEqual([1, 2]);
+		store.close();
+	});
+
+	test('disconnect() is a no-op after close()', async () => {
+		const store = createSyncCollection<Order>({
+			url: 'ws://x',
+			collection: 'orders',
+			webSocketImpl: Impl,
+			reconnectMs: 5
+		});
+		const first = lastSocket();
+		first.open();
+		first.emit({
+			type: 'snapshot',
+			id: 's',
+			rows: [],
+			version: 0
+		});
+
+		store.close();
+		// Should not throw; should not spawn a new socket.
+		const before = FakeWebSocket.instances.length;
+		store.disconnect();
+		await sleep(20);
+		expect(FakeWebSocket.instances.length).toBe(before);
 	});
 });

@@ -4,6 +4,35 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.2.0] — 2026-05-27
+
+### Added
+
+- **`disconnect()` on client + collection.** Force-close the underlying
+  WebSocket *without* tearing down state. The auto-reconnect loop fires
+  after `reconnectMs`, each entry's `appliedVersion` is preserved, and the
+  resumed subscribe carries `since` so the engine replies with a catch-up
+  diff (or a fresh snapshot if the change log no longer covers the gap).
+
+  This exposes the existing resume-via-`since` path (already shipped, see
+  `engine.subscribe`'s `since` parameter + the change-log + the catch-up
+  diff builder) so tests, benches, and apps can simulate an offline blip
+  cleanly. Pairs with the auto-reconnect loop that's been in place since
+  the WebSocket client landed.
+
+  ```ts
+  const tasks = createSyncCollection<Task>({ collection: 'tasks', url });
+  // …client has appliedVersion = N…
+  tasks.disconnect();   // closes the WS without losing state
+  // …server applies M more changes while we're "offline"…
+  // auto-reconnect fires, subscribe carries since: N,
+  // engine replies with a catch-up diff covering (N, N+M]
+  ```
+
+  No behavioural change for clients that don't call `disconnect()`. The
+  existing `close()` semantics (tear down everything, stop reconnecting)
+  are unchanged.
+
 ## [1.1.0] — 2026-05-27
 
 ### Changed

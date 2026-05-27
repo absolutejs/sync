@@ -47,6 +47,18 @@ export type SyncClient = {
 	collection: <T>(
 		options: SyncCollectionHandleOptions<T>
 	) => SyncCollectionHandle<T>;
+	/**
+	 * Force-close the underlying WebSocket without tearing down state. The
+	 * auto-reconnect loop fires after `reconnectMs`; each entry's
+	 * `appliedVersion` is preserved so the resumed connection's subscribe
+	 * carries `since` and the engine replies with a catch-up diff (or a
+	 * fresh snapshot if the change log no longer covers the gap).
+	 *
+	 * Useful for simulating an offline blip in tests and for benches that
+	 * measure catch-up cost specifically (vs cold-hydration on a fresh
+	 * client). No-op if the socket is already closed.
+	 */
+	disconnect: () => void;
 	/** Close the socket and every handle. */
 	close: () => void;
 };
@@ -389,7 +401,20 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		mutationOwner.clear();
 	};
 
-	return { collection, close };
+	const disconnect = () => {
+		// Force-close the WS without tearing down state. The existing
+		// `ws.onclose` handler schedules a reconnect via the auto-reconnect
+		// loop (unless the whole client has been `close()`d). Each entry's
+		// `appliedVersion` survives, so the resumed subscribe carries `since`
+		// and the engine sends a catch-up diff (or a snapshot if the gap is
+		// too large for the change log).
+		if (closed || socket === undefined) {
+			return;
+		}
+		socket.close();
+	};
+
+	return { collection, close, disconnect };
 };
 
 export type { SyncCollectionState, SyncCollectionStatus };
