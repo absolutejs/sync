@@ -11,6 +11,7 @@ const serverBuild = await Bun.build({
 		'src/index.ts',
 		'src/scheduled.ts',
 		'src/engine/index.ts',
+		'src/mcp/index.ts',
 		'src/adapters/drizzle/index.ts',
 		'src/adapters/prisma/index.ts',
 		'src/adapters/postgres/index.ts',
@@ -21,7 +22,8 @@ const serverBuild = await Bun.build({
 		'elysia',
 		'@elysiajs/cron',
 		'drizzle-orm',
-		'@absolutejs/isolated-jsc'
+		'@absolutejs/isolated-jsc',
+		'@modelcontextprotocol/sdk'
 	],
 	outdir: DIST,
 	root: 'src',

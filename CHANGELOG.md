@@ -4,6 +4,47 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.9] — 2026-05-27
+
+### Added
+
+- **New subpath `@absolutejs/sync/mcp` — Model Context Protocol server
+  for the engine.** Surface a {@link SyncEngine}'s read + mutate
+  surface to MCP-aware clients (Claude Code, Cursor, custom agents)
+  through five tools:
+
+  - `list_collections` — registered collection names + kinds + tables
+  - `list_mutations` — registered mutation names
+  - `inspect_engine` — full {@link EngineInspection} snapshot
+  - `get_snapshot` — `{ collection, params?, ctx? }` → current rows
+  - `run_mutation` — `{ mutation, args, ctx? }` → result
+
+  ```ts
+  // mcp-stdio-server.ts — point your MCP client at this file's path.
+  import { createSyncMcpServer, serveStdio } from '@absolutejs/sync/mcp';
+  const server = await createSyncMcpServer({
+    engine,
+    defaultCtx: { tenantId: 'demo' },
+  });
+  await serveStdio(server);
+  ```
+
+  Multi-tenant gating is built in: spawn one MCP server per tenant
+  with `defaultCtx: { tenantId }`; the agent's per-call `ctx`
+  overrides aren't required (and tools that take a `ctx` fall back
+  to the server default).
+
+  Closes the QW-5 strategy item from the May 2026 competitive dive
+  (Val.town's MCP server with 36+ tools, Cloudflare's MCP exposing
+  the entire Cloudflare API through "two tools in under 1,000 tokens"
+  via Code Mode — sync needed to be in this conversation).
+
+### Bumped
+
+- New OPTIONAL peer dep `@modelcontextprotocol/sdk >= 1.29.0`.
+  Install only if you import from `@absolutejs/sync/mcp`. The
+  subpath loads the SDK lazily via dynamic `import()`.
+
 ## [1.7.8] — 2026-05-27
 
 ### Added
