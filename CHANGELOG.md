@@ -4,6 +4,66 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.5.0] — 2026-05-27
+
+### Added
+
+- **OCC retry for mutations.** `defineMutation` gains an optional
+  `retry: RetryPolicy` (the type has been there since 1.3 but the loop
+  is now wired). When a handler throws a classified-as-retryable error
+  (default: PG `40001` / `40P01`), the engine discards the buffered
+  changes, waits a backoff, and re-runs the handler in a fresh
+  transaction. The number-of-attempts ceiling and the time-budget
+  ceiling both apply.
+
+    ```ts
+    defineMutation({
+    	name: 'transfer',
+    	retry: {
+    		maxAttempts: 5,
+    		backoff: exponentialBackoff({ baseMs: 25, maxMs: 1_000 }),
+    		isRetryable: isSerializationFailure, // default
+    		maxElapsedMs: 30_000 // default
+    	},
+    	handler: async (args, ctx, actions) => { ... }
+    });
+    ```
+
+    Each attempt builds fresh `actions` / `buffered` from `makeActions`,
+    so a retry never inherits half-applied buffered changes from a
+    failed attempt. Transactions reopen per attempt under
+    `runInTransaction`. Handlers MUST be idempotent under retry —
+    external side effects (HTTP, email) will fire more than once.
+
+    On exhaustion the engine throws a `RetriesExhaustedError` whose
+    `.cause` is the underlying error and whose `.attempts` /
+    `.elapsedMs` describe the run. A non-retryable first-attempt
+    failure passes through with its original error preserved, even if
+    `retry` is configured.
+
+    New exports from `@absolutejs/sync/engine`: `RetryPolicy`,
+    `exponentialBackoff`, `isSerializationFailure`,
+    `RetriesExhaustedError`, `ExponentialBackoffOptions`.
+
+- **`mutationRetry` engine activity event.** Between attempts the
+  engine emits a new event shape on `onActivity(...)` so dashboards
+  and observability sinks can see retries happen:
+
+    ```ts
+    {
+    	type: 'mutationRetry',
+    	at: number,
+    	name: string,
+    	attempt: number, // the attempt that just failed (1-indexed)
+    	delayMs: number,
+    	errorName: string,
+    	errorMessage: string,
+    }
+    ```
+
+    The final `mutation` event (`status: 'ok'` or `'error'`) still fires
+    exactly once per call.
+
 ## [1.4.0] — 2026-05-27
 
 ### Added

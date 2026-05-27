@@ -2076,30 +2076,93 @@ export const createSyncEngine = (
 				return { buffered, result };
 			};
 
-			// Emit only after the transaction commits, so subscribers never see a
-			// change that later rolls back.
-			try {
-				const { buffered, result } =
-					runInTransaction !== undefined
-						? await runInTransaction((tx) => runHandler(tx))
-						: await runHandler(undefined);
-				await applyChangeBatch(buffered);
-				emitActivity({
-					type: 'mutation',
-					at: Date.now(),
-					name,
-					status: 'ok'
-				});
-				return result;
-			} catch (error) {
-				emitActivity({
-					type: 'mutation',
-					at: Date.now(),
-					name,
-					status: 'error'
-				});
-				throw error;
+			// Resolve the retry policy once per call. When `mutation.retry` is
+			// undefined we still go through the loop, but bounded to one
+			// attempt with no backoff (cheaper than a separate code path).
+			const retry = mutation.retry;
+			const maxAttempts =
+				retry === undefined ? 1 : (retry.maxAttempts ?? 5);
+			const isRetryable = retry?.isRetryable ?? isSerializationFailure;
+			const computeDelay = retry?.backoff ?? exponentialBackoff();
+			const maxElapsedMs = retry?.maxElapsedMs ?? 30_000;
+			const startedAt = Date.now();
+
+			// Each attempt builds fresh `actions`/`buffered` via the makeActions
+			// call inside runHandler, so a retry never inherits half-applied
+			// buffered changes from a failed attempt. Transactions reopen too:
+			// runInTransaction wraps each individual attempt.
+			let lastError: unknown;
+			let attemptsMade = 0;
+			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+				attemptsMade = attempt;
+				try {
+					const { buffered, result } =
+						runInTransaction !== undefined
+							? await runInTransaction((tx) => runHandler(tx))
+							: await runHandler(undefined);
+					await applyChangeBatch(buffered);
+					emitActivity({
+						type: 'mutation',
+						at: Date.now(),
+						name,
+						status: 'ok'
+					});
+					return result;
+				} catch (error) {
+					lastError = error;
+					const elapsedMs = Date.now() - startedAt;
+					const canRetry =
+						attempt < maxAttempts &&
+						isRetryable(error) &&
+						elapsedMs < maxElapsedMs;
+					if (!canRetry) break;
+
+					const rawDelay = computeDelay(attempt);
+					// Cap the delay so we don't blow past maxElapsedMs while
+					// sleeping. If the cap would be negative we're already past
+					// the budget; treat as exhausted.
+					const remaining = maxElapsedMs - elapsedMs;
+					if (remaining <= 0) break;
+					const delayMs = Math.max(0, Math.min(rawDelay, remaining));
+
+					emitActivity({
+						type: 'mutationRetry',
+						at: Date.now(),
+						name,
+						attempt,
+						delayMs,
+						errorName:
+							error instanceof Error ? error.name : 'Error',
+						errorMessage:
+							error instanceof Error
+								? error.message
+								: String(error)
+					});
+					if (delayMs > 0) {
+						await new Promise((resolve) =>
+							setTimeout(resolve, delayMs)
+						);
+					}
+				}
 			}
+
+			emitActivity({
+				type: 'mutation',
+				at: Date.now(),
+				name,
+				status: 'error'
+			});
+			// Wrap only when we actually burned through more than one attempt
+			// — a non-retryable first-attempt failure passes through with its
+			// original error preserved, even if `retry` is configured.
+			if (attemptsMade > 1) {
+				throw new RetriesExhaustedError(
+					attemptsMade,
+					Date.now() - startedAt,
+					lastError
+				);
+			}
+			throw lastError;
 		},
 
 		registerSchedule: (schedule) => {
