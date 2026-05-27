@@ -127,6 +127,7 @@ observing the new value:
 | ---------------- | -------------------------------------- | -------- | -------- | ------ |
 | @absolutejs/sync | single engine, local (WS + PG)         | **11.0** | **15.8** | 23.3   |
 | @absolutejs/sync | 2-engine cluster, in-memory bus, local | **6.2**  | **11.1** | 14.0   |
+| @absolutejs/sync | 2-engine cluster, **PG-NOTIFY bus**, local | **11.8** | **17.6** | 24.4 |
 | Convex           | self-hosted, loopback Docker           | 19.8     | 28.5     | 36.8   |
 | Convex           | cloud (HTTPS)                          | 69.4     | 86.9     | 105.6  |
 
@@ -136,14 +137,22 @@ self-hosted (loopback) adds ~4 ms over write-ack: their reactive-subscriber
 notification is a second HTTP/WS hop, but it's local. Cloud Convex's ~17 ms
 over write-ack is that same hop carrying across the internet.
 
-**Cluster mode adds essentially zero overhead.** Sync ships a `ClusterBus`
-seam (you bring Redis / PG-NOTIFY / NATS) for horizontal scale. The 2-engine
-row above measures writer-on-A → subscriber-on-B over the bundled in-memory
-bus: identical to single-engine because the fan-out happens in the same
-tick. A real PG-NOTIFY/Redis bus would add the bus's own latency on top
-(~1–3 ms LAN). Caveat: per-instance version cursors mean a client that
-reconnects to a *different* instance falls back to a fresh snapshot, not
-a catch-up diff — use sticky sessions for cross-instance resume.
+**Cluster mode** uses a `ClusterBus` seam for horizontal scale. Two rows
+above measure it. The in-memory bus is the floor (same process, same
+tick — same order of magnitude as single-engine). The **PG-NOTIFY bus**
+([`@absolutejs/sync-bus-pg`](https://www.npmjs.com/package/@absolutejs/sync-bus-pg))
+adds **~5–6 ms** for the actual cross-process NOTIFY round-trip — that's
+the production cost of horizontal scale without adding Redis to your
+stack (your existing Postgres carries the change feed). The 8000-byte
+NOTIFY payload limit is handled inside the bus (small messages inline,
+oversized batches spill to a `sync_cluster_spill` table with a
+`vacuum()` API). A Redis or NATS bus would land at similar latencies —
+pick the bus your stack already uses.
+
+Caveat: per-instance version cursors mean a client that reconnects to
+a *different* instance falls back to a fresh snapshot (correct, not
+catch-up diff). Use sticky sessions for cross-instance reconnect-as-
+diff; or accept the cold-hydration cost on cross-instance reconnect.
 
 Zero is unmeasured: v1.5 deprecates the old `definePermissions` model and is
 mid-transition to cookie-based auth — against a `zero-cache` with deployed
