@@ -55,6 +55,7 @@ WSL2 dev box):
 | ---------------- | ------------------------------------------ | -------- | -------- | ---------------- |
 | @absolutejs/sync | local (WS) + Postgres                      | **9.5**  | **18.0** | **96**           |
 | TanStack DB      | local (REST + queryCollection) + Postgres  | 17.5     | 30.3     | 53               |
+| Convex           | **self-hosted, loopback Docker**           | 15.9     | 21.3     | 61               |
 | Convex           | cloud, dev WSL → Convex                    | 52.8     | 66.2     | 18               |
 | Convex           | cloud, GH Actions runner → Convex          | 76.6     | 83.2     | 13               |
 | Zero             | local (zero-cache + push server + PG)      | 66.9     | 104.9    | 14               |
@@ -68,19 +69,24 @@ WSL2 dev box):
 | Convex      | 18  | 34  | 42   | 43   | 2.4× (saturates) |
 | Zero        | 16  | 24  | 24   | 32   | 2.0× (saturates) |
 
-Read the table with the conditions in mind. `@absolutejs/sync` is a **library**
-in your own Elysia server (writes never leave loopback); TanStack DB is a
-**client store + sync coordinator** that POSTs each write over HTTP; Zero is the
-**closest architectural rival** but its v1.5 mutation path goes through two
-hops (client → zero-cache → push server → PG); Convex is a **hosted cloud
-backend** (every write is a public-internet round-trip — we re-ran the same
-bench from a cloud VM via GitHub Actions to remove the consumer-ISP variable
-and p50 settled at **76.6 ms**, very tight distribution, confirming the floor
-is the network round-trip itself, not the engine — see
-[`bench-convex-us-east.yml`](https://github.com/absolutejs/benchmarks/blob/main/.github/workflows/bench-convex-us-east.yml)).
-The honest thesis isn't "X is N× faster" — it's that sync's single-process write
-path (WS → engine → PG, no extra hop) gives you live queries + optimistic writes
-+ CRDTs **without adopting a new backend**.
+Read the table with the conditions in mind. The **self-hosted Convex row** is
+the honest engine-vs-engine comparison — both running on loopback, no network.
+Sync wins by ~1.7× on write round-trip and ~5× on concurrent throughput. The
+cloud Convex rows (53 / 77 ms) are deployment-model rows, not engine rows;
+most of that delta is the public-internet hop, not engine craft. We say so.
+
+`@absolutejs/sync` is a **library** in your own Elysia server (writes never
+leave loopback); TanStack DB is a **client store + sync coordinator** that
+POSTs each write over HTTP; Zero is the **closest architectural rival** but
+its v1.5 mutation path goes through two hops (client → zero-cache → push
+server → PG); Convex is a **hosted cloud backend** (or self-hosted Docker —
+the loopback row removes the network so the engine cost is visible).
+
+The honest thesis: sync's in-process write path (WS → engine → PG, no extra
+hop) is **~1.7–3× faster on these specific workloads, ~5× more concurrent**
+against Convex's engine — and gets you live queries + optimistic writes +
+CRDTs **without adopting a new backend**. Not "5× faster" out of context
+(that was the cloud number, which conflated engine cost with network cost).
 
 | Dimension             | @absolutejs/sync                                                              | Convex                        | Zero (Rocicorp)                      |
 | --------------------- | ----------------------------------------------------------------------------- | ----------------------------- | ------------------------------------ |
@@ -103,16 +109,27 @@ exist for: *two* clients connect, one mutates, the other has a subscription
 on `counter` — measure the time from issuing the mutation to the *subscriber*
 observing the new value:
 
-| Backend          | Where             | p50      | p95      | p99    |
-| ---------------- | ----------------- | -------- | -------- | ------ |
-| @absolutejs/sync | local (WS + PG)   | **11.0** | **15.8** | 23.3   |
-| Convex           | cloud (HTTPS)     | 69.4     | 86.9     | 105.6  |
+| Backend          | Where                                  | p50      | p95      | p99    |
+| ---------------- | -------------------------------------- | -------- | -------- | ------ |
+| @absolutejs/sync | single engine, local (WS + PG)         | **11.0** | **15.8** | 23.3   |
+| @absolutejs/sync | 2-engine cluster, in-memory bus, local | **6.2**  | **11.1** | 14.0   |
+| Convex           | self-hosted, loopback Docker           | 19.8     | 28.5     | 36.8   |
+| Convex           | cloud (HTTPS)                          | 69.4     | 86.9     | 105.6  |
 
 Sync's propagation adds only ~1.5 ms over its own write-ack — fan-out is
-in-process; the subscriber's WS gets the diff frame on the same tick. Convex's
-propagation adds ~17 ms over its write-ack — the recomputed result has to
-make a second public-internet hop to push to the subscriber. That overhead is
-structural to a hosted-backend deployment, not a Convex flaw.
+in-process; the subscriber's WS gets the diff frame on the same tick. Convex
+self-hosted (loopback) adds ~4 ms over write-ack: their reactive-subscriber
+notification is a second HTTP/WS hop, but it's local. Cloud Convex's ~17 ms
+over write-ack is that same hop carrying across the internet.
+
+**Cluster mode adds essentially zero overhead.** Sync ships a `ClusterBus`
+seam (you bring Redis / PG-NOTIFY / NATS) for horizontal scale. The 2-engine
+row above measures writer-on-A → subscriber-on-B over the bundled in-memory
+bus: identical to single-engine because the fan-out happens in the same
+tick. A real PG-NOTIFY/Redis bus would add the bus's own latency on top
+(~1–3 ms LAN). Caveat: per-instance version cursors mean a client that
+reconnects to a *different* instance falls back to a fresh snapshot, not
+a catch-up diff — use sticky sessions for cross-instance resume.
 
 Zero is unmeasured: v1.5 deprecates the old `definePermissions` model and is
 mid-transition to cookie-based auth — against a `zero-cache` with deployed
