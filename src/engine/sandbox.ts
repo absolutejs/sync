@@ -88,19 +88,20 @@ const loadIsolatedJsc = async (): Promise<IsolatedJscModule> => {
 
 /**
  * Wrap user source as a function expression for `compileCallable`. The
- * compiled function takes `(args, ctx, __dispatch)` — `__dispatch` is the
- * host Reference that routes `actions.*` calls back to the engine. The
- * in-VM `actions` object is a thin shim built per call (cost: a few JS
- * object literals, negligible).
+ * compiled function takes `(__callId, args, ctx)` — `__callId` keys the
+ * per-call `actions` lookup, so the dispatch Reference (installed once
+ * per isolate as a global) can route `actions.*` calls back to the
+ * correct call's host-side `actions` instance. The in-VM `actions`
+ * object is a thin shim that closes the call id over a global
+ * `__dispatch` Reference.
  *
- * The wrapper is SYNC: `function (args, ctx, __dispatch) { ... return
- * userFn(args, ctx, actions); }`. If `userFn` is sync the return is a
- * primitive (FFI's `unwrapResultPromise` short-circuits on
- * `!JSValueIsObject` — zero unwrap evals). If `userFn` is async the
- * return is a Promise and the unwrap pump fires normally.
+ * The wrapper is SYNC. If `userFn` is sync the return is a primitive
+ * (FFI's `unwrapResultPromise` short-circuits on `!JSValueIsObject` —
+ * zero unwrap evals). If `userFn` is async the return is a Promise and
+ * the unwrap pump fires normally.
  */
 const wrap = (source: string): string => `
-	function (args, ctx, __dispatch) {
+	function (__callId, args, ctx) {
 		const userFn = (${source});
 		if (typeof userFn !== 'function') {
 			throw new Error(
@@ -109,10 +110,10 @@ const wrap = (source: string): string => `
 			);
 		}
 		const actions = {
-			insert: (table, data) => __dispatch('insert', table, data),
-			update: (table, data) => __dispatch('update', table, data),
-			delete: (table, row) => __dispatch('delete', table, row),
-			change: (collection, change) => __dispatch('change', collection, change)
+			insert: (table, data) => __dispatch(__callId, 'insert', table, data),
+			update: (table, data) => __dispatch(__callId, 'update', table, data),
+			delete: (table, row) => __dispatch(__callId, 'delete', table, row),
+			change: (collection, change) => __dispatch(__callId, 'change', collection, change)
 		};
 		return userFn(args, ctx, actions);
 	}
@@ -120,8 +121,12 @@ const wrap = (source: string): string => `
 
 type CompiledMutation = {
 	callable: Callable;
+	/** Per-call actions instances, keyed by callId. Lives for the
+	 * duration of each call. */
+	callMap: Map<number, MutationActions>;
 	context: Context;
 	isolate: Isolate;
+	nextCallId: number;
 	timeoutMs: number;
 };
 
@@ -129,33 +134,70 @@ const compile = async (
 	source: string,
 	config: SandboxConfig
 ): Promise<CompiledMutation> => {
-	const { createIsolate } = await loadIsolatedJsc();
+	const { createIsolate, Reference } = await loadIsolatedJsc();
 	const isolate = await createIsolate({
 		backend: config.backend ?? 'auto',
 		memoryLimit: config.memoryLimit ?? 32
 	});
 	const context = await isolate.createContext();
+
+	// Dispatch installed ONCE per isolate as a global. Closes over the
+	// per-mutation callMap; each in-VM `actions.*` call hands its
+	// callId back so we look up the right `actions` instance. This is
+	// concurrent-safe: every call has its own callId → its own slot,
+	// no shared-mutable-state races.
+	const callMap = new Map<number, MutationActions>();
+	const dispatch = new Reference(((
+		callId: unknown,
+		op: unknown,
+		...rest: unknown[]
+	): Promise<unknown> | unknown => {
+		const a = callMap.get(callId as number);
+		if (a === undefined) {
+			throw new Error(
+				`__dispatch invoked for orphan callId ${String(callId)}`
+			);
+		}
+		switch (op) {
+			case 'insert':
+				return a.insert(rest[0] as string, rest[1]);
+			case 'update':
+				return a.update(rest[0] as string, rest[1]);
+			case 'delete':
+				return a.delete(rest[0] as string, rest[1]);
+			case 'change':
+				return a.change(rest[0] as string, rest[1] as never);
+			default:
+				throw new Error(`unknown sandbox action op: ${String(op)}`);
+		}
+	}) as (...rawArgs: unknown[]) => unknown);
+	await context.setGlobal('__dispatch', dispatch);
+
 	const callable = await context.compileCallable(wrap(source));
 	return {
 		callable,
+		callMap,
 		context,
 		isolate,
+		nextCallId: 1,
 		timeoutMs: config.timeout ?? 5000
 	};
 };
 
 /**
  * Build a lazy runner for one mutation's sandboxed source. The first call
- * compiles the isolate + context + callable; subsequent calls reuse all
- * three and only pack the per-call args (`args`, `ctx`, and a fresh
- * dispatch Reference closed over this call's `actions`). If the isolate
- * has been disposed (timeout, memory cap), the next call re-spawns
- * transparently.
+ * compiles the isolate + context + dispatch Reference + callable;
+ * subsequent calls only generate a fresh callId, register the per-call
+ * `actions` in the callMap, and invoke `callable.call([callId, args,
+ * ctx])`. Per-call cost on FFI: one JSObjectCallAsFunction + three
+ * cheap primitive packings. No per-call Reference allocation, no
+ * setGlobal, no eval.
  *
- * Concurrency-safe by construction: every call gets its own fresh
- * dispatch Reference closed over its own `actions`. No shared slot, no
- * promise queue needed. (Reference allocation cost is ~0.003 ms per
- * call — negligible.)
+ * Concurrency-safe by construction: each call has its own callId →
+ * its own actions slot in the callMap.
+ *
+ * If the isolate has been disposed (timeout, memory cap), the next
+ * call re-spawns transparently.
  */
 export const makeSandboxedHandler = (
 	source: string,
@@ -178,27 +220,15 @@ export const makeSandboxedHandler = (
 	};
 
 	return async (args, ctx, actions) => {
-		const { Reference } = await loadIsolatedJsc();
 		const compiled = await getCompiled();
-		const dispatch = new Reference(((
-			op: unknown,
-			...rest: unknown[]
-		): Promise<unknown> | unknown => {
-			switch (op) {
-				case 'insert':
-					return actions.insert(rest[0] as string, rest[1]);
-				case 'update':
-					return actions.update(rest[0] as string, rest[1]);
-				case 'delete':
-					return actions.delete(rest[0] as string, rest[1]);
-				case 'change':
-					return actions.change(rest[0] as string, rest[1] as never);
-				default:
-					throw new Error(`unknown sandbox action op: ${String(op)}`);
-			}
-		}) as (...rawArgs: unknown[]) => unknown);
-		return compiled.callable.call([args, ctx, dispatch], {
-			timeout: compiled.timeoutMs
-		});
+		const callId = compiled.nextCallId++;
+		compiled.callMap.set(callId, actions);
+		try {
+			return await compiled.callable.call([callId, args, ctx], {
+				timeout: compiled.timeoutMs
+			});
+		} finally {
+			compiled.callMap.delete(callId);
+		}
 	};
 };

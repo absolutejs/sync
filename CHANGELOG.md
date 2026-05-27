@@ -4,6 +4,33 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.5] — 2026-05-27
+
+### Changed (performance)
+
+- **`sandboxedHandler` — install the dispatch Reference ONCE per
+  isolate; route per-call via a callId argument.** 1.7.4 passed a
+  fresh dispatch `Reference` as a parameter on every call, which on
+  the FFI backend triggered a `JSObjectMakeFunctionWithCallback` +
+  JSCallback alloc per call (~0.5 ms fixed cost). Bench regressed
+  pure-handler FFI from 0.33 ms (1.7.3) → 0.96 ms (1.7.4).
+
+  1.7.5 reverts that: install `__dispatch` ONCE per isolate as a
+  global Reference closed over a per-mutation `callMap`. Each call
+  generates a fresh `callId`, registers its `actions` in the map,
+  invokes `callable.call([callId, args, ctx])`, and deletes the
+  entry in finally. The in-VM `actions` shim closes the call id
+  over `__dispatch`, so concurrent calls route to the right
+  `actions` instance via their own callId — concurrent-safe by
+  construction, no shared-mutable slot, no serialization queue.
+
+  Per-call hot path: one `JSObjectCallAsFunction` + 3 cheap
+  primitive packings (callId is a number; args/ctx structured-clone
+  via JSON). No per-call Reference alloc.
+
+  Expected on the bench: pure FFI back to <0.4 ms, actions FFI
+  ~similar to 1.7.4 (~1.5 ms — the pump dominates there).
+
 ## [1.7.4] — 2026-05-27
 
 ### Changed (performance)
