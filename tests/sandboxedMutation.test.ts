@@ -338,6 +338,24 @@ describe('sandboxed mutations', () => {
 		}
 	});
 
+	test('actions.now() returns a Date.now()-comparable number from the host', async () => {
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'currentTime',
+				sandbox: { timeout: 2000 },
+				sandboxedHandler: `async (args, ctx, actions) => actions.now()`
+			})
+		);
+		const before = Date.now();
+		const t = (await engine.runMutation('currentTime', {}, {})) as number;
+		const after = Date.now();
+		expect(typeof t).toBe('number');
+		expect(t).toBeGreaterThanOrEqual(before);
+		expect(t).toBeLessThanOrEqual(after);
+	});
+
 	test("explicit `backend: 'worker'` matches the default (current behaviour)", async () => {
 		const engine = createSyncEngine();
 		engine.register(itemsCollection('items'));

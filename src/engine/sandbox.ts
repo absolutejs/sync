@@ -171,7 +171,8 @@ const wrap = (source: string): string => `
 			insert: (table, data) => __dispatch(__callId, 'insert', table, data),
 			update: (table, data) => __dispatch(__callId, 'update', table, data),
 			delete: (table, row) => __dispatch(__callId, 'delete', table, row),
-			change: (collection, change) => __dispatch(__callId, 'change', collection, change)
+			change: (collection, change) => __dispatch(__callId, 'change', collection, change),
+			now: () => __dispatch(__callId, 'now')
 		};
 		return userFn(args, ctx, actions);
 	}
@@ -225,6 +226,8 @@ const compile = async (
 				return a.delete(rest[0] as string, rest[1]);
 			case 'change':
 				return a.change(rest[0] as string, rest[1] as never);
+			case 'now':
+				return a.now();
 			default:
 				throw new Error(`unknown sandbox action op: ${String(op)}`);
 		}

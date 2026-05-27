@@ -4,6 +4,25 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.7] — 2026-05-27
+
+### Added
+
+- **`actions.now()`** on `MutationActions`. Returns a wall-clock
+  timestamp (ms since epoch) that the engine controls. Today it's
+  `Date.now()`; in a future replay / rebase path the engine will pin
+  it to the original call's timestamp so optimistic client and
+  authoritative server runs don't silently diverge.
+
+  Use `actions.now()` everywhere you'd reach for `Date.now()` inside
+  a mutation handler. The plain `handler` form gets it as part of
+  the `actions` parameter; the `sandboxedHandler` form gets it
+  through the same in-VM shim as the other actions (one
+  `__dispatch(callId, 'now')` host-fn call).
+
+  Trivially additive — existing handlers using `Date.now()` keep
+  working; the new primitive is opt-in.
+
 ## [1.7.6] — 2026-05-27
 
 ### Added

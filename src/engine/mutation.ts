@@ -50,6 +50,28 @@ export type MutationActions = {
 	delete: (table: string, row: unknown) => Promise<void>;
 	/** Escape hatch: emit a change you persisted yourself (no writer call). */
 	change: <T>(collection: string, change: RowChange<T>) => Promise<void>;
+	/**
+	 * Wall-clock timestamp the handler should use instead of `Date.now()`.
+	 * Returns a `number` (ms since epoch).
+	 *
+	 * Why an injected clock? Two forward-looking reasons:
+	 *
+	 *   1. **Replay / rebase determinism.** When the engine re-runs a
+	 *      mutation against an updated state (Replicache-style mutator
+	 *      replay), `actions.now()` returns the ORIGINAL call's timestamp
+	 *      instead of the current wall clock. `Date.now()` would silently
+	 *      diverge between client-optimistic and server-canonical runs;
+	 *      `actions.now()` doesn't.
+	 *
+	 *   2. **Test determinism.** Test harnesses can pin time by passing a
+	 *      custom `now()` through {@link MutationActions} — the handler
+	 *      observes whatever the test wants.
+	 *
+	 * If the engine doesn't override it (the common case today), it just
+	 * returns `Date.now()`. Use it everywhere you'd reach for
+	 * `Date.now()` inside a mutation handler.
+	 */
+	now: () => number;
 };
 
 export type MutationHandler<Args, Ctx, Result> = (

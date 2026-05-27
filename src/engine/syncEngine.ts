@@ -1202,7 +1202,10 @@ export const createSyncEngine = (
 				}
 				await writerFor(table).delete(row, ctx, tx);
 				buffered.push({ table, change: { op: 'delete', row } });
-			}
+			},
+			// Default wall clock. Replay / rebase paths can wrap and pin
+			// this; today it's just Date.now().
+			now: () => Date.now()
 		};
 		return { actions, buffered };
 	};
