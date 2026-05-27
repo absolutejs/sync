@@ -4,6 +4,47 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.3.0] — 2026-05-27
+
+### Added
+
+- **Cross-client reactive query cache.** Subscriptions sharing the same
+  `(collection, params, ctx)` now reuse a cached snapshot on initial
+  subscribe instead of each re-running the query body. 1.1 deduped reruns
+  within a single write batch; 1.3 lifts that sharing *across* batches.
+  Behaviour, in one line: with N fresh subscribers to the same query, the
+  query body runs **once** at the first subscribe; subscribers 2…N hit
+  the cache. An overlapping write invalidates the entry (same
+  `isReactiveAffected` check live subs already use), and the rerun fired
+  by that write refreshes the cache so the next subscriber is a hit
+  again.
+
+  Configurable via the new `reactiveCache` option on `createSyncEngine`:
+
+  ```ts
+  createSyncEngine({
+    reactiveCache: {
+      max: 256,      // LRU bound (default 256). 0 disables the cache.
+      ttlMs: 60_000  // TTL (default 60s). 0 disables the TTL.
+    }
+  });
+  ```
+
+  Defaults are bounded by design — no engine should leak memory on a
+  query that's never re-subscribed. Different `ctx` references stay
+  isolated (per-user query bodies are unaffected).
+
+  This is the same pattern Convex uses to coalesce queries across all
+  online clients ("every specific combination of (query code, parameters,
+  database read set) executes only once"). Sync's read-set tracking +
+  stable sub-key were already there; this PR just lifts the existing
+  per-batch `sharedRuns` map to a persistent one with invalidation +
+  bounded eviction.
+
+  4 new tests in `tests/reactiveQuery.test.ts`: cache hit on second
+  subscribe, invalidation on overlapping write + refresh on the rerun,
+  `max: 0` disables, different ctxs miss independently.
+
 ## [1.2.0] — 2026-05-27
 
 ### Added

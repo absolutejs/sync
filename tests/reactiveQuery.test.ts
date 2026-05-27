@@ -493,3 +493,194 @@ describe('reactive queries — fan-out dedup', () => {
 		expect(rerunCalls).toContainEqual({ user: 'bob' });
 	});
 });
+
+describe('reactive queries — cross-client cache (1.3+)', () => {
+	test('second subscribe with same (collection, params, ctx) reuses cached rows — body runs once across N fresh subscribes', async () => {
+		// Convex caches `(query code, args, read set)` globally across clients;
+		// before 1.3 sync only deduped within a write batch, so a 50th
+		// subscriber to the same query still re-ran the body. The cache now
+		// covers the cross-batch case: subscribers 2..N hit the cache.
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		let rerunCount = 0;
+		engine.registerReactive(
+			defineReactiveQuery<Message>({
+				key: (message) => message.id,
+				name: 'allMessages',
+				run: ({ db }) => {
+					rerunCount += 1;
+
+					return db.all<Message>('messages');
+				}
+			})
+		);
+		store.messages.set(1, { id: 1, room: 'r', text: 'hi' });
+
+		const subs: Array<{ unsubscribe: () => void }> = [];
+		for (let index = 0; index < 50; index += 1) {
+			subs.push(
+				await engine.subscribe<Message>({
+					collection: 'allMessages',
+					ctx: {},
+					onDiff: () => {},
+					params: undefined
+				})
+			);
+		}
+		// First subscribe is the cache miss; the next 49 hit the cache.
+		expect(rerunCount).toBe(1);
+		// All 50 subs see the same snapshot.
+		for (const sub of subs) sub.unsubscribe();
+	});
+
+	test('an overlapping write invalidates the cache — next subscribe re-runs', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		engine.registerWriter<Message>('messages', {
+			delete: () => {},
+			insert: (row) => {
+				store.messages.set(row.id, row);
+
+				return row;
+			},
+			update: (row) => {
+				store.messages.set(row.id, row);
+
+				return row;
+			}
+		});
+		let rerunCount = 0;
+		engine.registerReactive(
+			defineReactiveQuery<Message>({
+				key: (message) => message.id,
+				name: 'allMessages',
+				run: ({ db }) => {
+					rerunCount += 1;
+
+					return db.all<Message>('messages');
+				}
+			})
+		);
+		engine.registerMutation(
+			defineMutation({
+				handler: (args: Message, _ctx, actions) =>
+					actions.insert<Message>('messages', args),
+				name: 'add'
+			})
+		);
+
+		const s1 = await engine.subscribe<Message>({
+			collection: 'allMessages',
+			ctx: {},
+			onDiff: () => {},
+			params: undefined
+		});
+		const s2 = await engine.subscribe<Message>({
+			collection: 'allMessages',
+			ctx: {},
+			onDiff: () => {},
+			params: undefined
+		});
+		// s1 = miss (run #1); s2 = hit (no new run).
+		expect(rerunCount).toBe(1);
+
+		// Write overlapping the read set: invalidates the cache AND triggers
+		// the per-batch dedup'd rerun (the same shared one for both live subs).
+		await engine.runMutation('add', { id: 2, room: 'r', text: 'two' }, {});
+		expect(rerunCount).toBe(2);
+
+		// Fresh subscriber lands AFTER the invalidation; the rerun in the
+		// write batch refreshed the cache so this is a cache hit again.
+		const s3 = await engine.subscribe<Message>({
+			collection: 'allMessages',
+			ctx: {},
+			onDiff: () => {},
+			params: undefined
+		});
+		expect(rerunCount).toBe(2);
+
+		s1.unsubscribe();
+		s2.unsubscribe();
+		s3.unsubscribe();
+	});
+
+	test('disabling the cache (max=0) keeps the 1.1 per-batch dedup but always reruns on subscribe', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine({ reactiveCache: { max: 0 } });
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		let rerunCount = 0;
+		engine.registerReactive(
+			defineReactiveQuery<Message>({
+				key: (message) => message.id,
+				name: 'allMessages',
+				run: ({ db }) => {
+					rerunCount += 1;
+
+					return db.all<Message>('messages');
+				}
+			})
+		);
+
+		for (let index = 0; index < 5; index += 1) {
+			await engine.subscribe<Message>({
+				collection: 'allMessages',
+				ctx: {},
+				onDiff: () => {},
+				params: undefined
+			});
+		}
+		// max=0 → every subscribe runs the body.
+		expect(rerunCount).toBe(5);
+	});
+
+	test('different ctxs miss the cache independently', async () => {
+		const store = makeStore();
+		const engine = createSyncEngine();
+		engine.registerReader('messages', {
+			all: () => [...store.messages.values()]
+		});
+		const seen: unknown[] = [];
+		engine.registerReactive(
+			defineReactiveQuery<Message, void, { user: string }>({
+				key: (message) => message.id,
+				name: 'allMessages',
+				run: ({ ctx, db }) => {
+					seen.push(ctx);
+
+					return db.all<Message>('messages');
+				}
+			})
+		);
+
+		await engine.subscribe<Message>({
+			collection: 'allMessages',
+			ctx: { user: 'alice' },
+			onDiff: () => {},
+			params: undefined
+		});
+		await engine.subscribe<Message>({
+			collection: 'allMessages',
+			ctx: { user: 'alice' },
+			onDiff: () => {},
+			params: undefined
+		});
+		await engine.subscribe<Message>({
+			collection: 'allMessages',
+			ctx: { user: 'bob' },
+			onDiff: () => {},
+			params: undefined
+		});
+		// alice: miss + hit (1 rerun). bob: miss (1 rerun). Total 2.
+		expect(seen).toHaveLength(2);
+		expect(seen).toContainEqual({ user: 'alice' });
+		expect(seen).toContainEqual({ user: 'bob' });
+	});
+});

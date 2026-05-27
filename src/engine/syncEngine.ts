@@ -383,6 +383,23 @@ export type SyncEngineOptions = {
 	 * more later with {@link SyncEngine.registerSchema}.
 	 */
 	schemas?: SchemaDefinition;
+	/**
+	 * Cross-client cache for reactive query results, keyed by
+	 * `(collection, params, ctx)` — equivalent subscribers reuse a single
+	 * cached snapshot on initial subscribe instead of each re-running the
+	 * query body. Per-batch dedup (already in `reactivePairs` since 1.1) is
+	 * unchanged; this adds *cross-batch* sharing.
+	 *
+	 * Entries are invalidated when a write overlaps their read set (same
+	 * `isReactiveAffected` check live subscriptions use), and bounded by an
+	 * LRU + an optional TTL.
+	 *
+	 * Defaults: `{ max: 256, ttlMs: 60_000 }`. Pass `{ max: 0 }` to disable.
+	 */
+	reactiveCache?: {
+		max?: number;
+		ttlMs?: number;
+	};
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -599,6 +616,54 @@ export const createSyncEngine = (
 	const changeLogSize = options.changeLogSize ?? 1024;
 	const changeLog: LoggedChange[] = [];
 	let version = 0;
+
+	// Cross-client reactive query cache (1.3+). Keyed by stableSubKey, holds
+	// the result + read set so a fresh subscribe with the same key reuses the
+	// rerun instead of hitting the DB again. Per-batch dedup (since 1.1) is
+	// already in `reactivePairs`; this lifts the sharing across batches.
+	//
+	// Entries are invalidated when a write overlaps the cached read set (same
+	// `isReactiveAffected` check live subs use). LRU-bounded; optional TTL.
+	const reactiveCacheMax = options.reactiveCache?.max ?? 256;
+	const reactiveCacheTtlMs = options.reactiveCache?.ttlMs ?? 60_000;
+	type CachedRerun = {
+		rerunKey: string;
+		rows: unknown[];
+		readTables: Set<string>;
+		readKeys: Set<string>;
+		rangeDeps: RangeDep[];
+		version: number;
+		expiresAt: number;
+	};
+	// `Map` preserves insertion order — re-set on access for LRU semantics.
+	const cachedReruns = new Map<string, CachedRerun>();
+	const touchCacheEntry = (key: string, entry: CachedRerun) => {
+		cachedReruns.delete(key);
+		cachedReruns.set(key, entry);
+	};
+	const readCacheEntry = (key: string): CachedRerun | undefined => {
+		if (reactiveCacheMax <= 0) return undefined;
+		const entry = cachedReruns.get(key);
+		if (entry === undefined) return undefined;
+		if (reactiveCacheTtlMs > 0 && entry.expiresAt < Date.now()) {
+			cachedReruns.delete(key);
+
+			return undefined;
+		}
+		touchCacheEntry(key, entry);
+
+		return entry;
+	};
+	const writeCacheEntry = (entry: CachedRerun) => {
+		if (reactiveCacheMax <= 0) return;
+		cachedReruns.set(entry.rerunKey, entry);
+		// LRU eviction: oldest insertion wins out when over budget.
+		while (cachedReruns.size > reactiveCacheMax) {
+			const oldest = cachedReruns.keys().next().value;
+			if (oldest === undefined) break;
+			cachedReruns.delete(oldest);
+		}
+	};
 	// Devtools activity stream — listeners are notified of changes, mutation
 	// outcomes, and subscribe/unsubscribe. Cheap (a no-op) when no one's watching.
 	const activityListeners = new Set<(event: EngineActivity) => void>();
@@ -1057,22 +1122,54 @@ export const createSyncEngine = (
 		((change.key !== undefined && dep.keys.has(change.key)) ||
 			dep.predicate(change.row));
 
+	/** Does any change in the batch overlap this read set? Used for both live
+	 * sub invalidation and cross-client cache invalidation. */
+	const readSetOverlaps = (
+		readTables: Set<string>,
+		readKeys: Set<string>,
+		rangeDeps: RangeDep[],
+		changes: ReactiveChange[]
+	): boolean =>
+		changes.some(
+			(change) =>
+				readTables.has(change.table) ||
+				(change.key !== undefined &&
+					readKeys.has(depKey(change.table, change.key))) ||
+				rangeDeps.some((dep) => inRange(dep, change))
+		);
+
 	/** Did this batch touch a table, row key, or range the sub read? */
 	const isReactiveAffected = (
 		sub: ReactiveSub,
 		changes: ReactiveChange[]
 	): boolean =>
-		changes.some(
-			(change) =>
-				sub.readTables.has(change.table) ||
-				(change.key !== undefined &&
-					sub.readKeys.has(depKey(change.table, change.key))) ||
-				sub.rangeDeps.some((dep) => inRange(dep, change))
-		);
+		readSetOverlaps(sub.readTables, sub.readKeys, sub.rangeDeps, changes);
+
+	/** Drop cached reruns whose read set overlaps this write batch. Cheap walk —
+	 * the cache is bounded by `reactiveCache.max` (default 256). */
+	const invalidateCacheForChanges = (changes: ReactiveChange[]) => {
+		if (cachedReruns.size === 0) return;
+		for (const [key, entry] of cachedReruns) {
+			if (
+				readSetOverlaps(
+					entry.readTables,
+					entry.readKeys,
+					entry.rangeDeps,
+					changes
+				)
+			) {
+				cachedReruns.delete(key);
+			}
+		}
+	};
 
 	const reactivePairs = async (
 		changes: ReactiveChange[]
 	): Promise<[ActiveSubscription, ViewDiff<unknown>][]> => {
+		// Drop now-stale cache entries before reruns — otherwise a fresh
+		// subscriber landing during the batch could read the OLD value.
+		invalidateCacheForChanges(changes);
+
 		const pairs: [ActiveSubscription, ViewDiff<unknown>][] = [];
 		// Dedupe: subscriptions sharing the same `(collection, params, ctx)`
 		// only need ONE rerun per change batch. With 1000 subs on the same
@@ -1102,6 +1199,26 @@ export const createSyncEngine = (
 				pairs.push([sub, diff]);
 			}
 		}
+		// Refresh cache entries with the freshly-computed rows so subsequent
+		// subscribers reuse them without hitting the DB.
+		for (const [key, runPromise] of sharedRuns) {
+			runPromise
+				.then(({ rows, readTables, readKeys, rangeDeps }) => {
+					writeCacheEntry({
+						expiresAt: Date.now() + reactiveCacheTtlMs,
+						rangeDeps,
+						readKeys,
+						readTables,
+						rerunKey: key,
+						rows,
+						version
+					});
+				})
+				.catch(() => {
+					// rerun threw — leave cache as-is (already invalidated above)
+				});
+		}
+
 		return pairs;
 	};
 
@@ -1447,7 +1564,33 @@ export const createSyncEngine = (
 			const rows = [...(await definition.run({ ctx, db, params }))];
 			return { rangeDeps, readKeys, readTables, rows };
 		};
-		const first = await rerun();
+		const rerunKey = stableSubKey(collection, params, ctx);
+		// Cross-client cache hit (1.3+): a previous subscriber with the same
+		// (collection, params, ctx) ran the query body recently and its
+		// result is still valid (no overlapping write since). Reuse it
+		// instead of hitting the DB again. Cache misses fall through to
+		// `rerun()` and populate the cache for the next subscriber.
+		const cached = readCacheEntry(rerunKey);
+		const first =
+			cached !== undefined
+				? {
+						rangeDeps: cached.rangeDeps,
+						readKeys: cached.readKeys,
+						readTables: cached.readTables,
+						rows: cached.rows
+					}
+				: await rerun();
+		if (cached === undefined) {
+			writeCacheEntry({
+				expiresAt: Date.now() + reactiveCacheTtlMs,
+				rangeDeps: first.rangeDeps,
+				readKeys: first.readKeys,
+				readTables: first.readTables,
+				rerunKey,
+				rows: first.rows,
+				version
+			});
+		}
 		const current = new Map<RowKey, unknown>();
 		for (const row of first.rows) {
 			current.set(definition.key(row), row);
@@ -1458,7 +1601,7 @@ export const createSyncEngine = (
 			collection,
 			key: definition.key,
 			rerun,
-			rerunKey: stableSubKey(collection, params, ctx),
+			rerunKey,
 			current,
 			readTables: first.readTables,
 			readKeys: first.readKeys,
