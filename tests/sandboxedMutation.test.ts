@@ -338,6 +338,145 @@ describe('sandboxed mutations', () => {
 		}
 	});
 
+	test('actions.fetch enforces hostname allowlist + injects host-side Authorization', async () => {
+		const seen: Array<{ url: string; authorization?: string }> = [];
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async (
+			input: RequestInfo | URL,
+			init?: RequestInit
+		) => {
+			const headers = new Headers(init?.headers ?? {});
+			seen.push({
+				authorization: headers.get('authorization') ?? undefined,
+				url: typeof input === 'string' ? input : input.toString()
+			});
+			return new Response(JSON.stringify({ pong: true }), {
+				headers: { 'content-type': 'application/json' },
+				status: 200,
+				statusText: 'OK'
+			});
+		}) as typeof fetch;
+
+		try {
+			const engine = createSyncEngine({
+				bridgeFetch: {
+					'api.allowed.test': {
+						authorization: () => 'Bearer host-side-secret'
+					}
+				}
+			});
+			engine.register(itemsCollection('items'));
+			engine.registerMutation(
+				defineMutation({
+					name: 'bridgeOk',
+					sandbox: { timeout: 2000 },
+					sandboxedHandler: `async (args, ctx, actions) => {
+						const r = await actions.fetch('https://api.allowed.test/ping', {
+							method: 'POST',
+							headers: { 'X-Trace': 'abc' },
+							body: 'hello'
+						});
+						return { ok: r.ok, status: r.status, body: r.body };
+					}`
+				})
+			);
+			engine.registerMutation(
+				defineMutation({
+					name: 'bridgeDenied',
+					sandbox: { timeout: 2000 },
+					sandboxedHandler: `async (args, ctx, actions) => {
+						return await actions.fetch('https://api.evil.test/x');
+					}`
+				})
+			);
+
+			const ok = (await engine.runMutation('bridgeOk', {}, {})) as {
+				ok: boolean;
+				status: number;
+				body: string;
+			};
+			expect(ok.ok).toBe(true);
+			expect(ok.status).toBe(200);
+			expect(JSON.parse(ok.body)).toEqual({ pong: true });
+			expect(seen.length).toBe(1);
+			expect(seen[0]?.url).toBe('https://api.allowed.test/ping');
+			expect(seen[0]?.authorization).toBe('Bearer host-side-secret');
+
+			const denied = (await rejection(
+				engine.runMutation('bridgeDenied', {}, {})
+			)) as Error;
+			expect(denied.message).toContain('not allowlisted');
+			// And no extra fetch happened for the denied call.
+			expect(seen.length).toBe(1);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test('actions.fetch rejects sandbox-supplied Authorization to prevent secret-leak vectors', async () => {
+		const seen: Array<Record<string, string | undefined>> = [];
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async (
+			input: RequestInfo | URL,
+			init?: RequestInit
+		) => {
+			const headers = new Headers(init?.headers ?? {});
+			seen.push({
+				authorization: headers.get('authorization') ?? undefined,
+				xTrace: headers.get('x-trace') ?? undefined
+			});
+			return new Response('{}', { status: 200, statusText: 'OK' });
+		}) as typeof fetch;
+
+		try {
+			const engine = createSyncEngine({
+				bridgeFetch: {
+					'api.allowed.test': {
+						authorization: () => 'Bearer host-side'
+					}
+				}
+			});
+			engine.register(itemsCollection('items'));
+			engine.registerMutation(
+				defineMutation({
+					name: 'bridgeSandboxAuth',
+					sandbox: { timeout: 2000 },
+					sandboxedHandler: `async (args, ctx, actions) => {
+						return await actions.fetch('https://api.allowed.test/x', {
+							headers: { Authorization: 'Bearer sandbox-tried-to-set', 'X-Trace': 'ok' }
+						});
+					}`
+				})
+			);
+			await engine.runMutation('bridgeSandboxAuth', {}, {});
+			// Sandbox's Authorization is stripped; host's is the one that
+			// went out.
+			expect(seen[0]?.authorization).toBe('Bearer host-side');
+			// Non-Authorization sandbox headers DO pass through.
+			expect(seen[0]?.xTrace).toBe('ok');
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test('actions.fetch throws cleanly when no bridgeFetch is configured', async () => {
+		const engine = createSyncEngine(); // no bridgeFetch
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'bridgeUnconfigured',
+				sandbox: { timeout: 2000 },
+				sandboxedHandler: `async (args, ctx, actions) => {
+					return await actions.fetch('https://api.example/x');
+				}`
+			})
+		);
+		const err = (await rejection(
+			engine.runMutation('bridgeUnconfigured', {}, {})
+		)) as Error;
+		expect(err.message).toMatch(/no .?bridgeFetch.? config/i);
+	});
+
 	test('actions.now() returns a Date.now()-comparable number from the host', async () => {
 		const engine = createSyncEngine();
 		engine.register(itemsCollection('items'));

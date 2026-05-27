@@ -116,6 +116,9 @@ export type {
 } from './mutation';
 
 export type {
+	BridgeFetchConfig,
+	BridgeFetchEndpoint,
+	BridgeFetchResponse,
 	HandlerMetricsHook,
 	HandlerMetricsRecord,
 	SandboxConfig

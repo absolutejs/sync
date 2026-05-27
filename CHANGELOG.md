@@ -4,6 +4,48 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.8] — 2026-05-27
+
+### Added
+
+- **`bridgeFetch` — credential-brokered HTTP from inside a sandboxed
+  handler.** Engine option pairs an allowlist with per-host auth
+  injection. The sandbox calls `actions.fetch(url, init)`; the host
+  validates the URL is in the allowlist, computes the auth header on
+  the host side (so the secret never crosses into the JSC heap), runs
+  `fetch`, and returns a structured-cloned response the sandbox can
+  pick apart:
+
+  ```ts
+  createSyncEngine({
+    bridgeFetch: {
+      'api.stripe.com': {
+        authorization: () => \`Bearer \${process.env.STRIPE_KEY}\`,
+      },
+      'api.openai.com': {
+        authorization: () => \`Bearer \${process.env.OPENAI_KEY}\`,
+        headers: { 'OpenAI-Beta': 'assistants=v2' },
+      },
+    },
+  });
+
+  // Inside any sandboxedHandler:
+  const res = await actions.fetch('https://api.stripe.com/v1/customers');
+  const customers = JSON.parse(res.body);
+  ```
+
+  Sandbox-supplied `Authorization` headers are stripped before the
+  request is sent (so a malicious tenant can't probe whether the host
+  injected an auth header by reflecting one). All other sandbox
+  headers pass through. Non-allowlisted hostnames throw a clean
+  "not allowlisted" error inside the sandbox before any network call.
+
+  Closes E2B wishlist #1160's "per-sandbox credential brokering with
+  selective injection" pattern, which Cloudflare Dynamic Workers
+  shipped in April 2026. None of the peer sync engines have an
+  equivalent (closest is Convex actions, which run with full host
+  trust — no allowlist boundary).
+
 ## [1.7.7] — 2026-05-27
 
 ### Added

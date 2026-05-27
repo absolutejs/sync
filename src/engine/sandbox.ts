@@ -107,6 +107,69 @@ export type HandlerMetricsHook = (
 	record: HandlerMetricsRecord
 ) => void | Promise<void>;
 
+/**
+ * Per-host configuration for an entry in {@link BridgeFetchConfig}.
+ * Auth is computed on the host side per call; the secret never enters
+ * the sandbox's JSC heap.
+ */
+export type BridgeFetchEndpoint = {
+	/**
+	 * Header values to add to every request to this host. Static — read
+	 * once at engine construction. Use {@link authorization} for tokens
+	 * that need to be computed per call.
+	 */
+	headers?: Record<string, string>;
+	/**
+	 * Compute the `Authorization` header value on each call. Synchronous
+	 * or async. Throwing rejects the in-sandbox call without revealing
+	 * the underlying error (the sandbox sees a generic
+	 * "authorization callback failed").
+	 */
+	authorization?: () => string | Promise<string>;
+};
+
+/**
+ * `actions.fetch(url, init)` allowlist + auth-injection config keyed by
+ * hostname. A request whose URL parses to a hostname NOT in this map is
+ * rejected before any network call. A request whose hostname IS in the
+ * map gets the configured static headers + the computed authorization
+ * stitched in on the host side. The sandbox source never sees the auth
+ * value.
+ *
+ * Hostname keys are exact (`'api.example.com'`). The special key `'*'`
+ * is a wildcard (use sparingly — it disables allowlisting).
+ *
+ * ```ts
+ * createSyncEngine({
+ *   bridgeFetch: {
+ *     'api.stripe.com': {
+ *       authorization: () => `Bearer ${process.env.STRIPE_KEY}`,
+ *     },
+ *     'api.openai.com': {
+ *       authorization: () => `Bearer ${process.env.OPENAI_KEY}`,
+ *       headers: { 'OpenAI-Beta': 'assistants=v2' },
+ *     },
+ *   },
+ * });
+ * ```
+ */
+export type BridgeFetchConfig = Record<string, BridgeFetchEndpoint>;
+
+/**
+ * Response shape `actions.fetch` resolves to inside the sandbox. The
+ * body is materialised as text on the host (so it crosses the JSC
+ * boundary as a structured-cloned string). Users parse it themselves
+ * with `JSON.parse(res.body)` for JSON responses.
+ */
+export type BridgeFetchResponse = {
+	ok: boolean;
+	status: number;
+	statusText: string;
+	url: string;
+	headers: Record<string, string>;
+	body: string;
+};
+
 /** Per-mutation sandbox configuration. */
 export type SandboxConfig = {
 	/** Heap memory cap (MB). Default 32. */
@@ -172,7 +235,8 @@ const wrap = (source: string): string => `
 			update: (table, data) => __dispatch(__callId, 'update', table, data),
 			delete: (table, row) => __dispatch(__callId, 'delete', table, row),
 			change: (collection, change) => __dispatch(__callId, 'change', collection, change),
-			now: () => __dispatch(__callId, 'now')
+			now: () => __dispatch(__callId, 'now'),
+			fetch: (url, init) => __dispatch(__callId, 'fetch', url, init)
 		};
 		return userFn(args, ctx, actions);
 	}
@@ -191,7 +255,8 @@ type CompiledMutation = {
 
 const compile = async (
 	source: string,
-	config: SandboxConfig
+	config: SandboxConfig,
+	bridgeFetch: BridgeFetchConfig | undefined
 ): Promise<CompiledMutation> => {
 	const { createIsolate, Reference } = await loadIsolatedJsc();
 	const isolate = await createIsolate({
@@ -228,6 +293,12 @@ const compile = async (
 				return a.change(rest[0] as string, rest[1] as never);
 			case 'now':
 				return a.now();
+			case 'fetch':
+				return runBridgeFetch(
+					bridgeFetch,
+					rest[0] as string,
+					rest[1] as RequestInit | undefined
+				);
 			default:
 				throw new Error(`unknown sandbox action op: ${String(op)}`);
 		}
@@ -242,6 +313,77 @@ const compile = async (
 		isolate,
 		nextCallId: 1,
 		timeoutMs: config.timeout ?? 5000
+	};
+};
+
+/**
+ * Host-side implementation of `actions.fetch(url, init)`. Enforces the
+ * `BridgeFetchConfig` allowlist (rejecting otherwise-unknown hostnames
+ * before any network call), computes the authorization on the host
+ * side (so the secret never crosses into JSC), and returns a
+ * structured-cloneable {@link BridgeFetchResponse} the sandbox can
+ * pick apart.
+ */
+const runBridgeFetch = async (
+	config: BridgeFetchConfig | undefined,
+	url: string,
+	init: RequestInit | undefined
+): Promise<BridgeFetchResponse> => {
+	if (config === undefined) {
+		throw new Error(
+			'actions.fetch called but the engine has no `bridgeFetch` config — ' +
+				'pass `bridgeFetch: { ... }` to createSyncEngine.'
+		);
+	}
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		throw new Error(`actions.fetch: invalid URL "${String(url)}"`);
+	}
+	const endpoint =
+		config[parsed.hostname] ??
+		(Object.prototype.hasOwnProperty.call(config, '*')
+			? config['*']
+			: undefined);
+	if (endpoint === undefined) {
+		throw new Error(
+			`actions.fetch: hostname "${parsed.hostname}" is not allowlisted in bridgeFetch config`
+		);
+	}
+	const headers: Record<string, string> = { ...(endpoint.headers ?? {}) };
+	// Carry user-supplied headers from the sandbox last so an explicit
+	// override wins — except we never let the sandbox set Authorization,
+	// because that would reveal the auth pattern the host injected.
+	if (init?.headers !== undefined) {
+		const incoming = init.headers as Record<string, string>;
+		for (const [name, value] of Object.entries(incoming)) {
+			if (name.toLowerCase() === 'authorization') continue;
+			headers[name] = value;
+		}
+	}
+	if (endpoint.authorization !== undefined) {
+		let auth: string;
+		try {
+			auth = await endpoint.authorization();
+		} catch {
+			throw new Error('actions.fetch: authorization callback failed');
+		}
+		headers.Authorization = auth;
+	}
+	const response = await fetch(url, { ...init, headers });
+	const responseHeaders: Record<string, string> = {};
+	response.headers.forEach((value, name) => {
+		responseHeaders[name] = value;
+	});
+	const body = await response.text();
+	return {
+		body,
+		headers: responseHeaders,
+		ok: response.ok,
+		status: response.status,
+		statusText: response.statusText,
+		url: response.url
 	};
 };
 
@@ -264,17 +406,18 @@ export const makeSandboxedHandler = (
 	source: string,
 	config: SandboxConfig = {},
 	/**
-	 * Optional hook + tagging. When `onMetrics` is supplied, every call
-	 * uses `callable.callWithMetrics` (slightly costlier) and fires the
-	 * hook on completion. Without it, the cheap `callable.call` path is
-	 * used and nothing changes vs the pre-1.7.6 contract.
-	 *
-	 * `mutationName` only matters when `onMetrics` is set — it's the
-	 * `mutationName` field of the emitted record.
+	 * Engine-level extras the per-mutation config doesn't carry:
+	 *  - `metricsHook` enables per-call telemetry via
+	 *    `callable.callWithMetrics` (small cost; off without the hook).
+	 *  - `bridgeFetch` enables `actions.fetch(url, init)` inside the
+	 *    sandbox with host-side allowlist + auth injection.
 	 */
-	metricsHook?: {
-		mutationName: string;
-		onMetrics: HandlerMetricsHook;
+	engineExtras?: {
+		metricsHook?: {
+			mutationName: string;
+			onMetrics: HandlerMetricsHook;
+		};
+		bridgeFetch?: BridgeFetchConfig;
 	}
 ): ((
 	args: unknown,
@@ -282,6 +425,8 @@ export const makeSandboxedHandler = (
 	actions: MutationActions
 ) => Promise<unknown>) => {
 	let pending: Promise<CompiledMutation> | undefined;
+	const metricsHook = engineExtras?.metricsHook;
+	const bridgeFetch = engineExtras?.bridgeFetch;
 
 	const getCompiled = async (): Promise<CompiledMutation> => {
 		if (pending !== undefined) {
@@ -289,7 +434,7 @@ export const makeSandboxedHandler = (
 			if (!compiled.isolate.isDisposed) return compiled;
 			pending = undefined; // dead — re-spawn below
 		}
-		pending = compile(source, config);
+		pending = compile(source, config, bridgeFetch);
 		return pending;
 	};
 

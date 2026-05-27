@@ -25,6 +25,7 @@ import {
 	RetriesExhaustedError
 } from './retry';
 import {
+	type BridgeFetchConfig,
 	type HandlerMetricsHook,
 	type HandlerMetricsRecord,
 	makeSandboxedHandler
@@ -517,6 +518,21 @@ export type SyncEngineOptions = {
 	 * @see {@link HandlerMetricsRecord}
 	 */
 	handlerMetrics?: HandlerMetricsHook;
+	/**
+	 * Allowlist + auth-injection map for `actions.fetch(url, init)` calls
+	 * issued from inside a `sandboxedHandler`. Each entry is keyed by
+	 * hostname (`'api.stripe.com'`); the value's `authorization` is a
+	 * sync or async callback computed on the host so the secret never
+	 * crosses into the JSC sandbox. Requests to non-allowlisted hosts
+	 * are rejected before any network call.
+	 *
+	 * Without this set, `actions.fetch` throws "no bridgeFetch config."
+	 * Plain (non-sandboxed) handlers don't use this — they can just call
+	 * `fetch` directly since they run in the host process.
+	 *
+	 * @see {@link BridgeFetchConfig}
+	 */
+	bridgeFetch?: BridgeFetchConfig;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -2114,12 +2130,16 @@ export const createSyncEngine = (
 					makeSandboxedHandler(
 						mutation.sandboxedHandler,
 						mutation.sandbox,
-						options.handlerMetrics === undefined
-							? undefined
-							: {
-									mutationName: mutation.name,
-									onMetrics: options.handlerMetrics
-								}
+						{
+							bridgeFetch: options.bridgeFetch,
+							metricsHook:
+								options.handlerMetrics === undefined
+									? undefined
+									: {
+											mutationName: mutation.name,
+											onMetrics: options.handlerMetrics
+										}
+						}
 					)
 				);
 			}
