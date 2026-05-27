@@ -152,6 +152,33 @@ permissions and `auth: undefined`, the materialized view stays at
 write to PG). Re-run is queued once the auth-transition lands. Script:
 [`propagation-zero.ts`](https://github.com/absolutejs/benchmarks/blob/main/sync/scripts/propagation-zero.ts).
 
+## Ranged queries — `defineGraphCollection` kills the O(table) cliff
+
+A naïve reactive query (`run: ({ db }) => db.all('tasks').filter(...)`)
+re-executes its body on every change to `tasks`. At 100k rows that means
+one mutation costs ~580 ms to propagate to a ranged subscriber — the
+engine rescans the whole table to recompute the filter result. Sync
+ships [`defineGraphCollection`](../README.md#defineGraphCollection): a
+declarative builder (`query(source).filter(...).orderBy(...)`) that the
+engine compiles into an incremental operator graph. The source's
+`hydrate` pushes the filter to SQL; `match` scopes incremental changes;
+the `orderBy` operator maintains a sorted result incrementally.
+
+| rows in table | live update (default `db.all` + JS filter) | live update (`defineGraphCollection`) | speedup |
+| ------------- | ------------------------------------------ | ------------------------------------- | ------- |
+| 1,000         | 21.8 ms                                    | **10.5 ms**                           | 2.1×    |
+| 10,000        | 72.5 ms                                    | **16.6 ms**                           | 4.4×    |
+| 100,000       | 577.9 ms                                   | **41.8 ms**                           | **13.8×** |
+
+At 100k rows the 42 ms live-update is essentially "WS roundtrip + PG
+update + diff frame to subscriber" — bounded, independent of table size.
+The operator graph only routes the changed row through this
+subscriber's pipeline; the other 99,800+ rows aren't touched. **For
+ranged queries over big tables, `defineGraphCollection` is the
+recommended pattern.** See the
+[Operator-graph queries](/documentation/sync-graph) docs view for
+worked examples.
+
 > To add measured competitor numbers, stand up Zero (`zero-cache` + a logical-
 > replication Postgres) and/or Convex (`npx convex dev` or the self-hosted image),
 > port the `bench/run.ts` workload to each, and run on the same hardware.
