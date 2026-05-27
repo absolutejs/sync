@@ -204,6 +204,32 @@ still produce independent reruns (per-user query bodies stay
 isolated). Full bench harness in
 [absolutejs/benchmarks/sync/scripts/reactive/subscription-scaling.ts](https://github.com/absolutejs/benchmarks/blob/main/sync/scripts/reactive/subscription-scaling.ts).
 
+## Reconnect catch-up via `since` — 1.2.0 makes offline cheap
+
+The resume path was already shipped end-to-end (server-side change log
++ catch-up diff builder, client-side `appliedVersion` + auto-reconnect
+that sends `since`). 1.2.0 adds `disconnect()` to `SyncClient` and
+`SyncCollection` — closes the WS without losing state so the next
+auto-reconnect carries `since` and the engine sends a catch-up diff
+rather than a full snapshot. Useful for tests, benches, and apps that
+want to simulate an offline blip cleanly.
+
+Measured catch-up after K missed writes (time from "WS reopening" to
+"subscriber sees the new value"):
+
+| missed writes | catch-up p50 (ms) | p95 (ms) |
+| ------------- | ----------------- | -------- |
+| 1             | **3.6**           | 5.5      |
+| 10            | **6.2**           | 7.0      |
+| 100           | **4.2**           | 4.4      |
+
+Bounded, independent of K. The engine builds one diff covering the
+change log's `(since, now]` window and sends it as a single frame, so
+K=100 isn't materially slower than K=1. This is what makes the
+local-first promise real: a tab backgrounded for an hour reconnects in
+milliseconds, not by re-downloading the workspace. Bench:
+[absolutejs/benchmarks/sync/scripts/reactive/reconnect-replay.ts](https://github.com/absolutejs/benchmarks/blob/main/sync/scripts/reactive/reconnect-replay.ts).
+
 > To add measured competitor numbers, stand up Zero (`zero-cache` + a logical-
 > replication Postgres) and/or Convex (`npx convex dev` or the self-hosted image),
 > port the `bench/run.ts` workload to each, and run on the same hardware.
