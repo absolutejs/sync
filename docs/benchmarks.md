@@ -161,6 +161,34 @@ permissions and `auth: undefined`, the materialized view stays at
 write to PG). Re-run is queued once the auth-transition lands. Script:
 [`propagation-zero.ts`](https://github.com/absolutejs/benchmarks/blob/main/sync/scripts/propagation-zero.ts).
 
+## Wire bandwidth — diff frames vs full-result frames (vs Convex)
+
+Both engines push updates over WebSocket. The **wire format** is the
+difference: sync's `applyChangeBatch` produces a `diff` frame with
+`{ added, removed, changed }` arrays — only rows that actually moved.
+Convex pushes the **whole new query result** on every change (their own
+[GitHub #95](https://github.com/get-convex/convex-backend/issues/95) +
+the [object-sync-engine roadmap](https://stack.convex.dev/object-sync-engine)
+admission). The gap scales with K, the rows held by the subscriber:
+
+| K rows held | sync (diff frame) | Convex (full-result frame) | ratio |
+| ----------- | ----------------- | -------------------------- | ----- |
+| 100         | **117 B**         | 11,547 B                   | **99×**    |
+| 1,000       | **118 B**         | 113,905 B                  | **965×**   |
+| 5,000       | **118 B**         | 576,830 B                  | **4,888×** |
+
+Sync stays flat at ~118 bytes regardless of K. Convex grows linearly:
+at 5,000 rows held, every single-row mutation sends **~577 KB** to
+every subscriber. A Convex app subscribing to a list of K rows costs
+**O(N·K)** bytes on every write. A sync app costs **O(N·changed_rows)**.
+Bench: [`scripts/reactive/wire-bytes-{sync,convex}.ts`](https://github.com/absolutejs/benchmarks/tree/main/sync/scripts/reactive).
+
+(While building the bench we also hit two of Convex's own
+[limits](https://docs.convex.dev/production/state/limits) — array
+return values cap at 8,192 entries, single-function reads cap at 4,096
+rows scanned. Sync has no equivalent caps; the bench paginates only
+on the Convex side.)
+
 ## Ranged queries — `defineGraphCollection` kills the O(table) cliff
 
 A naïve reactive query (`run: ({ db }) => db.all('tasks').filter(...)`)
