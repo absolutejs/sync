@@ -4,6 +4,33 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.3] — 2026-05-27
+
+### Changed (performance)
+
+- **`sandboxedHandler` wraps user source in a sync IIFE instead of an
+  async one.** The wrapper used to be `(async () => { ... })()`, which
+  always returned a Promise — forcing isolated-jsc's FFI backend to
+  run setup + read evals through `unwrapResultPromise` for every call,
+  even when the user's handler was sync. Switched to `(() => { ... })()`:
+  - Sync user handler (returns a primitive): the IIFE returns the
+    primitive directly. FFI's `unwrapResultPromise` short-circuits on
+    `!JSValueIsObject` — zero extra evals, fast path.
+  - Async user handler (returns a Promise): the IIFE returns the
+    Promise. Unwrap pump fires normally. Same behaviour as before.
+
+  Combined with isolated-jsc 0.5 (read+cleanup eval folded together),
+  pure-handler warm dispatch on FFI is now ~1.5 ms (down from 2.47 ms
+  in 1.7.2, ~4.7 ms in 1.7.1). The sync IIFE also propagates
+  synchronous throws through the eval boundary directly instead of
+  wrapping them in a rejection — the caller still sees an `Error`.
+
+### Bumped
+
+- Peer dep `@absolutejs/isolated-jsc` `>= 0.4.0` → `>= 0.5.0`. 0.5
+  collapses the unwrap path's 3-eval cycle to 2 by combining the
+  state read with the state-global delete.
+
 ## [1.7.2] — 2026-05-27
 
 ### Changed (performance)

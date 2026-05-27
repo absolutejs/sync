@@ -90,12 +90,20 @@ const loadIsolatedJsc = async (): Promise<IsolatedJscModule> => {
  * across calls), and invoke. One Reference instead of four, installed
  * once instead of per-call.
  *
+ * The wrapper is a SYNC IIFE — not `(async () => ...)()`. If `userFn` is
+ * sync, the IIFE returns a primitive directly, and the FFI backend's
+ * `unwrapResultPromise` short-circuits on `!JSValueIsObject` (no setup
+ * eval, no read eval). If `userFn` is async, the IIFE returns its Promise
+ * and the unwrap pump fires normally. Either shape works; only the sync
+ * shape gets the fast path. This shaves ~1.5 ms off pure-handler warm
+ * dispatch on FFI.
+ *
  * The user source is interpolated directly — backticks and `${...}` in it
  * are fine because JSC's eval consumes the raw text, not a template literal.
  * We rely on the isolate boundary, not source-level sanitisation, for safety.
  */
 const wrap = (source: string): string => `
-	(async () => {
+	(() => {
 		const userFn = (${source});
 		if (typeof userFn !== 'function') {
 			throw new Error(
@@ -109,7 +117,7 @@ const wrap = (source: string): string => `
 			delete: (table, row) => __syncAction('delete', table, row),
 			change: (collection, change) => __syncAction('change', collection, change)
 		};
-		return await userFn(args, ctx, actions);
+		return userFn(args, ctx, actions);
 	})()
 `;
 
