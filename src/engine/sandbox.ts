@@ -21,18 +21,16 @@
  *   For long-lived mutations choose `memoryLimit` ≥ 128 (the default 32
  *   trips after a few dozen calls without pressure for GC).
  *
- * **Backend default: `'worker'`** — required so far because the `actions`
- * machinery (insert/update/delete/change) crosses the host boundary as
- * **async** References (they return Promises that go through the engine's
- * writer + diff path). The isolated-jsc FFI backend only supports SYNC
- * host fns today (per its 0.3 documented limit); calling
- * `actions.insert(...)` from a sandboxed handler on FFI would surface as
- * a Promise-cannot-unwrap error. Pin to Worker.
- *
- * Read-only sandboxed mutations that don't call `actions.*` (e.g. compute
- * a derived value from `args` + `ctx` and `return` it) CAN opt into FFI
- * via `sandbox: { backend: 'ffi' }` — they get the ~300 KB cold heap and
- * interrupt-driven timeouts. Document this clearly when you do.
+ * **Backend default: `'auto'`** — isolated-jsc 0.4 added an async host-fn
+ * pump on the FFI backend (alternates Bun event-loop yields with JSC
+ * microtask drains, bounded by `Script.run`'s `timeout`), so the
+ * `actions.insert/update/delete/change` async References settle on FFI
+ * just like they do on Worker. `'auto'` picks FFI when libJSC is reachable
+ * (~300 KB cold heap, interrupt-driven CPU timeouts) and falls back to
+ * Worker (~46 MB cold heap, postMessage round-trips) otherwise. Pin to
+ * `'worker'` if you specifically need Web APIs (`URL`, `TextEncoder`,
+ * `WebSocket`) inside your handler — those live in the Bun-Worker
+ * environment, not the bare JSC C API.
  *
  * The runner is built lazily per-mutation: nothing is spawned until the
  * mutation actually runs for the first time. No engine teardown hook is
@@ -54,19 +52,17 @@ export type SandboxConfig = {
 	/** Wall-clock cap per call (ms). Default 5000. */
 	timeout?: number;
 	/**
-	 * isolated-jsc backend. Defaults to `'worker'` because the engine's
-	 * `actions.insert/update/delete/change` cross the sandbox boundary as
-	 * async References — and isolated-jsc's FFI backend doesn't pump
-	 * async host fns (its 0.3 documented limit). The Worker backend
-	 * supports both sync and async host fns.
+	 * isolated-jsc backend. Defaults to `'auto'` (FFI when libJSC is
+	 * reachable, Worker otherwise) since isolated-jsc 0.4 added async
+	 * host-fn support on FFI — `actions.insert/update/delete/change`
+	 * now settle on both backends.
 	 *
-	 * Opt into `'ffi'` only for **read-only** sandboxed handlers — ones
-	 * that compute a derived value from `args` + `ctx` and return it
-	 * without calling any `actions.*`. Those get the FFI cold-heap
-	 * (~300 KB vs ~46 MB) + interrupt-driven timeout benefits.
+	 * Pin to `'worker'` if your handler needs Web APIs (`URL`,
+	 * `TextEncoder`, `WebSocket`) — those live in the Bun-Worker
+	 * environment, not the bare JSC C API.
 	 *
-	 * `'auto'` resolves to FFI when libJSC is reachable and Worker
-	 * otherwise; same async-actions caveat applies on the FFI path.
+	 * Pin to `'ffi'` for hot-path read-only handlers (~300 KB cold heap
+	 * vs ~46 MB on Worker, interrupt-driven CPU timeouts).
 	 */
 	backend?: 'auto' | 'ffi' | 'worker';
 };
@@ -127,9 +123,9 @@ const compile = async (
 ): Promise<CompiledMutation> => {
 	const { createIsolate } = await loadIsolatedJsc();
 	const isolate = await createIsolate({
-		// Pinned to Worker by default. See SandboxConfig.backend JSDoc for
-		// why FFI is opt-in (actions References are async).
-		backend: config.backend ?? 'worker',
+		// `'auto'` since isolated-jsc 0.4 (async host-fn pump on FFI).
+		// See SandboxConfig.backend JSDoc for the per-backend trade-offs.
+		backend: config.backend ?? 'auto',
 		memoryLimit: config.memoryLimit ?? 32
 	});
 	const script = await isolate.compileScript(wrap(source));

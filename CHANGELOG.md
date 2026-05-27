@@ -4,6 +4,26 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.7.1] — 2026-05-27
+
+### Changed
+
+- **`sandboxedHandler` backend default flipped from `'worker'` back to
+  `'auto'`.** isolated-jsc 0.4 added an async host-fn pump on the FFI
+  backend (alternates Bun event-loop yields with JSC microtask drains,
+  bounded by `Script.run`'s `timeout`), so the engine's `actions.*`
+  async References now settle on FFI just like on Worker. `'auto'`
+  picks FFI when libJSC is reachable (~300 KB cold heap, interrupt-
+  driven CPU timeouts) and falls back to Worker (~46 MB cold heap,
+  postMessage round-trips) otherwise. Pin to `'worker'` explicitly if
+  your handler needs Web APIs (`URL`, `TextEncoder`, `WebSocket`) —
+  those live in the Bun-Worker environment, not the bare JSC C API.
+
+### Bumped
+
+- Peer dependency `@absolutejs/isolated-jsc` from `>= 0.3.0` to
+  `>= 0.4.0`. Required for the FFI async host-fn pump.
+
 ## [1.7.0] — 2026-05-27
 
 ### Changed
