@@ -115,6 +115,8 @@ export type {
 	TransactionRunner
 } from './mutation';
 
+export type { SandboxConfig } from './sandbox';
+
 export { createSyncEngine, SchemaError, UnauthorizedError } from './syncEngine';
 export type {
 	CrdtFields,

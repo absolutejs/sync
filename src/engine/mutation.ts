@@ -1,4 +1,6 @@
 import type { CollectionContext } from './collection';
+import type { RetryPolicy } from './retry';
+import type { SandboxConfig } from './sandbox';
 import type { RowChange } from './types';
 
 /**
@@ -69,8 +71,39 @@ export type MutationDefinition<
 	 * Apply the mutation: write to your durable store, then call
 	 * `actions.change(...)` for each affected row. Return value (e.g. the created
 	 * record) is sent back to the caller in the ack.
+	 *
+	 * Optional **only** when {@link sandboxedHandler} is set instead.
 	 */
-	handler: MutationHandler<Args, Ctx, Result>;
+	handler?: MutationHandler<Args, Ctx, Result>;
+	/**
+	 * Run the mutation inside an `@absolutejs/isolated-jsc` sandbox. Provide
+	 * the handler as a string expression that evaluates to
+	 * `(args, ctx, actions) => result` (sync or async).
+	 *
+	 * The string is compiled into a JSC isolate on first call; per-call cost
+	 * is ~0.5 ms after that. The isolate has no access to the host's globals,
+	 * filesystem, or network — only `args`, `ctx` (passed via structured
+	 * clone), and `actions` (exposed as cross-boundary Reference functions).
+	 *
+	 * Use this when the handler source is not fully trusted (multi-tenant
+	 * PaaS, plugin systems, AI-generated logic), or as defense-in-depth to
+	 * cap CPU/memory of even your own handlers. Configure limits via
+	 * {@link sandbox}.
+	 *
+	 * Mutually exclusive with {@link handler}. Requires the optional peer
+	 * `@absolutejs/isolated-jsc` to be installed.
+	 */
+	sandboxedHandler?: string;
+	/** Limits + memory cap for the sandboxed handler. Ignored without {@link sandboxedHandler}. */
+	sandbox?: SandboxConfig;
+	/**
+	 * Opt-in conflict retry. When the handler throws a classified-as-retryable
+	 * error (default: PG `40001` / `40P01`) the engine discards the buffered
+	 * changes, awaits a backoff, and re-runs the handler with a fresh
+	 * transaction. Handlers MUST be idempotent under retry — external side
+	 * effects (HTTP, email) will fire more than once. See {@link RetryPolicy}.
+	 */
+	retry?: RetryPolicy;
 };
 
 /**

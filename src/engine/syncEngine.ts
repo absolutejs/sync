@@ -19,6 +19,12 @@ import type {
 	ReadHandle,
 	TableReader
 } from './reactive';
+import {
+	exponentialBackoff,
+	isSerializationFailure,
+	RetriesExhaustedError
+} from './retry';
+import { makeSandboxedHandler } from './sandbox';
 import type {
 	PermissionsDefinition,
 	ReadRule,
@@ -452,7 +458,8 @@ const stableValueKey = (value: unknown): string => {
 		// Stable ordering: sort keys before serialising so { a, b } and { b, a }
 		// produce the same string. JSON.stringify with a replacer keeps it tight.
 		return `o:${JSON.stringify(value, (_k, v): unknown => {
-			if (v === null || typeof v !== 'object' || Array.isArray(v)) return v;
+			if (v === null || typeof v !== 'object' || Array.isArray(v))
+				return v;
 			const record = v as Record<string, unknown>;
 			const sorted: Record<string, unknown> = {};
 			for (const key of Object.keys(record).sort()) {
@@ -531,6 +538,17 @@ export const createSyncEngine = (
 		| SearchCollectionDefinition<any, any, any>
 	>();
 	const mutations = new Map<string, MutationDefinition<any, any, any>>();
+	// Lazy sandbox runners keyed by mutation name. Built on first call to a
+	// mutation that has `sandboxedHandler` set; reused thereafter. Engine has
+	// no teardown; the OS reaps the isolate workers on process exit.
+	const sandboxRunners = new Map<
+		string,
+		(
+			args: unknown,
+			ctx: unknown,
+			actions: MutationActions
+		) => Promise<unknown>
+	>();
 	const writers = new Map<string, TableWriter>();
 	const readers = new Map<string, TableReader>();
 	const schedules = new Map<string, ScheduleDefinition>();
@@ -1947,7 +1965,34 @@ export const createSyncEngine = (
 		},
 
 		registerMutation: (mutation) => {
+			if (
+				mutation.handler === undefined &&
+				mutation.sandboxedHandler === undefined
+			) {
+				throw new Error(
+					`Mutation "${mutation.name}" must define either \`handler\` or \`sandboxedHandler\``
+				);
+			}
+			if (
+				mutation.handler !== undefined &&
+				mutation.sandboxedHandler !== undefined
+			) {
+				throw new Error(
+					`Mutation "${mutation.name}" defines both \`handler\` and \`sandboxedHandler\` — pick one`
+				);
+			}
 			mutations.set(mutation.name, mutation);
+			// Build the sandbox runner eagerly only if we know the source —
+			// the actual isolate spawn is still lazy (inside makeSandboxedHandler).
+			if (mutation.sandboxedHandler !== undefined) {
+				sandboxRunners.set(
+					mutation.name,
+					makeSandboxedHandler(
+						mutation.sandboxedHandler,
+						mutation.sandbox
+					)
+				);
+			}
 		},
 
 		registerWriter: (table, writer) => {
@@ -2004,12 +2049,30 @@ export const createSyncEngine = (
 				}
 			}
 
+			// Pick the handler shape: in-process function or sandboxed string
+			// source (runs inside @absolutejs/isolated-jsc). Sandbox runner is
+			// built lazily and pre-cached in registerMutation.
+			const sandboxRunner = sandboxRunners.get(name);
+			const invokeHandler =
+				sandboxRunner !== undefined
+					? sandboxRunner
+					: (
+							a: unknown,
+							c: unknown,
+							actions: MutationActions
+						): Promise<unknown> =>
+							Promise.resolve(
+								// Non-null assertion: registerMutation guarantees one of
+								// handler/sandboxedHandler is defined.
+								mutation.handler!(a, c, actions)
+							);
+
 			// Run the handler (optionally inside the DB transaction), collecting its
 			// changes into a fresh buffer per attempt — so a transaction that retries
 			// or rolls back never double-emits or leaks a half-applied batch.
 			const runHandler = async (tx: unknown) => {
 				const { actions, buffered } = makeActions(tx, ctx, true);
-				const result = await mutation.handler(args, ctx, actions);
+				const result = await invokeHandler(args, ctx, actions);
 				return { buffered, result };
 			};
 
