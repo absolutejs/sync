@@ -44,12 +44,13 @@ const browserBuild = await Bun.build({
 	entrypoints: [
 		'src/client/index.ts',
 		'src/crdt/index.ts',
+		'src/adapters/tanstack-db/index.ts',
 		'src/react/index.ts',
 		'src/vue/index.ts',
 		'src/svelte/index.ts',
 		'src/angular/index.ts'
 	],
-	external: ['react', 'vue', 'svelte', '@angular/core'],
+	external: ['react', 'vue', 'svelte', '@angular/core', '@tanstack/db'],
 	outdir: DIST,
 	root: 'src',
 	sourcemap: 'linked',

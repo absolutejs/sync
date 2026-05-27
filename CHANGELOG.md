@@ -4,6 +4,17 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.8.0] — 2026-05-27
+
+### Added
+
+- **New subpath `@absolutejs/sync/tanstack-db`** for creating TanStack DB
+  collection options backed by Absolute Sync. The adapter forwards Absolute Sync
+  snapshots/diffs into TanStack DB and can map TanStack insert/update/delete
+  mutations back to registered Absolute Sync mutations. `@tanstack/db` is an
+  optional, tightly pinned peer (`>= 0.6.7 <0.7`) because the API is still
+  pre-1.0.
+
 ## [1.7.9] — 2026-05-27
 
 ### Added

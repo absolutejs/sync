@@ -217,6 +217,30 @@ await orders.mutate({
 });
 ```
 
+TanStack DB can own the client-side collection graph while Absolute Sync handles
+the live transport:
+
+```ts
+import { createCollection } from '@tanstack/db';
+import { createSyncTanStackCollectionOptions } from '@absolutejs/sync/tanstack-db';
+
+type Order = { id: string; total: number; status: string };
+
+const orders = createCollection(
+	createSyncTanStackCollectionOptions<Order>({
+		id: 'orders',
+		url: 'ws://localhost:3000/sync/ws',
+		collection: 'orders',
+		getKey: (order) => order.id,
+		mutations: {
+			insert: 'createOrder',
+			update: 'updateOrder',
+			delete: 'deleteOrder'
+		}
+	})
+);
+```
+
 - **Incremental vs refetch.** A single-table filtered collection is matched
   incrementally (only the changed rows move). Joins/aggregations and filters the
   matcher can't evaluate fall back to a correct re-hydrate. `createAggregate`
