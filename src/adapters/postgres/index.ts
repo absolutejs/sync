@@ -75,6 +75,13 @@ export type PostgresChangeSourceOptions = {
 	channel?: string;
 	/** Override the payload parser (defaults to {@link parseNotification}). */
 	parse?: (payload: string) => ParsedNotification | undefined;
+	/**
+	 * Called when a NOTIFY payload fails to parse (malformed JSON, unknown
+	 * `op`, or — most often — payload was truncated past Postgres's 8000-byte
+	 * cap and lost a closing brace). Default: silently dropped. Provide this
+	 * to log the skip so you can detect oversized rows in production.
+	 */
+	onSkip?: (payload: string, reason: 'parse-failed') => void;
 };
 
 /**
@@ -94,15 +101,18 @@ export const postgresChangeSource = (
 ): ChangeSource => {
 	const channel = options.channel ?? DEFAULT_CHANNEL;
 	const parse = options.parse ?? parseNotification;
+	const onSkip = options.onSkip;
 	let unlisten: (() => void | Promise<void>) | undefined;
 
 	return {
 		start: async (emit) => {
 			unlisten = await options.listen(channel, (payload) => {
 				const parsed = parse(payload);
-				if (parsed !== undefined) {
-					void emit(parsed.table, parsed.change);
+				if (parsed === undefined) {
+					onSkip?.(payload, 'parse-failed');
+					return;
 				}
+				void emit(parsed.table, parsed.change);
 			});
 		},
 		stop: async () => {

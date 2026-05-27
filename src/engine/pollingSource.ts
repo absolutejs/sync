@@ -83,6 +83,13 @@ export type PollingChangeSourceOptions = {
 	onProcessed?: (uptoSeq: number) => void | Promise<void>;
 	/** Called if a poll throws (the loop keeps running). Defaults to a warning. */
 	onError?: (error: unknown) => void;
+	/**
+	 * Called when an outbox row fails to parse (custom `parse` returned
+	 * undefined, malformed JSON in `payload`, unknown `op`, etc). Default:
+	 * silently dropped. Provide this to surface skipped rows so you notice
+	 * malformed entries in the changelog table.
+	 */
+	onSkip?: (row: OutboxRow, reason: 'parse-failed') => void;
 };
 
 /**
@@ -100,6 +107,7 @@ export const createPollingChangeSource = (
 		((error: unknown) => {
 			console.warn('[sync] polling change source error:', error);
 		});
+	const onSkip = options.onSkip;
 	let cursor = options.startSeq ?? 0;
 	let running = false;
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -112,7 +120,9 @@ export const createPollingChangeSource = (
 			const rows = await options.poll(cursor);
 			for (const row of rows) {
 				const parsed = parse(row);
-				if (parsed !== undefined) {
+				if (parsed === undefined) {
+					onSkip?.(row, 'parse-failed');
+				} else {
 					await emit(parsed.table, parsed.change);
 				}
 				if (typeof row.seq === 'number' && row.seq > cursor) {

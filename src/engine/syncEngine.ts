@@ -269,6 +269,33 @@ export type SyncEngine = {
 	 * subscribe/unsubscribe). Returns an unsubscribe. Powers the devtools feed.
 	 */
 	onActivity: (listener: (event: EngineActivity) => void) => () => void;
+	/**
+	 * Outbound CDC stream — yield every committed change as a {@link LoggedChange},
+	 * historical first (entries with `version > since`) then continuously tailing
+	 * live commits. Use it to feed downstream pipelines (Kafka, search indexers,
+	 * audit logs, analytics warehouses).
+	 *
+	 * The iterator is notify-driven (no polling): it parks on a Promise that
+	 * resolves the instant a new commit lands.
+	 *
+	 * If `since` falls before the oldest entry retained in the bounded change
+	 * log, the iterator throws {@link MissedChangesError} so the consumer
+	 * notices the gap instead of silently skipping commits. Resubscribe with
+	 * `since = engine.inspect().recentChanges[0].version` after re-bootstrapping.
+	 *
+	 * If the consumer iterates slower than the engine commits and the in-flight
+	 * buffer overflows (`maxBuffer`, default 10000), the iterator throws
+	 * {@link CdcConsumerSlowError} for the same reason.
+	 *
+	 * @example
+	 * for await (const entry of engine.streamChanges({ since: lastCursor })) {
+	 *   await kafka.send('sync.changes', JSON.stringify(entry));
+	 *   lastCursor = entry.version;
+	 * }
+	 */
+	streamChanges: (
+		options?: StreamChangesOptions
+	) => AsyncIterable<LoggedChange>;
 };
 
 type OnDiff = (diff: ViewDiff<unknown>, version: number) => void;
@@ -354,11 +381,74 @@ type RangeDep = {
 	keys: Set<RowKey>;
 };
 
-type LoggedChange = {
+/**
+ * A single committed change as it appears in the engine's change log and on
+ * the {@link SyncEngine.streamChanges} CDC stream. Versions are monotonic
+ * across the engine: a single mutation that writes N rows emits N entries
+ * all sharing the same `version`.
+ */
+export type LoggedChange = {
 	version: number;
 	table: string;
 	change: RowChange<unknown>;
 };
+
+/** Thrown by {@link SyncEngine.streamChanges} when `since` is older than the
+ * oldest entry retained in the bounded change log (i.e. the consumer was
+ * disconnected long enough that the engine has lost the diff). The consumer
+ * should re-bootstrap from a fresh hydrate and resume from `availableSince`. */
+export class MissedChangesError extends Error {
+	readonly requestedSince: number;
+	readonly availableSince: number;
+	constructor(requestedSince: number, availableSince: number) {
+		super(
+			`Change log no longer covers version ${requestedSince}; oldest available is ${availableSince}. ` +
+				`Re-bootstrap and resume from ${availableSince}.`
+		);
+		this.name = 'MissedChangesError';
+		this.requestedSince = requestedSince;
+		this.availableSince = availableSince;
+	}
+}
+
+/** Options for {@link SyncEngine.streamChanges}. */
+export type StreamChangesOptions = {
+	/**
+	 * Last version the consumer has already processed. The stream yields
+	 * entries with `version > since`. Defaults to `0` (replay everything in
+	 * the log, then tail).
+	 */
+	since?: number;
+	/**
+	 * Cancel the stream cleanly. When the signal aborts, the iterator
+	 * resolves to `done` on its next yield and unregisters its subscriber.
+	 */
+	signal?: AbortSignal;
+	/**
+	 * Hard cap on the in-flight buffer for this consumer. If the engine
+	 * commits faster than the consumer iterates and the buffer overflows,
+	 * the stream rejects so the consumer notices instead of silently
+	 * skipping entries. Defaults to 10000.
+	 */
+	maxBuffer?: number;
+};
+
+/** Thrown by {@link SyncEngine.streamChanges} when the consumer fell so far
+ * behind that the in-flight buffer overflowed. Resubscribe from the last
+ * cursor the consumer successfully processed. */
+export class CdcConsumerSlowError extends Error {
+	readonly maxBuffer: number;
+	readonly lastDeliveredVersion: number;
+	constructor(maxBuffer: number, lastDeliveredVersion: number) {
+		super(
+			`CDC stream buffer overflowed (max ${maxBuffer}); consumer fell behind. ` +
+				`Last delivered version: ${lastDeliveredVersion}. Resubscribe with since=${lastDeliveredVersion}.`
+		);
+		this.name = 'CdcConsumerSlowError';
+		this.maxBuffer = maxBuffer;
+		this.lastDeliveredVersion = lastDeliveredVersion;
+	}
+}
 
 export type SyncEngineOptions = {
 	/**
@@ -690,6 +780,10 @@ export const createSyncEngine = (
 			listener(event);
 		}
 	};
+	// Outbound CDC stream subscribers — `streamChanges()` adds itself here.
+	// Notifications fire from `logChange` so every appended log entry reaches
+	// every active streamer atomically with the log push.
+	const streamSubscribers = new Set<(entry: LoggedChange) => void>();
 	const runInTransaction = options.transaction;
 	// Cluster fan-out: a unique id so we ignore our own broadcasts, and the bus
 	// (set by connectCluster) we publish locally-committed changes to.
@@ -1300,6 +1394,12 @@ export const createSyncEngine = (
 		changeLog.push(entry);
 		if (changeLog.length > changeLogSize) {
 			changeLog.shift();
+		}
+		// Atomic with the log push — every active CDC streamer sees every
+		// entry exactly once, in version order, with no chance of a missed
+		// commit between phase-1 catch-up and phase-2 tail.
+		for (const subscriber of streamSubscribers) {
+			subscriber(entry);
 		}
 	};
 
@@ -2260,6 +2360,116 @@ export const createSyncEngine = (
 			activityListeners.add(listener);
 			return () => {
 				activityListeners.delete(listener);
+			};
+		},
+
+		streamChanges: ({
+			since = 0,
+			signal,
+			maxBuffer = 10_000
+		}: StreamChangesOptions = {}) => {
+			// Detect a gap up front so the consumer's `for await` sees the
+			// throw immediately rather than after the first historical entry.
+			// (We tolerate `since === 0`, which means "give me everything in
+			// the log"; the gap check only kicks in for a non-zero cursor.)
+			const oldest = changeLog[0];
+			if (
+				since > 0 &&
+				oldest !== undefined &&
+				oldest.version > since + 1
+			) {
+				const err = new MissedChangesError(since, oldest.version);
+				return {
+					[Symbol.asyncIterator]() {
+						return {
+							next: () => Promise.reject(err)
+						};
+					}
+				};
+			}
+
+			// Register the subscriber BEFORE snapshotting history so a commit
+			// landing between the snapshot and the live tail can't be missed.
+			// Phase 2 dedupes against `cursor`.
+			const buffer: LoggedChange[] = [];
+			let waiter: (() => void) | null = null;
+			let overflow = false;
+			const wake = () => {
+				if (waiter !== null) {
+					const resume = waiter;
+					waiter = null;
+					resume();
+				}
+			};
+			const subscriber = (entry: LoggedChange) => {
+				if (buffer.length >= maxBuffer) {
+					overflow = true;
+					wake();
+					return;
+				}
+				buffer.push(entry);
+				wake();
+			};
+			streamSubscribers.add(subscriber);
+
+			const onAbort = () => wake();
+			signal?.addEventListener('abort', onAbort, { once: true });
+
+			let lastDelivered = since;
+
+			return {
+				async *[Symbol.asyncIterator]() {
+					try {
+						// Phase 1: historical entries. Copy the array so a
+						// concurrent log.shift() (when the ring buffer rotates)
+						// can't surprise us mid-iteration.
+						//
+						// A single batched mutation writes N rows that all
+						// share one version, so we filter on `entry.version >
+						// since` directly (no per-yield cursor bump — that
+						// would deliver only the first row of every batch).
+						const history = [...changeLog];
+						const headVersion =
+							history.length > 0
+								? history[history.length - 1]!.version
+								: since;
+						for (const entry of history) {
+							if (signal?.aborted) return;
+							if (entry.version > since) {
+								lastDelivered = entry.version;
+								yield entry;
+							}
+						}
+						// Phase 2: live tail. Dedupe against `headVersion`
+						// (the head of the log when phase 1 finished): any
+						// buffered entry with `version <= headVersion` was
+						// already yielded from history (a commit between
+						// subscriber registration and the snapshot lands in
+						// both the buffer and the snapshot).
+						while (!signal?.aborted) {
+							while (buffer.length > 0) {
+								const entry = buffer.shift()!;
+								if (entry.version > headVersion) {
+									lastDelivered = entry.version;
+									yield entry;
+								}
+							}
+							if (overflow) {
+								throw new CdcConsumerSlowError(
+									maxBuffer,
+									lastDelivered
+								);
+							}
+							if (signal?.aborted) return;
+							await new Promise<void>((resolve) => {
+								waiter = resolve;
+							});
+						}
+					} finally {
+						streamSubscribers.delete(subscriber);
+						signal?.removeEventListener('abort', onAbort);
+					}
+				}
 			};
 		}
 	};

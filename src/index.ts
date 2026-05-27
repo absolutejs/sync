@@ -13,6 +13,8 @@ export { sync } from './plugin';
 export type { SyncPluginOptions, SyncRequestContext } from './plugin';
 export { syncSocket } from './engine/socket';
 export type { SyncSocketOptions } from './engine/socket';
+export { syncCdc } from './engine/cdc';
+export type { SyncCdcOptions } from './engine/cdc';
 export { syncDevtools } from './devtools';
 export type { SyncDevtoolsOptions } from './devtools';
 export { createPresenceHub } from './engine/presence';

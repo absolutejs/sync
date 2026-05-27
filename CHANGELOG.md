@@ -4,6 +4,68 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.6.0] — 2026-05-27
+
+### Added
+
+- **`engine.streamChanges({ since, signal, maxBuffer })`** — outbound CDC
+  stream. Returns an `AsyncIterable<LoggedChange>` that yields historical
+  log entries (where `version > since`) first, then tails live commits as
+  they happen. Notify-driven (no polling): the iterator parks on a Promise
+  that resolves the instant a new commit lands. Use it to feed Kafka /
+  NATS / search indexers / audit pipelines / analytics warehouses from
+  the engine.
+
+    ```ts
+    let cursor = lastCursorFromStorage();
+    for await (const entry of engine.streamChanges({ since: cursor, signal })) {
+    	await kafka.send('sync.changes', JSON.stringify(entry));
+    	cursor = entry.version;
+    	await persist(cursor);
+    }
+    ```
+
+    - If `since` is older than the oldest entry retained in the bounded
+      change log, the iterator throws `MissedChangesError` so the consumer
+      notices the gap (versus silently dropping commits). Re-bootstrap
+      from a fresh hydrate and resume from `availableSince`.
+    - If the consumer iterates slower than the engine commits and the
+      in-flight buffer overflows (`maxBuffer`, default 10000), the iterator
+      throws `CdcConsumerSlowError`. Resubscribe with the last cursor.
+    - Multiple concurrent streams work independently; each gets every
+      entry exactly once in version order.
+
+- **`syncCdc({ engine, path })` Elysia plugin** — exposes
+  `streamChanges` as a Server-Sent Events route (defaults to
+  `/sync/cdc`). Each entry becomes one SSE event with `id`, `event:
+change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
+  resume via `?since=<version>` query param or the `Last-Event-ID`
+  header that browser `EventSource` sets on reconnect. Errors
+  (`MissedChangesError`, `CdcConsumerSlowError`, or anything else) come
+  through as `event: error` SSE events so the client can distinguish
+  them from changes.
+
+    ```ts
+    import { syncCdc } from '@absolutejs/sync';
+    new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+    ```
+
+    New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+    `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+    `MissedChangesError`, `CdcConsumerSlowError`.
+
+### Changed
+
+- **CDC adapters: `onSkip` hook for silently-dropped events.** The
+  existing CDC sources (`postgresChangeSource`,
+  `mysqlBinlogChangeSource`, `createPollingChangeSource`) used to drop
+  malformed payloads / unknown event types / parse-failed rows
+  silently. They now accept an optional `onSkip` callback so you can
+  log skips and detect oversized rows (PG `NOTIFY` truncates past
+  8000 bytes), new MySQL event types, or malformed outbox rows
+  before they become a "where are my changes?" mystery. Defaults to
+  the previous silent behaviour.
+
 ## [1.5.0] — 2026-05-27
 
 ### Added
