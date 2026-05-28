@@ -4,7 +4,7 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
-## Unreleased
+## [1.8.1] — 2026-05-28
 
 ### Changed
 
