@@ -4,6 +4,22 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## Unreleased
+
+### Changed
+
+- **`sandboxedHandler` now uses isolated-jsc 0.8 runners.** The sync engine
+  keeps the same `sandboxedHandler` API, but the implementation now builds a
+  per-mutation `createIsolatedRunner()` with the `tenant-script` policy,
+  precompiles the wrapped callable, and invokes it through `runner.call()`.
+  Metrics records now include the resolved isolated-jsc backend when metrics
+  are enabled.
+
+### Bumped
+
+- Optional peer dep `@absolutejs/isolated-jsc` `>= 0.6.0` → `>= 0.8.0`.
+  Required for `createIsolatedRunner()`, policy presets, and runner metrics.
+
 ## [1.8.0] — 2026-05-27
 
 ### Added

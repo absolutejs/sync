@@ -9,10 +9,9 @@
  * - Handler must be a string. It evaluates inside the isolate's JSC VM, with
  *   no access to the host's modules, closures, or globals — only the
  *   `args` / `ctx` clones and the `actions` Reference we pass in.
- * - First call per mutation pays an isolate spawn + compile (~3–25 ms
- *   depending on backend). Every subsequent call is a single
- *   `JSObjectCallAsFunction` (FFI) or one postMessage (Worker) — no
- *   per-call eval, no per-call `setGlobal`.
+ * - First call per mutation pays an isolated-jsc runner warmup + callable
+ *   compile. Every subsequent call is served from the runner's keyed
+ *   callable cache — no per-call eval, no per-call `setGlobal`.
  * - Timeout terminates the isolate (the sandbox runner detects this and
  *   lazily re-spawns on the next call). On the FFI backend timeouts throw
  *   a TerminationException without killing the isolate; sync's runner
@@ -25,12 +24,11 @@
  * `WebSocket`) inside your handler — those live in the Bun-Worker
  * environment, not the bare JSC C API.
  *
- * **Per-call hot path (since 1.7.4 / isolated-jsc 0.6).** Each mutation is
- * compiled to a {@link Callable} once — a precompiled function expression
- * the sandbox owns by reference. Per call we invoke
- * `callable.call([args, ctx, dispatch])` where `dispatch` is a Reference
- * that bridges `actions.*` back to the host. No globals, no eval per call,
- * no shared-slot serialization machinery.
+ * **Per-call hot path (since isolated-jsc 0.8).** Each mutation owns a
+ * `createIsolatedRunner()` instance. The runner applies the `tenant-script`
+ * policy, keeps a keyed isolate pool, and caches the wrapped mutation as a
+ * precompiled callable. Per call we invoke `runner.call(name, source, args)`
+ * with a call id that routes `actions.*` back through a host Reference.
  *
  * The runner is built lazily per-mutation: nothing is spawned until the
  * mutation actually runs for the first time. No engine teardown hook is
@@ -41,9 +39,8 @@
 // `@absolutejs/isolated-jsc` isn't installed. The actual module is loaded
 // lazily via dynamic `import()` inside `loadIsolatedJsc`.
 import type {
-	Callable,
-	Context,
-	Isolate
+	IsolatedRunner,
+	RunMetrics
 } from '@absolutejs/isolated-jsc';
 import type { MutationActions } from './mutation';
 
@@ -78,10 +75,12 @@ export type HandlerMetricsRecord = {
 	durationMs: number;
 	/**
 	 * CPU time spent inside the JSC sandbox (ms). Comes from
-	 * `Script.runWithMetrics` — does NOT include host-side message-passing
+	 * isolated-jsc runner metrics — does NOT include host-side message-passing
 	 * overhead on the Worker backend. Sub-millisecond runs round to 0.
 	 */
 	cpuMs: number;
+	/** isolated-jsc backend that executed the call. */
+	backend?: 'ffi' | 'worker';
 	/**
 	 * Heap size (bytes) measured immediately after the script returned.
 	 * Not the run's peak — a true peak needs continuous polling.
@@ -178,9 +177,9 @@ export type SandboxConfig = {
 	timeout?: number;
 	/**
 	 * isolated-jsc backend. Defaults to `'auto'` (FFI when libJSC is
-	 * reachable, Worker otherwise). Both backends now run the same
-	 * `Context.compileCallable`-based hot path; the choice trades cold
-	 * spawn (FFI wins ~6×) against Web API availability (Worker only).
+	 * reachable, Worker otherwise). Both backends now run through the same
+	 * `createIsolatedRunner().call()` hot path; the choice trades cold spawn
+	 * (FFI wins ~6×) against Web API availability (Worker only).
 	 *
 	 * Pin to `'worker'` if your handler needs Web APIs (`URL`,
 	 * `TextEncoder`, `WebSocket`) — those live in the Bun-Worker
@@ -208,8 +207,8 @@ const loadIsolatedJsc = async (): Promise<IsolatedJscModule> => {
 };
 
 /**
- * Wrap user source as a function expression for `compileCallable`. The
- * compiled function takes `(__callId, args, ctx)` — `__callId` keys the
+ * Wrap user source as a function expression for `runner.call`. The compiled
+ * function takes `(__callId, args, ctx)` — `__callId` keys the
  * per-call `actions` lookup, so the dispatch Reference (installed once
  * per isolate as a global) can route `actions.*` calls back to the
  * correct call's host-side `actions` instance. The in-VM `actions`
@@ -243,13 +242,12 @@ const wrap = (source: string): string => `
 `;
 
 type CompiledMutation = {
-	callable: Callable;
 	/** Per-call actions instances, keyed by callId. Lives for the
 	 * duration of each call. */
 	callMap: Map<number, MutationActions>;
-	context: Context;
-	isolate: Isolate;
 	nextCallId: number;
+	runner: IsolatedRunner;
+	source: string;
 	timeoutMs: number;
 };
 
@@ -258,14 +256,10 @@ const compile = async (
 	config: SandboxConfig,
 	bridgeFetch: BridgeFetchConfig | undefined
 ): Promise<CompiledMutation> => {
-	const { createIsolate, Reference } = await loadIsolatedJsc();
-	const isolate = await createIsolate({
-		backend: config.backend ?? 'auto',
-		memoryLimit: config.memoryLimit ?? 32
-	});
-	const context = await isolate.createContext();
+	const { Reference, createIsolatedRunner, resolveIsolatePolicy } =
+		await loadIsolatedJsc();
 
-	// Dispatch installed ONCE per isolate as a global. Closes over the
+	// Dispatch installed ONCE per runner context as a global. Closes over the
 	// per-mutation callMap; each in-VM `actions.*` call hands its
 	// callId back so we look up the right `actions` instance. This is
 	// concurrent-safe: every call has its own callId → its own slot,
@@ -303,16 +297,27 @@ const compile = async (
 				throw new Error(`unknown sandbox action op: ${String(op)}`);
 		}
 	}) as (...rawArgs: unknown[]) => unknown);
-	await context.setGlobal('__dispatch', dispatch);
 
-	const callable = await context.compileCallable(wrap(source));
+	const timeoutMs = config.timeout ?? 5000;
+	const sourceToCall = wrap(source);
+	const policy = resolveIsolatePolicy('tenant-script', {
+		allowWorkerFallback: true,
+		backend: config.backend ?? 'auto',
+		memoryLimit: config.memoryLimit ?? 32,
+		timeout: timeoutMs
+	});
+	const runner = createIsolatedRunner({
+		globals: { __dispatch: dispatch },
+		policy
+	});
+	await runner.precompile('sandboxedHandler', sourceToCall);
+
 	return {
-		callable,
 		callMap,
-		context,
-		isolate,
 		nextCallId: 1,
-		timeoutMs: config.timeout ?? 5000
+		runner,
+		source: sourceToCall,
+		timeoutMs
 	};
 };
 
@@ -389,12 +394,11 @@ const runBridgeFetch = async (
 
 /**
  * Build a lazy runner for one mutation's sandboxed source. The first call
- * compiles the isolate + context + dispatch Reference + callable;
+ * compiles the runner + dispatch Reference + callable;
  * subsequent calls only generate a fresh callId, register the per-call
- * `actions` in the callMap, and invoke `callable.call([callId, args,
- * ctx])`. Per-call cost on FFI: one JSObjectCallAsFunction + three
- * cheap primitive packings. No per-call Reference allocation, no
- * setGlobal, no eval.
+ * `actions` in the callMap, and invoke `runner.call(...)`. Per-call cost on
+ * FFI: one JSObjectCallAsFunction + three cheap primitive packings. No
+ * per-call Reference allocation, no setGlobal, no eval.
  *
  * Concurrency-safe by construction: each call has its own callId →
  * its own actions slot in the callMap.
@@ -408,7 +412,8 @@ export const makeSandboxedHandler = (
 	/**
 	 * Engine-level extras the per-mutation config doesn't carry:
 	 *  - `metricsHook` enables per-call telemetry via
-	 *    `callable.callWithMetrics` (small cost; off without the hook).
+	 *    `runner.call(..., { withMetrics: true })` (small cost; off without
+	 *    the hook).
 	 *  - `bridgeFetch` enables `actions.fetch(url, init)` inside the
 	 *    sandbox with host-side allowlist + auth injection.
 	 */
@@ -430,9 +435,7 @@ export const makeSandboxedHandler = (
 
 	const getCompiled = async (): Promise<CompiledMutation> => {
 		if (pending !== undefined) {
-			const compiled = await pending;
-			if (!compiled.isolate.isDisposed) return compiled;
-			pending = undefined; // dead — re-spawn below
+			return pending;
 		}
 		pending = compile(source, config, bridgeFetch);
 		return pending;
@@ -446,25 +449,37 @@ export const makeSandboxedHandler = (
 		// Fast path: no metrics hook → no per-call overhead.
 		if (metricsHook === undefined) {
 			try {
-				return await compiled.callable.call([callId, args, ctx], {
-					timeout: compiled.timeoutMs
-				});
+				return await compiled.runner.call(
+					'sandboxedHandler',
+					compiled.source,
+					[callId, args, ctx],
+					{ run: { timeout: compiled.timeoutMs } }
+				);
+			} catch (error) {
+				if (isIsolateDisposalError(error)) {
+					pending = undefined;
+					await disposeCompiled(compiled);
+				}
+				throw error;
 			} finally {
 				compiled.callMap.delete(callId);
 			}
 		}
 
-		// Metrics path: switch to `callWithMetrics` so we get cpuMs +
-		// heapBytes from the isolate side. Errors get a synthesized
-		// record before re-throwing so the caller still sees the error.
+		// Metrics path: switch to runner metrics so we get backend, cpuMs,
+		// and heapBytes from the isolate side. Errors get a synthesized record
+		// before re-throwing so the caller still sees the error.
 		const startedAt = performance.now();
 		const id = makeRandomId();
 		try {
-			const { result, metrics } = await compiled.callable.callWithMetrics(
+			const { result, metrics } = await compiled.runner.call(
+				'sandboxedHandler',
+				compiled.source,
 				[callId, args, ctx],
-				{ timeout: compiled.timeoutMs }
+				{ run: { timeout: compiled.timeoutMs }, withMetrics: true }
 			);
 			fireMetrics(metricsHook.onMetrics, {
+				backend: metrics.backend,
 				cpuMs: metrics.cpuMs,
 				durationMs: performance.now() - startedAt,
 				heapBytes: metrics.heapBytes,
@@ -475,6 +490,10 @@ export const makeSandboxedHandler = (
 			});
 			return result;
 		} catch (error) {
+			if (isIsolateDisposalError(error)) {
+				pending = undefined;
+				await disposeCompiled(compiled);
+			}
 			fireMetrics(metricsHook.onMetrics, {
 				cpuMs: 0,
 				durationMs: performance.now() - startedAt,
@@ -496,6 +515,20 @@ export const makeSandboxedHandler = (
 
 const makeRandomId = (): string =>
 	`hm_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+
+const isIsolateDisposalError = (error: unknown): boolean =>
+	error instanceof Error &&
+	(error.name === 'TimeoutError' ||
+		error.name === 'MemoryLimitError' ||
+		error.name === 'IsolateDisposedError');
+
+const disposeCompiled = async (compiled: CompiledMutation): Promise<void> => {
+	try {
+		await compiled.runner.dispose();
+	} catch {
+		// The isolate/pool may already have been torn down by the failing run.
+	}
+};
 
 const fireMetrics = (
 	hook: HandlerMetricsHook,
