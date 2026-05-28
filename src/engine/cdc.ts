@@ -21,13 +21,34 @@
  * dropping commits).
  */
 
-import { Elysia } from 'elysia';
+import type { Elysia as ElysiaType } from 'elysia';
 import {
 	CdcConsumerSlowError,
 	MissedChangesError,
 	type LoggedChange,
 	type SyncEngine
 } from './syncEngine';
+
+// Lazy Elysia loader. Elysia is a peer dependency of `@absolutejs/sync`, and
+// callers of `syncCdc` always have it installed (it's an Elysia plugin). The
+// reason for the indirection is that this file lives in the engine subpath
+// barrel (`@absolutejs/sync/engine`), and any top-level `import { Elysia }
+// from 'elysia'` would be hoisted by the bundler so that *every* engine
+// subpath consumer eagerly evaluates Elysia at module load — even consumers
+// that don't use `syncCdc` (e.g. sync packs in `@absolutejs/sync-packs/`).
+// Resolving Elysia on first call instead keeps the engine subpath dependency-
+// free at module-load time.
+let cachedElysia: typeof ElysiaType | undefined;
+const loadElysia = (): typeof ElysiaType => {
+	if (cachedElysia !== undefined) return cachedElysia;
+	// `require()` resolves synchronously in Bun and Node (via CJS interop),
+	// runs at *call* time, and the bundler does not hoist it.
+	const mod = (require as (id: string) => unknown)('elysia') as {
+		Elysia: typeof ElysiaType;
+	};
+	cachedElysia = mod.Elysia;
+	return cachedElysia;
+};
 
 export type SyncCdcOptions = {
 	/** The engine whose change log this route streams. */
@@ -66,8 +87,9 @@ export const syncCdc = ({
 	path = '/sync/cdc',
 	heartbeatMs = 25_000,
 	maxBuffer = 10_000
-}: SyncCdcOptions) =>
-	new Elysia({ name: '@absolutejs/sync/cdc' }).get(path, (context) => {
+}: SyncCdcOptions) => {
+	const Elysia = loadElysia();
+	return new Elysia({ name: '@absolutejs/sync/cdc' }).get(path, (context) => {
 		const lastEventId = context.request.headers.get('last-event-id');
 		const since = parseSince(
 			context.query as Record<string, string | undefined>,
@@ -162,3 +184,4 @@ export const syncCdc = ({
 			}
 		});
 	});
+};

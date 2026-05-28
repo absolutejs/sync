@@ -4,6 +4,21 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.9.1] — 2026-05-28
+
+### Fixed
+
+- **`@absolutejs/sync/engine` no longer eagerly evaluates Elysia at module
+  load.** Previously the engine subpath barrel re-exported `syncCdc` from
+  `engine/cdc.ts`, which had a top-level `import { Elysia } from 'elysia'`.
+  Any consumer of `@absolutejs/sync/engine` — including sync packs that
+  only use `defineCollection` / `defineSyncPack` and never touch CDC —
+  had to install `elysia` in their dependency tree, or `bun test` would
+  fail with `Cannot find package 'elysia'`. `engine/cdc.ts` now lazy-loads
+  Elysia via `require('elysia')` on first call to `syncCdc(...)`. The
+  public API is unchanged; only the load timing differs. Pack authors no
+  longer need `elysia` as a devDep.
+
 ## [1.9.0] — 2026-05-28
 
 ### Added
@@ -238,27 +253,27 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
   postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
 
-    The previous 1.7.2/1.7.3 design used a shared "current actions" slot
-    with a router Reference installed on a reused context, plus a
-    promise queue to serialize calls into that slot. 1.7.4 throws all of
-    that out:
-    - Each mutation is compiled to a `Callable` once at registration.
-      Source becomes `function(args, ctx, __dispatch) { ... return
-userFn(args, ctx, actions); }` where `actions` is an in-VM shim
-      over `__dispatch`.
-    - Per call: build a fresh dispatch `Reference` closed over this
-      call's `actions`, invoke `callable.call([args, ctx, dispatch])`.
+        The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+        with a router Reference installed on a reused context, plus a
+        promise queue to serialize calls into that slot. 1.7.4 throws all of
+        that out:
+        - Each mutation is compiled to a `Callable` once at registration.
+          Source becomes `function(args, ctx, __dispatch) { ... return
+
+    userFn(args, ctx, actions); }`where`actions`is an in-VM shim
+      over`\_\_dispatch`.
+    - Per call: build a fresh dispatch `Reference`closed over this
+      call's`actions`, invoke `callable.call([args, ctx, dispatch])`.
     - No shared slot → no serialization queue. Concurrent same-mutation
       calls are safe by construction (each has its own dispatch
-      Reference closed over its own `actions`).
-    - No reused context recycling — the callable's underlying function
-      is reused; per-call work doesn't create JSC metadata that needs
-      GCing.
+      Reference closed over its own `actions`). - No reused context recycling — the callable's underlying function
+    is reused; per-call work doesn't create JSC metadata that needs
+    GCing.
 
-    Behavioural notes: handler errors still propagate as `Error` objects
-    with `.message` and `.name`. Timeouts still terminate the isolate
-    on Worker; on FFI they throw `TimeoutError` and the isolate stays
-    alive (next call respawns the context). No public API changes.
+        Behavioural notes: handler errors still propagate as `Error` objects
+        with `.message` and `.name`. Timeouts still terminate the isolate
+        on Worker; on FFI they throw `TimeoutError` and the isolate stays
+        alive (next call respawns the context). No public API changes.
 
 ### Bumped
 
@@ -426,14 +441,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-            ```ts
-            import { syncCdc } from '@absolutejs/sync';
-            new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-            ```
+                ```ts
+                import { syncCdc } from '@absolutejs/sync';
+                new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+                ```
 
-            New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-            `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-            `MissedChangesError`, `CdcConsumerSlowError`.
+                New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+                `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+                `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 
