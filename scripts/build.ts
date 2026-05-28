@@ -10,6 +10,7 @@ const serverBuild = await Bun.build({
 	entrypoints: [
 		'src/index.ts',
 		'src/scheduled.ts',
+		'src/testing.ts',
 		'src/engine/index.ts',
 		'src/mcp/index.ts',
 		'src/adapters/drizzle/index.ts',

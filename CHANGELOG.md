@@ -4,6 +4,28 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.9.2] — 2026-05-28
+
+### Added
+
+- **New subpath `@absolutejs/sync/testing`** — small helpers for testing
+  sync engines and sync packs without each consumer redefining the same
+  boilerplate. Exports:
+    - `createTestEngine(options?)` — documented re-export of
+      `createSyncEngine` that signals test scope at the call site. Future
+      test-mode defaults (e.g. an inline transaction runner) can land
+      here without churning existing tests.
+    - `expectRejection(work)` — awaits `work()` and returns the thrown
+      value, or throws if it resolves. Avoids Bun 1.3.x's flaky
+      `expect(...).rejects.toThrow(...)` behavior
+      (oven-sh/bun#31462). Equivalent to the `rejection()` helper sync's
+      own tests already use locally.
+    - `runAsActor(engine, actorId, mutation, args, extraCtx?)` — runs a
+      mutation with `{ ...extraCtx, userId: actorId }` ctx, matching the
+      standard pack convention (`getActorId: (ctx) => ctx.userId`).
+      No new test framework; these are plain helpers usable with `bun:test`,
+      vitest, etc.
+
 ## [1.9.1] — 2026-05-28
 
 ### Fixed
@@ -253,27 +275,27 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
   postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
 
-        The previous 1.7.2/1.7.3 design used a shared "current actions" slot
-        with a router Reference installed on a reused context, plus a
-        promise queue to serialize calls into that slot. 1.7.4 throws all of
-        that out:
-        - Each mutation is compiled to a `Callable` once at registration.
-          Source becomes `function(args, ctx, __dispatch) { ... return
+          The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+          with a router Reference installed on a reused context, plus a
+          promise queue to serialize calls into that slot. 1.7.4 throws all of
+          that out:
+          - Each mutation is compiled to a `Callable` once at registration.
+            Source becomes `function(args, ctx, __dispatch) { ... return
 
     userFn(args, ctx, actions); }`where`actions`is an in-VM shim
-      over`\_\_dispatch`.
+    over`\_\_dispatch`.
     - Per call: build a fresh dispatch `Reference`closed over this
       call's`actions`, invoke `callable.call([args, ctx, dispatch])`.
     - No shared slot → no serialization queue. Concurrent same-mutation
       calls are safe by construction (each has its own dispatch
       Reference closed over its own `actions`). - No reused context recycling — the callable's underlying function
-    is reused; per-call work doesn't create JSC metadata that needs
-    GCing.
+      is reused; per-call work doesn't create JSC metadata that needs
+      GCing.
 
-        Behavioural notes: handler errors still propagate as `Error` objects
-        with `.message` and `.name`. Timeouts still terminate the isolate
-        on Worker; on FFI they throw `TimeoutError` and the isolate stays
-        alive (next call respawns the context). No public API changes.
+            Behavioural notes: handler errors still propagate as `Error` objects
+            with `.message` and `.name`. Timeouts still terminate the isolate
+            on Worker; on FFI they throw `TimeoutError` and the isolate stays
+            alive (next call respawns the context). No public API changes.
 
 ### Bumped
 
@@ -441,14 +463,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-                ```ts
-                import { syncCdc } from '@absolutejs/sync';
-                new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-                ```
+                    ```ts
+                    import { syncCdc } from '@absolutejs/sync';
+                    new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+                    ```
 
-                New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-                `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-                `MissedChangesError`, `CdcConsumerSlowError`.
+                    New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+                    `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+                    `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 
