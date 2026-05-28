@@ -36,6 +36,8 @@ import type {
 	TablePermissions,
 	WriteRule
 } from './permissions';
+import { PackMissingDependencyError, PackTableConflictError } from './pack';
+import type { RegisteredPack, SyncPack } from './pack';
 import type { SearchCollectionDefinition, SearchIndex } from './search';
 import { SEARCH_SCORE_FIELD } from './search';
 import type { ScheduleDefinition } from './schedule';
@@ -301,6 +303,18 @@ export type SyncEngine = {
 	streamChanges: (
 		options?: StreamChangesOptions
 	) => AsyncIterable<LoggedChange>;
+	/**
+	 * Register a {@link SyncPack} — a self-contained bundle of schemas,
+	 * permissions, readers/writers, collections, mutations, and schedules.
+	 * Dispatches each field to the matching `register*` method. Rejects
+	 * with {@link PackTableConflictError} if the pack claims a table
+	 * another registered pack already owns; with
+	 * {@link PackMissingDependencyError} if `requireDependencies` is set
+	 * and a `readsTables` entry has no registered reader.
+	 *
+	 * See `syncPacks.design.md` for the rationale.
+	 */
+	registerPack: (pack: SyncPack) => void;
 };
 
 type OnDiff = (diff: ViewDiff<unknown>, version: number) => void;
@@ -679,6 +693,10 @@ export const createSyncEngine = (
 	const writers = new Map<string, TableWriter>();
 	const readers = new Map<string, TableReader>();
 	const schedules = new Map<string, ScheduleDefinition>();
+	// Pack registry — table -> owning pack name, and the list of registered
+	// packs for engine.inspect().packs.
+	const packTableOwners = new Map<string, string>();
+	const registeredPacks: RegisteredPack[] = [];
 	// Declarative row-level permissions, keyed by table. Stored with an `unknown`
 	// context — the engine threads ctx untyped — while the public
 	// `definePermissions`/`registerPermissions` surface stays fully typed.
@@ -1841,7 +1859,7 @@ export const createSyncEngine = (
 		};
 	};
 
-	return {
+	const engine: SyncEngine = {
 		register: (collection) => {
 			registry.set(collection.name, collection);
 			for (const table of collection.tables ?? [collection.name]) {
@@ -2334,11 +2352,156 @@ export const createSyncEngine = (
 				await schedule.run({ actions, db });
 				return buffered;
 			};
-			const buffered =
-				runInTransaction !== undefined
-					? await runInTransaction((tx) => runHandler(tx))
-					: await runHandler(undefined);
-			await applyChangeBatch(buffered);
+
+			const retry = schedule.retry;
+			const maxAttempts =
+				retry === undefined ? 1 : (retry.maxAttempts ?? 5);
+			const isRetryable = retry?.isRetryable ?? isSerializationFailure;
+			const computeDelay = retry?.backoff ?? exponentialBackoff();
+			const maxElapsedMs = retry?.maxElapsedMs ?? 30_000;
+			const startedAt = Date.now();
+
+			let lastError: unknown;
+			let attemptsMade = 0;
+			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+				attemptsMade = attempt;
+				try {
+					const buffered =
+						runInTransaction !== undefined
+							? await runInTransaction((tx) => runHandler(tx))
+							: await runHandler(undefined);
+					await applyChangeBatch(buffered);
+					emitActivity({
+						type: 'schedule',
+						at: Date.now(),
+						name,
+						status: 'ok'
+					});
+					return;
+				} catch (error) {
+					lastError = error;
+					const elapsedMs = Date.now() - startedAt;
+					const canRetry =
+						attempt < maxAttempts &&
+						isRetryable(error) &&
+						elapsedMs < maxElapsedMs;
+					if (!canRetry) break;
+
+					const rawDelay = computeDelay(attempt);
+					const remaining = maxElapsedMs - elapsedMs;
+					if (remaining <= 0) break;
+					const delayMs = Math.max(0, Math.min(rawDelay, remaining));
+
+					emitActivity({
+						type: 'scheduleRetry',
+						at: Date.now(),
+						name,
+						attempt,
+						delayMs,
+						errorName:
+							error instanceof Error ? error.name : 'Error',
+						errorMessage:
+							error instanceof Error
+								? error.message
+								: String(error)
+					});
+					if (delayMs > 0) {
+						await new Promise((resolve) =>
+							setTimeout(resolve, delayMs)
+						);
+					}
+				}
+			}
+
+			emitActivity({
+				type: 'schedule',
+				at: Date.now(),
+				name,
+				status: 'error'
+			});
+			if (attemptsMade > 1) {
+				throw new RetriesExhaustedError(
+					attemptsMade,
+					Date.now() - startedAt,
+					lastError
+				);
+			}
+			throw lastError;
+		},
+
+		registerPack: (pack) => {
+			for (const table of pack.ownsTables) {
+				const existing = packTableOwners.get(table);
+				if (existing !== undefined) {
+					throw new PackTableConflictError(
+						table,
+						existing,
+						pack.name
+					);
+				}
+			}
+			if (pack.requireDependencies === true) {
+				for (const table of pack.readsTables ?? []) {
+					if (!readers.has(table)) {
+						throw new PackMissingDependencyError(pack.name, table);
+					}
+				}
+			}
+			if (pack.schemas !== undefined) {
+				for (const [table, schema] of Object.entries(pack.schemas)) {
+					engine.registerSchema(table, schema);
+				}
+			}
+			if (pack.permissions !== undefined) {
+				for (const [table, rules] of Object.entries(pack.permissions)) {
+					engine.registerPermissions(table, rules);
+				}
+			}
+			if (pack.readers !== undefined) {
+				for (const [table, reader] of Object.entries(pack.readers)) {
+					engine.registerReader(table, reader);
+				}
+			}
+			if (pack.writers !== undefined) {
+				for (const [table, writer] of Object.entries(pack.writers)) {
+					engine.registerWriter(table, writer);
+				}
+			}
+			if (pack.crdt !== undefined) {
+				for (const [table, fields] of Object.entries(pack.crdt)) {
+					engine.registerCrdt(table, fields);
+				}
+			}
+			for (const collection of pack.collections ?? []) {
+				engine.register(collection);
+			}
+			for (const collection of pack.joinCollections ?? []) {
+				engine.registerJoin(collection);
+			}
+			for (const collection of pack.graphCollections ?? []) {
+				engine.registerGraph(collection);
+			}
+			for (const collection of pack.searchCollections ?? []) {
+				engine.registerSearch(collection);
+			}
+			for (const query of pack.reactiveQueries ?? []) {
+				engine.registerReactive(query);
+			}
+			for (const mutation of pack.mutations ?? []) {
+				engine.registerMutation(mutation);
+			}
+			for (const schedule of pack.schedules ?? []) {
+				engine.registerSchedule(schedule);
+			}
+			for (const table of pack.ownsTables) {
+				packTableOwners.set(table, pack.name);
+			}
+			registeredPacks.push({
+				name: pack.name,
+				version: pack.version,
+				ownsTables: [...pack.ownsTables],
+				readsTables: [...(pack.readsTables ?? [])]
+			});
 		},
 
 		inspect: () => {
@@ -2402,7 +2565,13 @@ export const createSyncEngine = (
 						version: entry.version,
 						table: entry.table,
 						op: entry.change.op
-					}))
+					})),
+				packs: registeredPacks.map((pack) => ({
+					name: pack.name,
+					version: pack.version,
+					ownsTables: [...pack.ownsTables],
+					readsTables: [...pack.readsTables]
+				}))
 			};
 		},
 
@@ -2523,4 +2692,6 @@ export const createSyncEngine = (
 			};
 		}
 	};
+
+	return engine;
 };

@@ -1,5 +1,6 @@
 import type { MutationActions } from './mutation';
 import type { ReadHandle } from './reactive';
+import type { RetryPolicy } from './retry';
 
 /**
  * Scheduled functions — server-triggered work whose effects flow through the
@@ -33,6 +34,19 @@ export type ScheduleDefinition = {
 	pattern: string;
 	/** The work to run on each fire. Writes via `ctx.actions` go live. */
 	run: (ctx: ScheduleContext) => Promise<void> | void;
+	/**
+	 * Opt-in retry of the whole handler on classified-as-retryable errors —
+	 * same shape and defaults as {@link MutationDefinition.retry}. When set
+	 * and `run` throws a retryable error, the engine discards the buffered
+	 * changes, awaits a backoff, and re-runs the handler with a fresh
+	 * transaction. The handler MUST be idempotent under retry (external
+	 * side effects fire more than once).
+	 *
+	 * For per-item retry (e.g. one of many emails failing), write that
+	 * loop inside the handler — this outer retry covers transient
+	 * infrastructure failures of the whole fire, not per-item logic.
+	 */
+	retry?: RetryPolicy;
 };
 
 /**

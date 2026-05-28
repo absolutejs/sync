@@ -4,6 +4,38 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.9.0] — 2026-05-28
+
+### Added
+
+- **Sync packs — `engine.registerPack(pack)`.** A `SyncPack` is a
+  self-contained bundle of schemas, permissions, readers/writers,
+  collections (view/join/graph/search/reactive), mutations, schedules,
+  and CRDT field declarations. `engine.registerPack` walks the bundle and
+  dispatches each entry to the matching `register*` method — no new
+  persistence path, pure composition. Packs declare `ownsTables` and the
+  engine rejects two packs claiming the same table with
+  `PackTableConflictError`. Optional `requireDependencies: true` throws
+  `PackMissingDependencyError` at register time if a `readsTables` entry
+  has no reader yet. `engine.inspect().packs` surfaces registered packs
+  for devtools and conflict diagnostics. See `src/engine/syncPacks.design.md`
+  for the rationale, factory pattern (`create<Name>Pack(config)`), and
+  composition rules ("subscribe layer, not call layer"). Pack repos live
+  in the new `~/abs/sync-packs/` monorepo.
+- **`ScheduleDefinition.retry: RetryPolicy`** — opt-in retry of the
+  whole handler on classified-as-retryable errors. Mirrors
+  `defineMutation.retry`: handler must be idempotent under retry,
+  default is `isSerializationFailure`, defaults `maxAttempts: 5` /
+  `maxElapsedMs: 30_000` / exponential backoff. New activity events
+  `schedule` (`status: 'ok' | 'error'`) and `scheduleRetry` mirror the
+  mutation activity stream.
+
+### Exports (new on `@absolutejs/sync/engine`)
+
+- `defineSyncPack`, `PackTableConflictError`,
+  `PackMissingDependencyError`
+- Types: `SyncPack`, `RegisteredPack`, `CrdtFieldsMap`
+
 ## [1.8.1] — 2026-05-28
 
 ### Changed
@@ -39,32 +71,31 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   for the engine.** Surface a {@link SyncEngine}'s read + mutate
   surface to MCP-aware clients (Claude Code, Cursor, custom agents)
   through five tools:
+    - `list_collections` — registered collection names + kinds + tables
+    - `list_mutations` — registered mutation names
+    - `inspect_engine` — full {@link EngineInspection} snapshot
+    - `get_snapshot` — `{ collection, params?, ctx? }` → current rows
+    - `run_mutation` — `{ mutation, args, ctx? }` → result
 
-  - `list_collections` — registered collection names + kinds + tables
-  - `list_mutations` — registered mutation names
-  - `inspect_engine` — full {@link EngineInspection} snapshot
-  - `get_snapshot` — `{ collection, params?, ctx? }` → current rows
-  - `run_mutation` — `{ mutation, args, ctx? }` → result
+    ```ts
+    // mcp-stdio-server.ts — point your MCP client at this file's path.
+    import { createSyncMcpServer, serveStdio } from '@absolutejs/sync/mcp';
+    const server = await createSyncMcpServer({
+    	engine,
+    	defaultCtx: { tenantId: 'demo' }
+    });
+    await serveStdio(server);
+    ```
 
-  ```ts
-  // mcp-stdio-server.ts — point your MCP client at this file's path.
-  import { createSyncMcpServer, serveStdio } from '@absolutejs/sync/mcp';
-  const server = await createSyncMcpServer({
-    engine,
-    defaultCtx: { tenantId: 'demo' },
-  });
-  await serveStdio(server);
-  ```
+    Multi-tenant gating is built in: spawn one MCP server per tenant
+    with `defaultCtx: { tenantId }`; the agent's per-call `ctx`
+    overrides aren't required (and tools that take a `ctx` fall back
+    to the server default).
 
-  Multi-tenant gating is built in: spawn one MCP server per tenant
-  with `defaultCtx: { tenantId }`; the agent's per-call `ctx`
-  overrides aren't required (and tools that take a `ctx` fall back
-  to the server default).
-
-  Closes the QW-5 strategy item from the May 2026 competitive dive
-  (Val.town's MCP server with 36+ tools, Cloudflare's MCP exposing
-  the entire Cloudflare API through "two tools in under 1,000 tokens"
-  via Code Mode — sync needed to be in this conversation).
+    Closes the QW-5 strategy item from the May 2026 competitive dive
+    (Val.town's MCP server with 36+ tools, Cloudflare's MCP exposing
+    the entire Cloudflare API through "two tools in under 1,000 tokens"
+    via Code Mode — sync needed to be in this conversation).
 
 ### Bumped
 
@@ -84,35 +115,35 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   `fetch`, and returns a structured-cloned response the sandbox can
   pick apart:
 
-  ```ts
-  createSyncEngine({
-    bridgeFetch: {
-      'api.stripe.com': {
-        authorization: () => \`Bearer \${process.env.STRIPE_KEY}\`,
+    ```ts
+    createSyncEngine({
+      bridgeFetch: {
+        'api.stripe.com': {
+          authorization: () => \`Bearer \${process.env.STRIPE_KEY}\`,
+        },
+        'api.openai.com': {
+          authorization: () => \`Bearer \${process.env.OPENAI_KEY}\`,
+          headers: { 'OpenAI-Beta': 'assistants=v2' },
+        },
       },
-      'api.openai.com': {
-        authorization: () => \`Bearer \${process.env.OPENAI_KEY}\`,
-        headers: { 'OpenAI-Beta': 'assistants=v2' },
-      },
-    },
-  });
+    });
 
-  // Inside any sandboxedHandler:
-  const res = await actions.fetch('https://api.stripe.com/v1/customers');
-  const customers = JSON.parse(res.body);
-  ```
+    // Inside any sandboxedHandler:
+    const res = await actions.fetch('https://api.stripe.com/v1/customers');
+    const customers = JSON.parse(res.body);
+    ```
 
-  Sandbox-supplied `Authorization` headers are stripped before the
-  request is sent (so a malicious tenant can't probe whether the host
-  injected an auth header by reflecting one). All other sandbox
-  headers pass through. Non-allowlisted hostnames throw a clean
-  "not allowlisted" error inside the sandbox before any network call.
+    Sandbox-supplied `Authorization` headers are stripped before the
+    request is sent (so a malicious tenant can't probe whether the host
+    injected an auth header by reflecting one). All other sandbox
+    headers pass through. Non-allowlisted hostnames throw a clean
+    "not allowlisted" error inside the sandbox before any network call.
 
-  Closes E2B wishlist #1160's "per-sandbox credential brokering with
-  selective injection" pattern, which Cloudflare Dynamic Workers
-  shipped in April 2026. None of the peer sync engines have an
-  equivalent (closest is Convex actions, which run with full host
-  trust — no allowlist boundary).
+    Closes E2B wishlist #1160's "per-sandbox credential brokering with
+    selective injection" pattern, which Cloudflare Dynamic Workers
+    shipped in April 2026. None of the peer sync engines have an
+    equivalent (closest is Convex actions, which run with full host
+    trust — no allowlist boundary).
 
 ## [1.7.7] — 2026-05-27
 
@@ -124,14 +155,14 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   it to the original call's timestamp so optimistic client and
   authoritative server runs don't silently diverge.
 
-  Use `actions.now()` everywhere you'd reach for `Date.now()` inside
-  a mutation handler. The plain `handler` form gets it as part of
-  the `actions` parameter; the `sandboxedHandler` form gets it
-  through the same in-VM shim as the other actions (one
-  `__dispatch(callId, 'now')` host-fn call).
+    Use `actions.now()` everywhere you'd reach for `Date.now()` inside
+    a mutation handler. The plain `handler` form gets it as part of
+    the `actions` parameter; the `sandboxedHandler` form gets it
+    through the same in-VM shim as the other actions (one
+    `__dispatch(callId, 'now')` host-fn call).
 
-  Trivially additive — existing handlers using `Date.now()` keep
-  working; the new primitive is opt-in.
+    Trivially additive — existing handlers using `Date.now()` keep
+    working; the new primitive is opt-in.
 
 ## [1.7.6] — 2026-05-27
 
@@ -142,33 +173,33 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   a `HandlerMetricsRecord` after every sandboxed-mutation invocation
   (success or failure) with:
 
-  ```ts
-  type HandlerMetricsRecord = {
-    id: string;            // random per-call id
-    mutationName: string;
-    durationMs: number;    // wall-clock host-side
-    cpuMs: number;         // inside the JSC sandbox
-    heapBytes: number;     // measured right after the script returned
-    ok: boolean;
-    errorName?: string;    // present when ok === false
-    errorMessage?: string;
-    timestamp: number;     // Date.now() at call end
-  };
-  ```
+    ```ts
+    type HandlerMetricsRecord = {
+    	id: string; // random per-call id
+    	mutationName: string;
+    	durationMs: number; // wall-clock host-side
+    	cpuMs: number; // inside the JSC sandbox
+    	heapBytes: number; // measured right after the script returned
+    	ok: boolean;
+    	errorName?: string; // present when ok === false
+    	errorMessage?: string;
+    	timestamp: number; // Date.now() at call end
+    };
+    ```
 
-  Wire to anything: a sync collection (per-tenant dashboards), your
-  observability backend, a Drizzle table for cost attribution, or
-  stderr for spot-checks. The runner switches to
-  `callable.callWithMetrics` when the hook is set (~0.05 ms per call
-  cost — disable for hot-path mutations that don't need it). Without
-  the hook, the per-call hot path is unchanged.
+    Wire to anything: a sync collection (per-tenant dashboards), your
+    observability backend, a Drizzle table for cost attribution, or
+    stderr for spot-checks. The runner switches to
+    `callable.callWithMetrics` when the hook is set (~0.05 ms per call
+    cost — disable for hot-path mutations that don't need it). Without
+    the hook, the per-call hot path is unchanged.
 
-  Hook failures are swallowed by design: a misbehaving metrics sink
-  must NOT crash the caller's mutation.
+    Hook failures are swallowed by design: a misbehaving metrics sink
+    must NOT crash the caller's mutation.
 
-  Closes the "per-tenant observability is universally weak" gap
-  surfaced by the competitive deep dive — none of the peer sync
-  engines ship this primitive.
+    Closes the "per-tenant observability is universally weak" gap
+    surfaced by the competitive deep dive — none of the peer sync
+    engines ship this primitive.
 
 ## [1.7.5] — 2026-05-27
 
@@ -181,21 +212,21 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   JSCallback alloc per call (~0.5 ms fixed cost). Bench regressed
   pure-handler FFI from 0.33 ms (1.7.3) → 0.96 ms (1.7.4).
 
-  1.7.5 reverts that: install `__dispatch` ONCE per isolate as a
-  global Reference closed over a per-mutation `callMap`. Each call
-  generates a fresh `callId`, registers its `actions` in the map,
-  invokes `callable.call([callId, args, ctx])`, and deletes the
-  entry in finally. The in-VM `actions` shim closes the call id
-  over `__dispatch`, so concurrent calls route to the right
-  `actions` instance via their own callId — concurrent-safe by
-  construction, no shared-mutable slot, no serialization queue.
+    1.7.5 reverts that: install `__dispatch` ONCE per isolate as a
+    global Reference closed over a per-mutation `callMap`. Each call
+    generates a fresh `callId`, registers its `actions` in the map,
+    invokes `callable.call([callId, args, ctx])`, and deletes the
+    entry in finally. The in-VM `actions` shim closes the call id
+    over `__dispatch`, so concurrent calls route to the right
+    `actions` instance via their own callId — concurrent-safe by
+    construction, no shared-mutable slot, no serialization queue.
 
-  Per-call hot path: one `JSObjectCallAsFunction` + 3 cheap
-  primitive packings (callId is a number; args/ctx structured-clone
-  via JSON). No per-call Reference alloc.
+    Per-call hot path: one `JSObjectCallAsFunction` + 3 cheap
+    primitive packings (callId is a number; args/ctx structured-clone
+    via JSON). No per-call Reference alloc.
 
-  Expected on the bench: pure FFI back to <0.4 ms, actions FFI
-  ~similar to 1.7.4 (~1.5 ms — the pump dominates there).
+    Expected on the bench: pure FFI back to <0.4 ms, actions FFI
+    ~similar to 1.7.4 (~1.5 ms — the pump dominates there).
 
 ## [1.7.4] — 2026-05-27
 
@@ -207,28 +238,27 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
   postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
 
-  The previous 1.7.2/1.7.3 design used a shared "current actions" slot
-  with a router Reference installed on a reused context, plus a
-  promise queue to serialize calls into that slot. 1.7.4 throws all of
-  that out:
+    The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+    with a router Reference installed on a reused context, plus a
+    promise queue to serialize calls into that slot. 1.7.4 throws all of
+    that out:
+    - Each mutation is compiled to a `Callable` once at registration.
+      Source becomes `function(args, ctx, __dispatch) { ... return
+userFn(args, ctx, actions); }` where `actions` is an in-VM shim
+      over `__dispatch`.
+    - Per call: build a fresh dispatch `Reference` closed over this
+      call's `actions`, invoke `callable.call([args, ctx, dispatch])`.
+    - No shared slot → no serialization queue. Concurrent same-mutation
+      calls are safe by construction (each has its own dispatch
+      Reference closed over its own `actions`).
+    - No reused context recycling — the callable's underlying function
+      is reused; per-call work doesn't create JSC metadata that needs
+      GCing.
 
-  - Each mutation is compiled to a `Callable` once at registration.
-    Source becomes `function(args, ctx, __dispatch) { ... return
-    userFn(args, ctx, actions); }` where `actions` is an in-VM shim
-    over `__dispatch`.
-  - Per call: build a fresh dispatch `Reference` closed over this
-    call's `actions`, invoke `callable.call([args, ctx, dispatch])`.
-  - No shared slot → no serialization queue. Concurrent same-mutation
-    calls are safe by construction (each has its own dispatch
-    Reference closed over its own `actions`).
-  - No reused context recycling — the callable's underlying function
-    is reused; per-call work doesn't create JSC metadata that needs
-    GCing.
-
-  Behavioural notes: handler errors still propagate as `Error` objects
-  with `.message` and `.name`. Timeouts still terminate the isolate
-  on Worker; on FFI they throw `TimeoutError` and the isolate stays
-  alive (next call respawns the context). No public API changes.
+    Behavioural notes: handler errors still propagate as `Error` objects
+    with `.message` and `.name`. Timeouts still terminate the isolate
+    on Worker; on FFI they throw `TimeoutError` and the isolate stays
+    alive (next call respawns the context). No public API changes.
 
 ### Bumped
 
@@ -244,17 +274,17 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   always returned a Promise — forcing isolated-jsc's FFI backend to
   run setup + read evals through `unwrapResultPromise` for every call,
   even when the user's handler was sync. Switched to `(() => { ... })()`:
-  - Sync user handler (returns a primitive): the IIFE returns the
-    primitive directly. FFI's `unwrapResultPromise` short-circuits on
-    `!JSValueIsObject` — zero extra evals, fast path.
-  - Async user handler (returns a Promise): the IIFE returns the
-    Promise. Unwrap pump fires normally. Same behaviour as before.
+    - Sync user handler (returns a primitive): the IIFE returns the
+      primitive directly. FFI's `unwrapResultPromise` short-circuits on
+      `!JSValueIsObject` — zero extra evals, fast path.
+    - Async user handler (returns a Promise): the IIFE returns the
+      Promise. Unwrap pump fires normally. Same behaviour as before.
 
-  Combined with isolated-jsc 0.5 (read+cleanup eval folded together),
-  pure-handler warm dispatch on FFI is now ~1.5 ms (down from 2.47 ms
-  in 1.7.2, ~4.7 ms in 1.7.1). The sync IIFE also propagates
-  synchronous throws through the eval boundary directly instead of
-  wrapping them in a rejection — the caller still sees an `Error`.
+    Combined with isolated-jsc 0.5 (read+cleanup eval folded together),
+    pure-handler warm dispatch on FFI is now ~1.5 ms (down from 2.47 ms
+    in 1.7.2, ~4.7 ms in 1.7.1). The sync IIFE also propagates
+    synchronous throws through the eval boundary directly instead of
+    wrapping them in a rejection — the caller still sees an `Error`.
 
 ### Bumped
 
@@ -271,29 +301,29 @@ follows [Semantic Versioning](https://semver.org) from 1.0 onward.
   53% of per-call time was spent installing four `actions.*` References
   (one per `setGlobal`, repeated every call), plus 8% on creating a
   fresh context per call. Refactor:
-  - Install **one** `__syncAction(op, ...args)` router Reference per
-    isolate at compile time (instead of four per call). The in-VM
-    `actions` object is now a thin in-JS shim that dispatches through
-    the router.
-  - Reuse a single per-mutation context across calls; recycle every
-    256 calls to bound JSC per-call metadata accumulation.
-  - Serialize calls via a promise queue so the shared "current actions"
-    slot stays coherent under concurrent invocations.
+    - Install **one** `__syncAction(op, ...args)` router Reference per
+      isolate at compile time (instead of four per call). The in-VM
+      `actions` object is now a thin in-JS shim that dispatches through
+      the router.
+    - Reuse a single per-mutation context across calls; recycle every
+      256 calls to bound JSC per-call metadata accumulation.
+    - Serialize calls via a promise queue so the shared "current actions"
+      slot stays coherent under concurrent invocations.
 
-  Per-call hot path drops from `createContext` + 6 `setGlobal` to
-  2 `setGlobal` (only the volatile `args` + `ctx`). Empirical on the
-  Worker vs FFI sandbox bench (see `benchmarks/sync/RESULTS.md`):
+    Per-call hot path drops from `createContext` + 6 `setGlobal` to
+    2 `setGlobal` (only the volatile `args` + `ctx`). Empirical on the
+    Worker vs FFI sandbox bench (see `benchmarks/sync/RESULTS.md`):
 
-  | Backend | warm p50 (1.7.1) | warm p50 (1.7.2) | speedup |
-  | ------- | ---------------- | ---------------- | ------- |
-  | worker  | 0.94 ms          | (≈ same)         | —       |
-  | ffi     | 4.69 ms          | ≈ 1.5 ms         | ~3×     |
+    | Backend | warm p50 (1.7.1) | warm p50 (1.7.2) | speedup |
+    | ------- | ---------------- | ---------------- | ------- |
+    | worker  | 0.94 ms          | (≈ same)         | —       |
+    | ffi     | 4.69 ms          | ≈ 1.5 ms         | ~3×     |
 
-  Behavioural notes: a single mutation's sandboxed calls are now
-  serialized; concurrent same-mutation invocations queue behind each
-  other (they already shared one isolate, so the practical impact is
-  small). Per-call context recycle is hidden from the caller. No
-  public-API changes.
+    Behavioural notes: a single mutation's sandboxed calls are now
+    serialized; concurrent same-mutation invocations queue behind each
+    other (they already shared one isolate, so the practical impact is
+    small). Per-call context recycle is hidden from the caller. No
+    public-API changes.
 
 ## [1.7.1] — 2026-05-27
 
@@ -396,14 +426,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-        ```ts
-        import { syncCdc } from '@absolutejs/sync';
-        new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-        ```
+            ```ts
+            import { syncCdc } from '@absolutejs/sync';
+            new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+            ```
 
-        New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-        `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-        `MissedChangesError`, `CdcConsumerSlowError`.
+            New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+            `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+            `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 

@@ -187,10 +187,7 @@ describe('createSyncMcpServer', () => {
 				>;
 			}
 		)._registeredTools.get_snapshot;
-		const result = await tool!.handler(
-			{ collection: 'items' },
-			{}
-		);
+		const result = await tool!.handler({ collection: 'items' }, {});
 		const parsed = parseTextResult(result) as Array<{ id: number }>;
 		expect(parsed.length).toBe(1);
 		expect(parsed[0]!.id).toBe(7);

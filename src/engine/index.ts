@@ -106,6 +106,13 @@ export type { VectorIndexOptions, VectorMetric } from './vectorIndex';
 export { defineSchedule } from './schedule';
 export type { ScheduleContext, ScheduleDefinition } from './schedule';
 
+export {
+	defineSyncPack,
+	PackMissingDependencyError,
+	PackTableConflictError
+} from './pack';
+export type { CrdtFieldsMap, RegisteredPack, SyncPack } from './pack';
+
 export { defineMutation } from './mutation';
 export type {
 	MutationActions,

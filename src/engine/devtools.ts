@@ -32,6 +32,18 @@ export type EngineInspection = {
 	writers: string[];
 	/** Most recent changes from the change log (oldest first). */
 	recentChanges: { version: number; table: string; op: RowOp }[];
+	/**
+	 * Registered sync packs (see {@link SyncEngine.registerPack}). Each
+	 * entry reports the pack's name, version, the tables it owns, and the
+	 * tables it reads but does not own. Surfaced for devtools and for
+	 * conflict diagnostics.
+	 */
+	packs: {
+		name: string;
+		version: string;
+		ownsTables: string[];
+		readsTables: string[];
+	}[];
 };
 
 /**
@@ -47,6 +59,18 @@ export type EngineActivity =
 			 * attempt that just failed (1-indexed); `delayMs` is the wait before
 			 * the next attempt. Surfaces OCC retries to observability. */
 			type: 'mutationRetry';
+			at: number;
+			name: string;
+			attempt: number;
+			delayMs: number;
+			errorName: string;
+			errorMessage: string;
+	  }
+	| { type: 'schedule'; at: number; name: string; status: 'ok' | 'error' }
+	| {
+			/** Emitted between attempts of a retried schedule. Mirrors
+			 * {@link mutationRetry}. */
+			type: 'scheduleRetry';
 			at: number;
 			name: string;
 			attempt: number;

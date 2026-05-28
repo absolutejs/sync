@@ -38,10 +38,7 @@
 // Type-only import — erased at runtime, so the engine still loads when
 // `@absolutejs/isolated-jsc` isn't installed. The actual module is loaded
 // lazily via dynamic `import()` inside `loadIsolatedJsc`.
-import type {
-	IsolatedRunner,
-	RunMetrics
-} from '@absolutejs/isolated-jsc';
+import type { IsolatedRunner, RunMetrics } from '@absolutejs/isolated-jsc';
 import type { MutationActions } from './mutation';
 
 type IsolatedJscModule = typeof import('@absolutejs/isolated-jsc');
