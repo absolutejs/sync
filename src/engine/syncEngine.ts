@@ -73,6 +73,51 @@ export class UnauthorizedError extends Error {
 }
 
 /**
+ * Thrown by `engine.subscribe` / `engine.hydrate` (1.15.0+) when the caller's
+ * `AbortSignal` fires before the operation reaches a `Subscription` /
+ * resolved value. The `name` is `'AbortError'` to match the DOM-standard
+ * spelling so existing `catch (error) { if (error.name === 'AbortError') ... }`
+ * patterns work unchanged.
+ */
+export class AbortError extends Error {
+	constructor(reason?: string) {
+		super(reason ?? 'Aborted');
+		this.name = 'AbortError';
+	}
+}
+
+const checkAborted = (signal?: AbortSignal): void => {
+	if (signal?.aborted) {
+		throw new AbortError(
+			signal.reason instanceof Error
+				? signal.reason.message
+				: typeof signal.reason === 'string'
+					? signal.reason
+					: 'Aborted'
+		);
+	}
+};
+
+const linkAbortToUnsubscribe = (
+	signal: AbortSignal | undefined,
+	unsubscribe: () => void
+): void => {
+	if (signal === undefined) return;
+	if (signal.aborted) {
+		unsubscribe();
+		return;
+	}
+	const handler = () => {
+		try {
+			unsubscribe();
+		} catch {
+			/* idempotent unsubscribes shouldn't surface here */
+		}
+	};
+	signal.addEventListener('abort', handler, { once: true });
+};
+
+/**
  * Thrown when a mutation's write fails its table's schema (see
  * {@link defineSchema}). The message names the offending field.
  */
@@ -99,6 +144,19 @@ export type SubscribeArgs<T, P, Ctx> = {
 	 * snapshot.
 	 */
 	since?: number;
+	/**
+	 * Cancellation handle (1.15.0). Two effects:
+	 *  1. If the signal is already aborted when `subscribe` is called, the
+	 *     engine throws {@link AbortError} immediately — no authorize, no
+	 *     hydrate, no subscription.
+	 *  2. If the signal fires AFTER the subscription is live, the engine
+	 *     auto-calls `unsubscribe()`. The consumer never has to thread two
+	 *     handles for the same lifetime.
+	 *
+	 * Backwards-compatible — omit `signal` and the engine behaves exactly
+	 * as in pre-1.15.0.
+	 */
+	signal?: AbortSignal;
 };
 
 export type Subscription<T> = {
@@ -158,11 +216,16 @@ export type SyncEngine = {
 	 * One-shot read: authorize and return a collection's current rows without
 	 * subscribing. Powers an Eden-typed HTTP hydrate route (and SSR). Rejects
 	 * with {@link UnauthorizedError} on deny.
+	 *
+	 * Pass `options.signal` (1.15.0+) to cancel the operation mid-flight —
+	 * the engine throws {@link AbortError} after the next await point if
+	 * the signal has fired.
 	 */
 	hydrate: (
 		collection: string,
 		params: unknown,
-		ctx: unknown
+		ctx: unknown,
+		options?: { signal?: AbortSignal }
 	) => Promise<unknown[]>;
 	/**
 	 * Feed a committed change to `table` into the engine, fanning the resulting
@@ -1955,7 +2018,12 @@ export const createSyncEngine = (
 			registry.set(collection.name, collection);
 		},
 
-		subscribe: async ({ collection, params, ctx, onDiff, since }) => {
+		subscribe: async ({ collection, params, ctx, onDiff, since, signal }) => {
+			// (1.15.0) Cheap up-front check — if the consumer already aborted
+			// before we got here, throw before any side effect (no authorize,
+			// no hydrate, no view materialization).
+			checkAborted(signal);
+
 			const registered = registry.get(collection);
 			if (registered === undefined) {
 				throw new Error(`Unknown collection "${collection}"`);
@@ -1963,6 +2031,15 @@ export const createSyncEngine = (
 
 			const typedOnDiff = onDiff as OnDiff;
 			const subscribeSet = subsFor(collection);
+
+			// Wrap the eventual return so we (a) re-check signal after the
+			// async setup (catches mid-flight aborts), and (b) auto-call
+			// unsubscribe when signal fires after the subscription is live.
+			const wrapReturn = <T>(sub: Subscription<T>): Subscription<T> => {
+				checkAborted(signal);
+				linkAbortToUnsubscribe(signal, sub.unsubscribe);
+				return sub;
+			};
 
 			const registeredKind = (registered as { kind?: string }).kind;
 			if (registeredKind === 'join') {
@@ -1980,7 +2057,7 @@ export const createSyncEngine = (
 					typedOnDiff,
 					subscribeSet
 				);
-				return joined as Subscription<never>;
+				return wrapReturn(joined) as Subscription<never>;
 			}
 			if (registeredKind === 'graph') {
 				const graphed = await subscribeGraph(
@@ -1995,7 +2072,7 @@ export const createSyncEngine = (
 					typedOnDiff,
 					subscribeSet
 				);
-				return graphed as Subscription<never>;
+				return wrapReturn(graphed) as Subscription<never>;
 			}
 			if (registeredKind === 'reactive') {
 				const reactived = await subscribeReactive(
@@ -2010,7 +2087,7 @@ export const createSyncEngine = (
 					typedOnDiff,
 					subscribeSet
 				);
-				return reactived as Subscription<never>;
+				return wrapReturn(reactived) as Subscription<never>;
 			}
 			if (registeredKind === 'search') {
 				const searched = await subscribeSearch(
@@ -2025,7 +2102,7 @@ export const createSyncEngine = (
 					typedOnDiff,
 					subscribeSet
 				);
-				return searched as Subscription<never>;
+				return wrapReturn(searched) as Subscription<never>;
 			}
 			const definition = registered as CollectionDefinition<
 				unknown,
@@ -2105,7 +2182,7 @@ export const createSyncEngine = (
 			};
 
 			if (resuming) {
-				return {
+				return wrapReturn({
 					initial: [],
 					catchup: buildCatchup(
 						since,
@@ -2115,16 +2192,18 @@ export const createSyncEngine = (
 					) as ViewDiff<never>,
 					version: atVersion,
 					unsubscribe
-				};
+				}) as Subscription<never>;
 			}
-			return {
+			return wrapReturn({
 				initial: view.rows() as never[],
 				version: atVersion,
 				unsubscribe
-			};
+			}) as Subscription<never>;
 		},
 
-		hydrate: async (collection, params, ctx) => {
+		hydrate: async (collection, params, ctx, options) => {
+			const signal = options?.signal;
+			checkAborted(signal);
 			const definition = registry.get(collection) as
 				| CollectionDefinition<unknown, unknown, unknown>
 				| undefined;
@@ -2133,6 +2212,7 @@ export const createSyncEngine = (
 			}
 			if (definition.authorize !== undefined) {
 				const allowed = await definition.authorize(params, ctx);
+				checkAborted(signal);
 				if (!allowed) {
 					throw new UnauthorizedError(
 						`hydrate collection "${collection}"`
@@ -2140,6 +2220,7 @@ export const createSyncEngine = (
 				}
 			}
 			const raw = [...(await definition.hydrate(params, ctx))];
+			checkAborted(signal);
 			const tables = definition.tables ?? [collection];
 			const scopedTable = tables.length === 1 ? tables[0]! : undefined;
 			const rows =

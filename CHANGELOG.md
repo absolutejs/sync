@@ -4,6 +4,37 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.15.0] — 2026-05-29
+
+### Added — AbortSignal on subscribe + hydrate
+
+- **`SubscribeArgs.signal: AbortSignal`** — first-class cancellation on
+  `engine.subscribe`. Two effects:
+  1. If the signal is already aborted when `subscribe` is called, the engine
+     throws `AbortError` immediately — no authorize, no hydrate, no
+     subscription is built.
+  2. If the signal fires AFTER the subscription is live, the engine
+     auto-calls `unsubscribe()`. The consumer never has to thread two
+     handles for the same lifetime.
+- **`engine.hydrate(collection, params, ctx, options?)`** — new optional
+  4th arg. `options.signal` cancels mid-flight; the engine re-checks the
+  signal after each major await (authorize, hydrate body) and throws
+  `AbortError` when fired.
+- **`AbortError` exported** — `name === 'AbortError'` to match the
+  DOM-standard spelling so existing `catch (error) { if (error.name ===
+  'AbortError') ... }` patterns work unchanged.
+
+### Notes
+
+Real production hazard the signal addresses: a slow hydrate (large search
+index warm-up, expensive graph rerun, multi-table join) that started
+because the client subscribed, then the client disconnects mid-flight,
+and the engine keeps churning CPU on work nobody will ever read.
+
+Backwards-compatible — omit the signal and the engine behaves exactly as
+in 1.14.0. Both function signatures already accepted extra arguments
+that were unused; nothing breaks at the call-site level.
+
 ## [1.14.0] — 2026-05-29
 
 ### Added — connection-layer + WS-layer slow-client signaling
