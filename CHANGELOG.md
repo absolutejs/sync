@@ -4,6 +4,46 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.18.0] — 2026-05-29
+
+### Added — client-side cursor plumbing
+
+The 1.17.0 cursor primitive now flows end-to-end through every client lib.
+Cross-instance resume just works: client connects to engine A, captures
+the cursor, reconnects to engine B (different cluster shard), engine B
+serves catch-up via peer-broadcasted changes.
+
+- **`OnDiff` callback signature widened** — now receives `(diff, version,
+  cursor?)`. The cursor is the engine's current cross-instance resume
+  cursor at the time of the batch. Pre-1.18 2-arg callbacks keep
+  working — the 3rd arg is optional.
+- **`ServerFrame.cursor?: string`** — every `snapshot` / `diff` / `frame`
+  frame may now carry the cursor. Old servers that don't emit one cause
+  the client to fall back to the numeric `version`.
+- **`ClientFrame.subscribe.since`** widened to `number | string`. The
+  server-side `parseFrame` accepts both; the client lib picks the cursor
+  when one has been received, falling back to `appliedVersion`.
+- **Client libs (`syncClient`, `syncCollection`, `syncStore`)** now
+  capture the cursor from incoming frames and round-trip it on
+  reconnect. The `appliedCursor` / `entry.cursor` field shadows
+  `appliedVersion` whenever the server has surfaced one.
+
+### Fixed
+
+- **`currentCursor()` was reading `entry.version` instead of
+  `entry.originVersion`** when summarizing peer-relayed entries. For
+  local-only changes this was a no-op (the two are equal); for cluster
+  bus traffic the cursor was emitting THIS engine's local version
+  against the peer's id, so a follow-up resume would never match the
+  peer's actual log entries. Caught by extending the multi-instance
+  test to verify the cursor's contents instead of just its presence.
+
+### Notes
+
+Backwards-compatible — every old client that ignores `cursor` and
+sends `since: number` keeps working. The cross-instance resume only
+activates when both ends use cursors.
+
 ## [1.17.0] — 2026-05-29
 
 ### Added — cross-instance resume cursor

@@ -135,8 +135,13 @@ export type SubscribeArgs<T, P, Ctx> = {
 	params: P;
 	/** Caller context (e.g. session); passed to hydrate/match/authorize. */
 	ctx: Ctx;
-	/** Receives every non-empty diff (with its version) after the initial reply. */
-	onDiff: (diff: ViewDiff<T>, version: number) => void;
+	/**
+	 * Receives every non-empty diff (with its version) after the initial
+	 * reply. 1.18.0+: a third optional `cursor` argument carries the
+	 * cross-instance resume cursor as of this diff. Callers that ignore
+	 * the 3rd arg keep working unchanged.
+	 */
+	onDiff: (diff: ViewDiff<T>, version: number, cursor?: string) => void;
 	/**
 	 * Resume from a point the client already applied. When the change log still
 	 * covers `(since, now]` for a single-table collection, the engine replies
@@ -429,7 +434,14 @@ export type SyncEngine = {
 	registerPack: (pack: SyncPack) => void;
 };
 
-type OnDiff = (diff: ViewDiff<unknown>, version: number) => void;
+/**
+ * 1.18.0: `OnDiff` receives an opaque `cursor` string alongside the version.
+ * The cursor is the engine's cross-instance resume cursor as of this batch
+ * — the connection layer forwards it to the client on the wire so a
+ * reconnect can resume across shards. Pre-1.18 callers that ignore the 3rd
+ * arg keep working unchanged.
+ */
+type OnDiff = (diff: ViewDiff<unknown>, version: number, cursor?: string) => void;
 
 type JoinState = {
 	op: EquiJoin<unknown, unknown, unknown>;
@@ -1668,13 +1680,14 @@ export const createSyncEngine = (
 		}
 	};
 	const currentCursor = (): string => {
-		// Snapshot the highest local version + each peer's highest version
-		// seen so far from the log. Cheap O(log) — single backwards walk.
+		// Snapshot the highest local version + each peer's highest origin
+		// version seen so far. Cheap O(log) — single backwards walk grabs
+		// the most-recent originVersion per peer.
 		const versions: Record<string, number> = { [instanceId]: version };
 		for (let i = changeLog.length - 1; i >= 0; i--) {
 			const entry = changeLog[i]!;
 			if (versions[entry.origin] === undefined) {
-				versions[entry.origin] = entry.version;
+				versions[entry.origin] = entry.originVersion;
 			}
 		}
 		return encodeCursor(versions);
@@ -1719,8 +1732,9 @@ export const createSyncEngine = (
 			]))
 		);
 		emissions.push(...searchPairs([{ table, change }]));
+		const cursorForBatch = currentCursor();
 		for (const [subscription, diff] of emissions) {
-			subscription.onDiff(diff, changeVersion);
+			subscription.onDiff(diff, changeVersion, cursorForBatch);
 		}
 		if (shouldBroadcast) {
 			broadcast([{ table, change }], changeVersion);
@@ -1809,8 +1823,9 @@ export const createSyncEngine = (
 		}
 		emissions.push(...(await reactivePairs(reactiveChanges)));
 		emissions.push(...searchPairs(changes));
+		const cursorForBatch = currentCursor();
 		for (const [subscription, diff] of emissions) {
-			subscription.onDiff(diff, batchVersion);
+			subscription.onDiff(diff, batchVersion, cursorForBatch);
 		}
 		if (shouldBroadcast) {
 			broadcast(changes, batchVersion);

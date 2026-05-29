@@ -329,6 +329,10 @@ export const createSyncCollection = <T>(
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	// Highest change-feed version applied; sent as `since` to resume on reconnect.
 	let appliedVersion = 0;
+	// 1.18.0: opaque cross-instance resume cursor. When the server surfaces
+	// one on snapshot/diff/frame, capture it and round-trip it as `since`
+	// in preference to `appliedVersion`. Resume across cluster shards.
+	let appliedCursor: string | undefined;
 
 	const persist = () => {
 		void options.storage?.save(
@@ -379,6 +383,9 @@ export const createSyncCollection = <T>(
 			if (frame.version !== undefined) {
 				appliedVersion = frame.version;
 			}
+			if (frame.cursor !== undefined) {
+				appliedCursor = frame.cursor;
+			}
 			persistCache();
 			recompute({ status: 'ready', error: undefined });
 		} else if (frame.type === 'diff') {
@@ -390,6 +397,9 @@ export const createSyncCollection = <T>(
 			}
 			for (const row of frame.changed) {
 				confirmed.set(key(row), row);
+			}
+			if (frame.cursor !== undefined) {
+				appliedCursor = frame.cursor;
 			}
 			if (frame.version !== undefined) {
 				appliedVersion = Math.max(appliedVersion, frame.version);
@@ -451,8 +461,12 @@ export const createSyncCollection = <T>(
 				id: SUBSCRIPTION_ID,
 				collection: options.collection,
 				params: options.params,
-				// Resume from what we've applied (catch-up instead of snapshot).
-				since: appliedVersion > 0 ? appliedVersion : undefined
+				// 1.18.0: prefer the opaque cross-instance cursor when we
+				// have one; fall back to the local-version number for pre-1.17
+				// servers (or before any cursor has arrived).
+				since:
+					appliedCursor ??
+					(appliedVersion > 0 ? appliedVersion : undefined)
 			}) as string);
 			// Replay anything still pending across the (re)connect.
 			for (const mutation of pending) {

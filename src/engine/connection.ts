@@ -15,8 +15,16 @@ export type ClientFrame =
 			id: string;
 			collection: string;
 			params?: unknown;
-			/** Resume from a version already applied (catch-up instead of snapshot). */
-			since?: number;
+			/**
+			 * Resume from a point already applied (catch-up instead of snapshot).
+			 *
+			 * Accepts either:
+			 *  - `number` (pre-1.18 legacy) — the version of THIS engine instance.
+			 *  - `string` (1.17.0+ cursor) — an opaque cross-instance resume
+			 *    cursor returned by the server on prior snapshot/diff/frame.
+			 *    The client round-trips it unmodified.
+			 */
+			since?: number | string;
 	  }
 	| { type: 'unsubscribe'; id: string }
 	| { type: 'mutate'; mutationId: number; name: string; args?: unknown }
@@ -32,9 +40,13 @@ export type FrameDiff<T = unknown> = {
 	changed: T[];
 };
 
-/** Server → client. `version` is the change-feed watermark this frame brings. */
+/**
+ * Server → client. `version` is THIS engine's local change-feed watermark.
+ * `cursor` (1.17.0+) is an opaque cross-instance resume cursor — round-trip
+ * it on `subscribe.since` to resume across cluster shards.
+ */
 export type ServerFrame<T = unknown> =
-	| { type: 'snapshot'; id: string; rows: T[]; version?: number }
+	| { type: 'snapshot'; id: string; rows: T[]; version?: number; cursor?: string }
 	| {
 			type: 'diff';
 			id: string;
@@ -42,6 +54,7 @@ export type ServerFrame<T = unknown> =
 			removed: T[];
 			changed: T[];
 			version?: number;
+			cursor?: string;
 	  }
 	| {
 			// One atomic batch (e.g. a transactional mutation) that touched several
@@ -49,6 +62,7 @@ export type ServerFrame<T = unknown> =
 			// a single frame, never showing a torn cross-collection intermediate.
 			type: 'frame';
 			version?: number;
+			cursor?: string;
 			diffs: FrameDiff<T>[];
 	  }
 	| {
@@ -149,6 +163,12 @@ const parseFrame = (raw: unknown, serializer: FrameSerializer): ClientFrame | un
 		state?: unknown;
 	};
 	if (frame.type === 'subscribe') {
+		// 1.17.0+: `since` accepts a number (legacy local-version) OR an
+		// opaque cursor string. Drop anything else.
+		const since =
+			typeof frame.since === 'number' || typeof frame.since === 'string'
+				? frame.since
+				: undefined;
 		return typeof frame.id === 'string' &&
 			typeof frame.collection === 'string'
 			? {
@@ -156,10 +176,7 @@ const parseFrame = (raw: unknown, serializer: FrameSerializer): ClientFrame | un
 					id: frame.id,
 					collection: frame.collection,
 					params: frame.params,
-					since:
-						typeof frame.since === 'number'
-							? frame.since
-							: undefined
+					since
 				}
 			: undefined;
 	}
@@ -244,6 +261,9 @@ export const createSyncConnection = ({
 	// unchanged); several become one `frame` the client applies atomically.
 	let pending: FrameDiff[] = [];
 	let pendingVersion: number | undefined;
+	// 1.18.0: the cursor that came alongside the in-flight diff batch. We
+	// forward it on the wire so clients can resume across cluster shards.
+	let pendingCursor: string | undefined;
 	let flushScheduled = false;
 
 	const flush = () => {
@@ -252,8 +272,10 @@ export const createSyncConnection = ({
 		}
 		const diffs = pending;
 		const version = pendingVersion;
+		const cursor = pendingCursor;
 		pending = [];
 		pendingVersion = undefined;
+		pendingCursor = undefined;
 		if (diffs.length === 1) {
 			const only = diffs[0]!;
 			send({
@@ -262,10 +284,11 @@ export const createSyncConnection = ({
 				added: only.added,
 				removed: only.removed,
 				changed: only.changed,
-				version
+				version,
+				cursor
 			});
 		} else {
-			send({ type: 'frame', diffs, version });
+			send({ type: 'frame', diffs, version, cursor });
 		}
 	};
 
@@ -280,13 +303,16 @@ export const createSyncConnection = ({
 		});
 	};
 
-	const bufferDiff = (diff: FrameDiff, diffVersion: number) => {
+	const bufferDiff = (diff: FrameDiff, diffVersion: number, cursor?: string) => {
 		// A new version means a new batch — flush the previous one first.
 		if (pending.length > 0 && pendingVersion !== diffVersion) {
 			flush();
 		}
 		pending.push(diff);
 		pendingVersion = diffVersion;
+		// Cursor for the in-flight batch — same cursor for every diff sharing
+		// `diffVersion` (the engine emits them with one currentCursor() call).
+		if (cursor !== undefined) pendingCursor = cursor;
 		scheduleFlush();
 	};
 
@@ -384,7 +410,7 @@ export const createSyncConnection = ({
 				params: frame.params,
 				ctx,
 				since: frame.since,
-				onDiff: (diff, diffVersion) => {
+				onDiff: (diff, diffVersion, cursor) => {
 					bufferDiff(
 						{
 							id: frame.id,
@@ -392,7 +418,8 @@ export const createSyncConnection = ({
 							removed: diff.removed,
 							changed: diff.changed
 						},
-						diffVersion
+						diffVersion,
+						cursor
 					);
 				}
 			});
@@ -407,14 +434,16 @@ export const createSyncConnection = ({
 					added: subscription.catchup.added,
 					removed: subscription.catchup.removed,
 					changed: subscription.catchup.changed,
-					version: subscription.version
+					version: subscription.version,
+					cursor: subscription.cursor
 				});
 			} else {
 				send({
 					type: 'snapshot',
 					id: frame.id,
 					rows: subscription.initial,
-					version: subscription.version
+					version: subscription.version,
+					cursor: subscription.cursor
 				});
 			}
 		} catch (error) {

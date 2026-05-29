@@ -90,6 +90,14 @@ type Entry = {
 	state: SyncCollectionState<unknown>;
 	listeners: Set<(state: SyncCollectionState<unknown>) => void>;
 	appliedVersion: number;
+	/**
+	 * Most-recent cross-instance resume cursor for this entry (1.18.0+).
+	 * Captured from every snapshot/diff/frame that carries a `cursor` field
+	 * and round-tripped on reconnect as `since`. Falls back to
+	 * `appliedVersion` when the server doesn't surface a cursor (pre-1.17
+	 * server, or a single-instance setup before a cluster bus connects).
+	 */
+	cursor: string | undefined;
 	closed: boolean;
 };
 
@@ -206,6 +214,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			if (frame.version !== undefined) {
 				entry.appliedVersion = frame.version;
 			}
+			if (frame.cursor !== undefined) {
+				entry.cursor = frame.cursor;
+			}
 			recompute(entry, { status: 'ready', error: undefined });
 		} else if (frame.type === 'diff') {
 			const entry = entries.get(frame.id);
@@ -218,6 +229,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 					entry.appliedVersion,
 					frame.version
 				);
+			}
+			if (frame.cursor !== undefined) {
+				entry.cursor = frame.cursor;
 			}
 			recompute(entry);
 		} else if (frame.type === 'frame') {
@@ -235,6 +249,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 						entry.appliedVersion,
 						frame.version
 					);
+				}
+				if (frame.cursor !== undefined) {
+					entry.cursor = frame.cursor;
 				}
 				// Update state now, but defer notifying until every collection in
 				// the frame is updated — so no listener observes a partial batch.
@@ -273,13 +290,18 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	};
 
 	const sendSubscribe = (entry: Entry) => {
+		// 1.18.0: prefer the opaque cursor (cross-instance resume) when
+		// the server has surfaced one; fall back to the numeric appliedVersion
+		// for pre-1.17 servers or before any cursor has arrived.
+		const since: number | string | undefined =
+			entry.cursor ??
+			(entry.appliedVersion > 0 ? entry.appliedVersion : undefined);
 		wsSend(serializer.encodeClient({
 			type: 'subscribe',
 			id: entry.id,
 			collection: entry.collection,
 			params: entry.params,
-			since:
-				entry.appliedVersion > 0 ? entry.appliedVersion : undefined
+			since
 		}));
 	};
 
@@ -352,6 +374,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			state: { data: [], status: 'connecting', error: undefined },
 			listeners: new Set(),
 			appliedVersion: 0,
+			cursor: undefined,
 			closed: false
 		};
 		entries.set(entryId, entry);

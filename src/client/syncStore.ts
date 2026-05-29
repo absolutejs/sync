@@ -206,6 +206,10 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	// Highest change-feed version applied; sent as `since` to resume on reconnect.
 	let appliedVersion = 0;
+	// 1.18.0: opaque cross-instance cursor — preferred over appliedVersion
+	// on reconnect when the server has surfaced one. Resume across cluster
+	// shards (the @absolutejs/router rotating shards on the host side).
+	let appliedCursor: string | undefined;
 
 	const applyFrame = (frame: ServerFrame<Row>) => {
 		if (frame.type === 'snapshot') {
@@ -215,6 +219,9 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 			}
 			if (frame.version !== undefined) {
 				appliedVersion = frame.version;
+			}
+			if (frame.cursor !== undefined) {
+				appliedCursor = frame.cursor;
 			}
 			recompute({ status: 'ready', error: undefined });
 			reconcileSettled();
@@ -230,6 +237,9 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 			}
 			if (frame.version !== undefined) {
 				appliedVersion = Math.max(appliedVersion, frame.version);
+			}
+			if (frame.cursor !== undefined) {
+				appliedCursor = frame.cursor;
 			}
 			recompute();
 			reconcileSettled();
@@ -298,8 +308,11 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 				id: SUBSCRIPTION_ID,
 				collection: options.collection,
 				params: options.params,
-				// Resume from what we've applied (catch-up instead of snapshot).
-				since: appliedVersion > 0 ? appliedVersion : undefined
+				// 1.18.0: prefer the opaque cross-instance cursor when set;
+				// fall back to the numeric appliedVersion for pre-1.17 servers.
+				since:
+					appliedCursor ??
+					(appliedVersion > 0 ? appliedVersion : undefined)
 			}) as string);
 			// Retry mutations that failed/queued while offline.
 			for (const mutation of pending) {
