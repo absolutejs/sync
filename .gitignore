@@ -6,4 +6,5 @@ dist/
 # Playwright MCP browser-session snapshots
 .playwright-mcp/
 STRATEGY.md
+STRATEGY-CLOUD.md
 PICKUP.md
