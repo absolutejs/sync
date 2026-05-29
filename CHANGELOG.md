@@ -4,6 +4,37 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.14.0] — 2026-05-29
+
+### Added — connection-layer + WS-layer slow-client signaling
+
+- **`connection.stats()`** — point-in-time counters on a `SyncConnection`:
+  `{ subscriptionCount, presenceRoomCount, framesSent, slowSendsRecent }`.
+  Cheap; safe to call from a metering loop. `slowSendsRecent` counts
+  consecutive `send()` calls that returned `-1` (the WS backpressure
+  signal), resetting to `0` on the next successful send.
+- **`SyncConnectionOptions.send` return type widened** — `send` may now
+  return `void | number`. By convention `-1` signals backpressure
+  (matches Bun's `ws.send()` return). Legacy void-returning sends keep
+  working unchanged.
+- **`syncSocket({ maxBufferedBytes, onSlow, closeOnSlow })`** — WS-layer
+  slow-client detection. The plugin wraps every `ws.send()` to capture
+  the return value AND read `ws.getBufferedAmount()`. If either the
+  buffer exceeds `maxBufferedBytes` OR the send returns `-1`, `onSlow`
+  fires once with `{ wsId, bufferedAmount, stats, reason }` where reason
+  is `'buffer-threshold'` or `'send-backpressure'`. The signal re-arms
+  on the WS `drain` event. `closeOnSlow: true` kicks the socket on the
+  first slow signal; the client reconnects and rehydrates.
+
+### Notes
+
+The plugin's return type (`Elysia`) is unchanged; new behavior is opt-in
+via the new options. Existing callers without `maxBufferedBytes` or
+`onSlow` see identical semantics to 1.13.0. Pairs naturally with
+`@absolutejs/metering` (wire `onSlow` to charge tenant extra) OR with
+`@absolutejs/runtime`'s drain mode (kick slow tenants off a shard about
+to reboot).
+
 ## [1.13.0] — 2026-05-29
 
 ### Added — engine introspection & retention pass

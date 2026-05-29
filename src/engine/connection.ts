@@ -65,10 +65,33 @@ export type SyncConnectionOptions = {
 	engine: SyncEngine;
 	/** Resolved auth context for this connection; passed to every subscribe. */
 	ctx: unknown;
-	/** Send a frame to the client (the transport serializes it). */
-	send: (frame: ServerFrame) => void;
+	/**
+	 * Send a frame to the client (the transport serializes it). May return
+	 * a number — by convention `-1` signals transport-layer backpressure (the
+	 * value Bun's `ws.send()` returns when the WS buffer is full). The
+	 * connection tracks consecutive `-1` returns and surfaces them via
+	 * `connection.stats().slowSendsRecent`. Legacy `void`-returning sends
+	 * keep working unchanged.
+	 */
+	send: (frame: ServerFrame) => void | number;
 	/** Optional presence hub; enables the `presence-*` frames (see createPresenceHub). */
 	presence?: PresenceHub;
+};
+
+/**
+ * Connection-level operational counters surfaced via {@link SyncConnection.stats}.
+ * Pair with the WS adapter's own backpressure signal for end-to-end slow-client
+ * detection.
+ */
+export type SyncConnectionStats = {
+	/** Active subscriptions on this connection. */
+	subscriptionCount: number;
+	/** Active presence-room memberships on this connection. */
+	presenceRoomCount: number;
+	/** Frames successfully sent (non-backpressure return) since the connection opened. */
+	framesSent: number;
+	/** Consecutive `-1` (backpressure) returns from `send` since the last successful send. */
+	slowSendsRecent: number;
 };
 
 export type SyncConnection = {
@@ -76,6 +99,14 @@ export type SyncConnection = {
 	handle: (raw: unknown) => Promise<void>;
 	/** Tear down every subscription on this connection (call on socket close). */
 	close: () => void;
+	/**
+	 * Point-in-time connection counters — subscription count, frames sent, and
+	 * how many consecutive `send` calls came back with the transport's backpressure
+	 * signal. Cheap; safe to call from a metering loop.
+	 *
+	 * Added in 1.14.0.
+	 */
+	stats: () => SyncConnectionStats;
 };
 
 const parseFrame = (raw: unknown): ClientFrame | undefined => {
@@ -170,12 +201,27 @@ const parseFrame = (raw: unknown): ClientFrame | undefined => {
 export const createSyncConnection = ({
 	engine,
 	ctx,
-	send,
+	send: rawSend,
 	presence
 }: SyncConnectionOptions): SyncConnection => {
 	const subscriptions = new Map<string, Subscription<unknown>>();
 	// This connection's presence memberships (one per room), torn down on close.
 	const presenceRooms = new Map<string, PresenceHandle<unknown>>();
+
+	// 1.14.0: track transport-layer backpressure. `send` may return -1 (Bun's
+	// WS backpressure signal) — accumulate consecutive `-1`s so the host can
+	// detect a slow client; reset to 0 on any non-backpressure return.
+	let framesSent = 0;
+	let slowSendsRecent = 0;
+	const send = (frame: ServerFrame) => {
+		const ret = rawSend(frame);
+		if (ret === -1) {
+			slowSendsRecent += 1;
+		} else {
+			framesSent += 1;
+			slowSendsRecent = 0;
+		}
+	};
 
 	// Diffs from one atomic batch (a mutation, or a single applyChange) arrive via
 	// onDiff synchronously and share a version. Buffer them and flush as one
@@ -377,5 +423,12 @@ export const createSyncConnection = ({
 		presenceRooms.clear();
 	};
 
-	return { handle, close };
+	const stats = (): SyncConnectionStats => ({
+		framesSent,
+		presenceRoomCount: presenceRooms.size,
+		slowSendsRecent,
+		subscriptionCount: subscriptions.size
+	});
+
+	return { close, handle, stats };
 };

@@ -1,8 +1,24 @@
 import { Elysia } from 'elysia';
 import { createSyncConnection } from './connection';
-import type { SyncConnection } from './connection';
+import type { SyncConnection, SyncConnectionStats } from './connection';
 import type { PresenceHub } from './presence';
 import type { SyncEngine } from './syncEngine';
+
+/**
+ * Diagnostic surfaced via {@link SyncSocketOptions.onSlow} when a connection
+ * trips the WS backpressure threshold. The host can log, kick, or charge the
+ * tenant extra via the meter.
+ */
+export type SlowConnectionEvent = {
+	/** Stable per-connection id from Elysia's `ws.id`. */
+	wsId: string;
+	/** Bytes the WS currently has queued waiting to send. */
+	bufferedAmount: number;
+	/** Per-connection counters at the moment of detection. */
+	stats: SyncConnectionStats;
+	/** Why the event fired. */
+	reason: 'buffer-threshold' | 'send-backpressure';
+};
 
 export type SyncSocketOptions = {
 	/** The sync engine whose collections this socket serves. */
@@ -20,50 +36,138 @@ export type SyncSocketOptions = {
 	resolveContext?: (
 		data: Record<string, unknown>
 	) => unknown | Promise<unknown>;
+	/**
+	 * Bytes threshold for the per-connection WS send buffer. When
+	 * `ws.getBufferedAmount()` exceeds this, `onSlow` fires once per
+	 * crossing. Default `Infinity` (disabled).
+	 *
+	 * Added in 1.14.0.
+	 */
+	maxBufferedBytes?: number;
+	/**
+	 * Fired when the per-connection WS buffer crosses `maxBufferedBytes`, OR
+	 * when `ws.send()` returns `-1` (Bun's backpressure signal). The signal
+	 * re-arms once the WS reports `drain`. Pair with `closeOnSlow: true` to
+	 * kick slow clients automatically, or use this hook to charge the
+	 * tenant extra via `@absolutejs/metering`.
+	 *
+	 * Added in 1.14.0.
+	 */
+	onSlow?: (event: SlowConnectionEvent) => void | Promise<void>;
+	/**
+	 * Close the WS the first time a connection crosses `maxBufferedBytes`
+	 * (or the `-1` send threshold). Default `false`. Client will reconnect
+	 * and re-hydrate.
+	 *
+	 * Added in 1.14.0.
+	 */
+	closeOnSlow?: boolean;
+};
+
+type TrackedConnection = {
+	connection: SyncConnection;
+	slowSignaled: boolean;
 };
 
 /**
- * Elysia WebSocket plugin for the Tier 3 sync engine. One socket multiplexes any
- * number of collection subscriptions: the client sends `subscribe`/`unsubscribe`
- * frames and receives `snapshot`/`diff`/`error` frames (see
- * {@link createSyncConnection}). Mount it once and drive `engine.applyChange`
- * from your mutations.
+ * Elysia WebSocket plugin for the sync engine. One socket multiplexes any
+ * number of collection subscriptions: the client sends `subscribe` /
+ * `unsubscribe` frames and receives `snapshot` / `diff` / `error` frames
+ * (see {@link createSyncConnection}). Mount once and drive
+ * `engine.applyChange` from your mutations.
  *
  * Uses Elysia's first-class `.ws()` rather than a hand-rolled stream — the
- * bidirectional channel carries both subscriptions and (later) mutations, and
+ * bidirectional channel carries both subscriptions and mutations, and
  * `ws.send` serializes frames for us.
+ *
+ * 1.14.0 adds WS-layer slow-client detection — see `maxBufferedBytes` /
+ * `onSlow` / `closeOnSlow`.
  */
 export const syncSocket = ({
 	engine,
 	path = '/sync/ws',
 	resolveContext,
-	presence
+	presence,
+	maxBufferedBytes,
+	onSlow,
+	closeOnSlow = false
 }: SyncSocketOptions) => {
-	const connections = new Map<string, SyncConnection>();
+	const connections = new Map<string, TrackedConnection>();
+	const threshold = maxBufferedBytes ?? Infinity;
+
+	const fireSlow = (event: SlowConnectionEvent) => {
+		if (!onSlow) return;
+		try {
+			const ret = onSlow(event);
+			if (ret && typeof (ret as Promise<void>).then === 'function') {
+				(ret as Promise<void>).catch((error) => {
+					console.error('[sync/socket] onSlow rejected:', error);
+				});
+			}
+		} catch (error) {
+			console.error('[sync/socket] onSlow threw:', error);
+		}
+	};
 
 	return new Elysia({ name: '@absolutejs/sync/socket' }).ws(path, {
 		async open(ws) {
 			const ctx = resolveContext
 				? await resolveContext(ws.data as Record<string, unknown>)
 				: {};
-			connections.set(
-				ws.id,
-				createSyncConnection({
+
+			// Permissive shape: we read `getBufferedAmount` + `close` if the
+			// runtime supports them (Bun's ServerWebSocket does) — fall back
+			// silently for test fakes.
+			const bunWs = ws as unknown as {
+				id: string;
+				send: (data: string | Uint8Array) => number;
+				getBufferedAmount?: () => number;
+				close?: () => void;
+			};
+
+			const tracked: TrackedConnection = {
+				connection: createSyncConnection({
 					engine,
 					ctx,
 					presence,
 					send: (frame) => {
-						ws.send(frame);
+						const ret = bunWs.send(JSON.stringify(frame));
+						const buffered = bunWs.getBufferedAmount?.() ?? 0;
+
+						const overBuffer = buffered > threshold;
+						const backpressure = ret === -1;
+						if ((overBuffer || backpressure) && !tracked.slowSignaled) {
+							tracked.slowSignaled = true;
+							fireSlow({
+								bufferedAmount: buffered,
+								reason: backpressure ? 'send-backpressure' : 'buffer-threshold',
+								stats: tracked.connection.stats(),
+								wsId: bunWs.id
+							});
+							if (closeOnSlow) bunWs.close?.();
+						}
+						return ret;
 					}
-				})
-			);
+				}),
+				slowSignaled: false
+			};
+			connections.set(bunWs.id, tracked);
 		},
 		async message(ws, message) {
-			await connections.get(ws.id)?.handle(message);
+			await connections.get(ws.id)?.connection.handle(message);
+		},
+		drain(ws) {
+			// WS buffer cleared — re-arm slow-client detection so the next
+			// over-threshold event fires onSlow again.
+			const tracked = connections.get(ws.id);
+			if (tracked) tracked.slowSignaled = false;
 		},
 		close(ws) {
-			connections.get(ws.id)?.close();
-			connections.delete(ws.id);
+			const tracked = connections.get(ws.id);
+			if (tracked) {
+				tracked.connection.close();
+				connections.delete(ws.id);
+			}
 		}
 	});
 };
