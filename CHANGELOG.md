@@ -4,6 +4,31 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.11.0] — 2026-05-29
+
+### Added
+
+- **`engine.runMutations(specs, ctx)`** — new batch primitive that runs
+  N mutations in a single DB transaction, fans them out as ONE live
+  diff on success, and rolls every accumulated write back on any
+  thrown error. No partial commits, no surprise per-mutation diffs.
+  Per-mutation `authorize` still runs (inside the tx); per-mutation
+  retry policies do NOT apply to batches. Empty `specs` short-circuits
+  without opening a tx; unknown mutation names throw before any tx
+  opens. Surfaces as a `mutationBatch` activity event.
+- **`transactionalBatchAsHostTool` in `@absolutejs/sync/code-mode`** —
+  pairs with `engine.runMutations`. Exposes one Code Mode host fn (by
+  convention `run_transaction`) that takes an `Array<{ name, args }>`
+  from the model and runs it atomically. Mutations are allow-listed at
+  factory time so a hallucinated name fails fast with a clear error.
+  Drop-in alongside `engineMutationsAsHostTools`; the model gets BOTH
+  the individual host fns (for scripts that branch on intermediate
+  results) and `run_transaction` (for atomic batches) and picks based
+  on the prompt.
+
+This closes the v0.1 cross-mutation atomicity gap the `/code-mode`
+docs page called out, with no breaking changes to the v0.1 surface.
+
 ## [1.10.0] — 2026-05-28
 
 ### Added

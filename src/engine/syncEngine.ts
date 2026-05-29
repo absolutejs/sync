@@ -266,6 +266,28 @@ export type SyncEngine = {
 		ctx: unknown
 	) => Promise<unknown>;
 	/**
+	 * Atomically run N mutations in a single transaction (sync 1.11+).
+	 * Each `{ name, args }` spec is authorized, then handlers fire in
+	 * order against shared buffered changes. If any handler throws, the
+	 * entire transaction rolls back — no partial commits, no fanned-out
+	 * diffs. On success the accumulated changes apply as ONE live batch
+	 * and the per-mutation results return in order.
+	 *
+	 * No retry policy applies to batches in v0.2; configure per-mutation
+	 * retries on individual `runMutation` calls when atomicity isn't
+	 * needed. A failed batch passes the original error through with no
+	 * wrapping.
+	 *
+	 * Requires `transaction` to be set in {@link SyncEngineOptions} for
+	 * actual DB-level atomicity; without it the batch still buffers
+	 * changes into one fan-out but the underlying adapter writes
+	 * piecemeal.
+	 */
+	runMutations: (
+		specs: Array<{ name: string; args: unknown }>,
+		ctx: unknown
+	) => Promise<unknown[]>;
+	/**
 	 * A point-in-time snapshot of the engine for devtools: registered collections
 	 * (+ kind, tables, live subscription counts), mutations, schedules, readers,
 	 * writers, the change-feed version, and recent changes. See `syncDevtools`.
@@ -2331,6 +2353,89 @@ export const createSyncEngine = (
 				);
 			}
 			throw lastError;
+		},
+
+		runMutations: async (specs, ctx) => {
+			// Empty batch: short-circuit. Don't open a DB tx for nothing —
+			// some adapters (PG with auto-commit, MySQL with implicit
+			// commit, etc.) count even an empty BEGIN/COMMIT as a real
+			// transaction, which is wasteful and noisy in observability.
+			if (specs.length === 0) return [];
+			// Snapshot the requested mutation names up front so the
+			// authorization + handler resolution happens BEFORE we open
+			// the DB transaction. A typo'd name aborts cleanly without
+			// burning a tx.
+			const resolved = specs.map((spec) => {
+				const mutation = mutations.get(spec.name);
+				if (mutation === undefined) {
+					throw new Error(`Unknown mutation "${spec.name}"`);
+				}
+				return { args: spec.args, mutation, name: spec.name };
+			});
+
+			const runBatch = async (tx: unknown) => {
+				const results: unknown[] = [];
+				const accumulated: {
+					table: string;
+					change: RowChange<unknown>;
+				}[] = [];
+				for (const { args, mutation, name } of resolved) {
+					if (mutation.authorize !== undefined) {
+						const allowed = await mutation.authorize(args, ctx);
+						if (!allowed) {
+							throw new UnauthorizedError(
+								`run mutation "${name}"`
+							);
+						}
+					}
+					const sandboxRunner = sandboxRunners.get(name);
+					const invokeHandler =
+						sandboxRunner !== undefined
+							? sandboxRunner
+							: (
+									a: unknown,
+									c: unknown,
+									actions: MutationActions
+								): Promise<unknown> =>
+									Promise.resolve(
+										mutation.handler!(a, c, actions)
+									);
+					// Each handler gets its own `actions`/`buffered` so per-
+					// call validation + crdt merges still work — we collect
+					// the buffered tail into `accumulated` after each
+					// handler returns. If the next handler throws, the
+					// surrounding `runInTransaction` rolls everything back;
+					// applyChangeBatch never runs.
+					const { actions, buffered } = makeActions(tx, ctx, true);
+					const result = await invokeHandler(args, ctx, actions);
+					results.push(result);
+					accumulated.push(...buffered);
+				}
+				return { accumulated, results };
+			};
+
+			try {
+				const { accumulated, results } =
+					runInTransaction !== undefined
+						? await runInTransaction((tx) => runBatch(tx))
+						: await runBatch(undefined);
+				await applyChangeBatch(accumulated);
+				emitActivity({
+					type: 'mutationBatch',
+					at: Date.now(),
+					names: resolved.map((entry) => entry.name),
+					status: 'ok'
+				});
+				return results;
+			} catch (error) {
+				emitActivity({
+					type: 'mutationBatch',
+					at: Date.now(),
+					names: resolved.map((entry) => entry.name),
+					status: 'error'
+				});
+				throw error;
+			}
 		},
 
 		registerSchedule: (schedule) => {

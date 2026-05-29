@@ -55,6 +55,16 @@ export type EngineActivity =
 	| { type: 'change'; at: number; table: string; op: RowOp; version: number }
 	| { type: 'mutation'; at: number; name: string; status: 'ok' | 'error' }
 	| {
+			/** Emitted by `engine.runMutations(...)` — a batch of mutations
+			 * run in a single transaction. `names` is the list in batch
+			 * order; on error the entire batch rolls back, so the status
+			 * applies to the whole list, not any individual mutation. */
+			type: 'mutationBatch';
+			at: number;
+			names: string[];
+			status: 'ok' | 'error';
+	  }
+	| {
 			/** Emitted between attempts of a retried mutation. `attempt` is the
 			 * attempt that just failed (1-indexed); `delayMs` is the wait before
 			 * the next attempt. Surfaces OCC retries to observability. */

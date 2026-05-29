@@ -7,7 +7,10 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { engineMutationsAsHostTools } from '../src/codeMode';
+import {
+	engineMutationsAsHostTools,
+	transactionalBatchAsHostTool
+} from '../src/codeMode';
 import { defineMutation } from '../src/engine';
 import { createTestEngine } from '../src/testing';
 
@@ -215,5 +218,99 @@ describe('@absolutejs/sync/code-mode', () => {
 		);
 		// First call committed before the second threw.
 		expect(writes).toEqual(['first']);
+	});
+});
+
+describe('transactionalBatchAsHostTool (sync 1.11+ v0.2 atomicity)', () => {
+	test('forwards a model-emitted spec array to engine.runMutations and returns the results', async () => {
+		const engine = createTestEngine();
+		const writes: string[] = [];
+		engine.registerMutation(
+			defineMutation<{ tag: string }, Ctx, { tag: string }>({
+				handler: (args) => {
+					writes.push(args.tag);
+					return { tag: args.tag };
+				},
+				name: 'demo:add'
+			})
+		);
+		const tool = transactionalBatchAsHostTool<Ctx>({
+			allowedMutations: ['demo:add'],
+			ctx: () => ({ userId: 'alice' }),
+			engine
+		});
+		const results = (await tool.handler([
+			{ args: { tag: 'a' }, name: 'demo:add' },
+			{ args: { tag: 'b' }, name: 'demo:add' }
+		])) as Array<{ tag: string }>;
+		expect(results.map((row) => row.tag)).toEqual(['a', 'b']);
+		expect(writes).toEqual(['a', 'b']);
+	});
+
+	test('rejects a non-allowlisted mutation name BEFORE touching the engine', async () => {
+		const engine = createTestEngine();
+		engine.registerMutation(
+			defineMutation<unknown, Ctx, null>({
+				handler: () => null,
+				name: 'permitted:do'
+			})
+		);
+		engine.registerMutation(
+			defineMutation<unknown, Ctx, null>({
+				handler: () => {
+					throw new Error('this should never run');
+				},
+				name: 'forbidden:do'
+			})
+		);
+		const tool = transactionalBatchAsHostTool<Ctx>({
+			allowedMutations: ['permitted:do'],
+			ctx: () => ({}),
+			engine
+		});
+		await expect(
+			tool.handler([
+				{ args: {}, name: 'permitted:do' },
+				{ args: {}, name: 'forbidden:do' }
+			])
+		).rejects.toThrow(/not in the allowlist/);
+	});
+
+	test('rejects a non-array positional arg with a clear message', async () => {
+		const engine = createTestEngine();
+		const tool = transactionalBatchAsHostTool<Ctx>({
+			allowedMutations: [],
+			ctx: () => ({}),
+			engine
+		});
+		await expect(tool.handler('not an array')).rejects.toThrow(
+			/expected one positional arg/
+		);
+	});
+
+	test('rejects a malformed spec (missing `name`)', async () => {
+		const engine = createTestEngine();
+		const tool = transactionalBatchAsHostTool<Ctx>({
+			allowedMutations: ['demo:do'],
+			ctx: () => ({}),
+			engine
+		});
+		await expect(
+			tool.handler([{ args: { tag: 'a' } /* no name */ }])
+		).rejects.toThrow(/{ name: string; args: any }/);
+	});
+
+	test('default tsSignature + description describe the atomic shape', () => {
+		const engine = createTestEngine();
+		const tool = transactionalBatchAsHostTool<Ctx>({
+			allowedMutations: [],
+			ctx: () => ({}),
+			engine
+		});
+		expect(tool.tsSignature).toContain(
+			'Array<{ name: string; args: any }>'
+		);
+		expect(tool.description).toContain('atomically');
+		expect(tool.description).toContain('single DB transaction');
 	});
 });

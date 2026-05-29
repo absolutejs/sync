@@ -110,6 +110,25 @@ export type EngineMutationsAsHostToolsOptions<Ctx> = {
 	mutations: MutationToolDescriptor[];
 };
 
+/** Options for {@link transactionalBatchAsHostTool}. */
+export type TransactionalBatchOptions<Ctx> = {
+	/** The engine to call `runMutations` on. */
+	engine: SyncEngine;
+	/** Resolve per-call ctx — same shape as the other factory. */
+	ctx: () => Ctx | Promise<Ctx>;
+	/**
+	 * Allowlist of mutation names the model may include in a batch.
+	 * The host-fn checks every entry against this set before calling
+	 * `runMutations`, so a hallucinated name fails fast with a clear
+	 * error instead of bubbling up from the engine.
+	 */
+	allowedMutations: string[];
+	/** Override the model-visible host-fn description. */
+	description?: string;
+	/** Override the TS signature shown to the model. */
+	tsSignature?: string;
+};
+
 /**
  * Shape of one entry in the host-tool map. Mirrors
  * `@absolutejs/ai/tools`'s `CodeModeHostTool` exactly — no import
@@ -182,4 +201,89 @@ export const engineMutationsAsHostTools = <Ctx>(
 	}
 
 	return map;
+};
+
+const DEFAULT_TRANSACTION_TS_SIGNATURE =
+	'(specs: Array<{ name: string; args: any }>) => Promise<any[]>';
+
+const DEFAULT_TRANSACTION_DESCRIPTION =
+	'Run an ARRAY of mutations atomically in a single DB transaction. ' +
+	'Each entry is `{ name, args }` where `name` is an engine mutation ' +
+	'name. If any mutation throws, the entire batch rolls back — no ' +
+	'partial commits. Returns the per-mutation results in order. Use ' +
+	'this when you need all-or-nothing semantics; use the individual ' +
+	'host functions when you need to branch on intermediate results.';
+
+/**
+ * A single Code Mode host tool wrapping `engine.runMutations(specs, ctx)`
+ * (sync 1.11+). Returns the per-mutation results array; rolls every
+ * accumulated write back on any thrown error. Plug the returned
+ * `CodeModeHostTool` into a `codeModeTool({ tools: { ..., run_transaction:
+ * /* this *\/ } })` map under whatever name fits your prompt strategy.
+ *
+ * @example
+ * ```ts
+ * const hostTools = {
+ *   ...engineMutationsAsHostTools({ engine, ctx, mutations }),
+ *   run_transaction: transactionalBatchAsHostTool({
+ *     engine,
+ *     ctx,
+ *     allowedMutations: ['comments:create', 'notifications:notify'],
+ *   }),
+ * };
+ * const tool = codeModeTool({ tools: hostTools });
+ *
+ * // Model can branch on a per-mutation call OR use the atomic batch:
+ * //   await run_transaction([
+ * //     { name: 'comments:create', args: { resourceId, body } },
+ * //     { name: 'notifications:notify', args: { actorId, kind, ... } },
+ * //   ]);
+ * ```
+ */
+export const transactionalBatchAsHostTool = <Ctx>(
+	options: TransactionalBatchOptions<Ctx>
+): CodeModeHostTool => {
+	const allowed = new Set(options.allowedMutations);
+	return {
+		description: options.description ?? DEFAULT_TRANSACTION_DESCRIPTION,
+		handler: async (...args: unknown[]): Promise<unknown> => {
+			// The model writes `await run_transaction([...])` — Code Mode
+			// passes that array as the first positional arg.
+			const specsInput = args[0];
+			if (!Array.isArray(specsInput)) {
+				throw new Error(
+					'transactionalBatchAsHostTool: expected one positional ' +
+						'arg — an array of { name, args }. Got ' +
+						typeof specsInput
+				);
+			}
+			const specs: Array<{ name: string; args: unknown }> = [];
+			for (const entry of specsInput as unknown[]) {
+				if (
+					entry === null ||
+					typeof entry !== 'object' ||
+					typeof (entry as { name?: unknown }).name !== 'string'
+				) {
+					throw new Error(
+						'transactionalBatchAsHostTool: every spec must be ' +
+							'`{ name: string; args: any }`.'
+					);
+				}
+				const name = (entry as { name: string }).name;
+				if (!allowed.has(name)) {
+					throw new Error(
+						`transactionalBatchAsHostTool: mutation "${name}" ` +
+							'is not in the allowlist.'
+					);
+				}
+				specs.push({
+					args: (entry as { args?: unknown }).args,
+					name
+				});
+			}
+			const resolvedCtx = await options.ctx();
+			return options.engine.runMutations(specs, resolvedCtx);
+		},
+		tsSignature: options.tsSignature ?? DEFAULT_TRANSACTION_TS_SIGNATURE
+	};
 };
