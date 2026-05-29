@@ -163,7 +163,8 @@ export type {
 	CollectionInspection,
 	CollectionKind,
 	EngineActivity,
-	EngineInspection
+	EngineInspection,
+	EngineMetrics
 } from './devtools';
 
 export { hydrateRoute, mutateRoute } from './routes';

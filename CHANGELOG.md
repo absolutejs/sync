@@ -4,6 +4,45 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.13.0] — 2026-05-29
+
+### Added — engine introspection & retention pass
+
+- **`engine.metrics()`** — operator-shaped point-in-time engine state.
+  Distinct from `engine.inspect()` (which is devtools-shaped). Returns
+  `{ at, uptimeMs, version, changeLog: { entries, capacity, retainMs,
+  oldestVersion, oldestAgeMs }, subscriptions: { total, byCollection },
+  reactiveCache: { entries, capacity }, mutations: { completed, failed,
+  retried, inFlight }, schedules: { registered } }`. Designed for PaaS
+  hosts to scrape on an interval and attribute cost per engine via
+  `@absolutejs/metering`.
+- **`changeLogRetainMs` option** — time-based change-log retention,
+  layered on top of the existing count cap (`changeLogSize`). Drops
+  entries older than the configured window. Lets a high-throughput
+  engine keep a short log ("60s of changes") regardless of mutation
+  rate — both bounds memory and bounds catch-up work on reconnect.
+  Default `null` (no time-based eviction).
+- **Per-mutation counters** — `engine.metrics().mutations.{completed,
+  failed, retried, inFlight}` accumulate since engine start. The
+  `inFlight` counter wraps every `runMutation` call in a try/finally
+  so it decrements correctly on the exception path too. Retry attempts
+  bump `retried` regardless of whether the eventual outcome is success
+  or failure.
+- **`LoggedChange.at`** — every entry in the change log now carries the
+  wall-clock timestamp it was logged at. Drives the time-based
+  retention sweep + the `oldestAgeMs` field on `engine.metrics()`.
+  Surfaced on every entry yielded by `engine.streamChanges()`.
+  Additive — pre-1.13.0 consumers that destructure `LoggedChange` are
+  unaffected.
+
+### Notes
+
+This pass deliberately does NOT touch the connection layer or the WS
+hotpath — those are larger surgical changes (slow-client backpressure,
+binary frame encoding, cross-instance version cursors) and ship in
+1.14.0+. Everything in 1.13.0 is engine-internal, additive, and
+backwards-compatible.
+
 ## [1.12.0] — 2026-05-29
 
 ### Added
@@ -339,15 +378,15 @@ docs page called out, with no breaking changes to the v0.1 surface.
   args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
   postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
 
-          The previous 1.7.2/1.7.3 design used a shared "current actions" slot
-          with a router Reference installed on a reused context, plus a
-          promise queue to serialize calls into that slot. 1.7.4 throws all of
-          that out:
-          - Each mutation is compiled to a `Callable` once at registration.
-            Source becomes `function(args, ctx, __dispatch) { ... return
+            The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+            with a router Reference installed on a reused context, plus a
+            promise queue to serialize calls into that slot. 1.7.4 throws all of
+            that out:
+            - Each mutation is compiled to a `Callable` once at registration.
+              Source becomes `function(args, ctx, __dispatch) { ... return
 
     userFn(args, ctx, actions); }`where`actions`is an in-VM shim
-    over`\_\_dispatch`.
+  over`\_\_dispatch`.
     - Per call: build a fresh dispatch `Reference`closed over this
       call's`actions`, invoke `callable.call([args, ctx, dispatch])`.
     - No shared slot → no serialization queue. Concurrent same-mutation
@@ -356,10 +395,10 @@ docs page called out, with no breaking changes to the v0.1 surface.
       is reused; per-call work doesn't create JSC metadata that needs
       GCing.
 
-            Behavioural notes: handler errors still propagate as `Error` objects
-            with `.message` and `.name`. Timeouts still terminate the isolate
-            on Worker; on FFI they throw `TimeoutError` and the isolate stays
-            alive (next call respawns the context). No public API changes.
+              Behavioural notes: handler errors still propagate as `Error` objects
+              with `.message` and `.name`. Timeouts still terminate the isolate
+              on Worker; on FFI they throw `TimeoutError` and the isolate stays
+              alive (next call respawns the context). No public API changes.
 
 ### Bumped
 
@@ -527,14 +566,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-                    ```ts
-                    import { syncCdc } from '@absolutejs/sync';
-                    new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-                    ```
+                        ```ts
+                        import { syncCdc } from '@absolutejs/sync';
+                        new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+                        ```
 
-                    New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-                    `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-                    `MissedChangesError`, `CdcConsumerSlowError`.
+                        New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+                        `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+                        `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 

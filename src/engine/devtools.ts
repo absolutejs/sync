@@ -47,6 +47,60 @@ export type EngineInspection = {
 };
 
 /**
+ * Operator-shaped point-in-time engine state (see {@link SyncEngine.metrics}) —
+ * numeric counters + memory estimates + throughput totals since engine start.
+ *
+ * Distinct from {@link EngineInspection}, which is devtools-shaped (named
+ * collections, recent-change tail, registered packs). `metrics()` is what a
+ * PaaS host scrapes on an interval to answer "is this engine healthy" and
+ * "what's its resource footprint" — feed it to `@absolutejs/metering` to
+ * attribute cost per engine.
+ */
+export type EngineMetrics = {
+	/** `Date.now()` when this snapshot was taken. */
+	at: number;
+	/** How long this engine has been running, in milliseconds. */
+	uptimeMs: number;
+	/** Current change-feed version (monotonic). */
+	version: number;
+	changeLog: {
+		/** Number of entries currently retained. */
+		entries: number;
+		/** Hard cap on entries (from `SyncEngineOptions.changeLogSize`). */
+		capacity: number;
+		/** Time-based retention window, when set (`SyncEngineOptions.changeLogRetainMs`). */
+		retainMs: number | null;
+		/** Version of the oldest retained entry, or `null` when empty. */
+		oldestVersion: number | null;
+		/** Wall-clock age of the oldest retained entry in ms, or `null` when empty. */
+		oldestAgeMs: number | null;
+	};
+	subscriptions: {
+		/** Active subscriptions across every collection. */
+		total: number;
+		/** Per-collection breakdown — the values sum to `total`. */
+		byCollection: Record<string, number>;
+	};
+	reactiveCache: {
+		entries: number;
+		capacity: number;
+	};
+	mutations: {
+		/** Mutations completed successfully since engine start. */
+		completed: number;
+		/** Mutations that exhausted their retry budget and failed. */
+		failed: number;
+		/** Per-attempt retries fired since start (a single mutation may bump this multiple times). */
+		retried: number;
+		/** Currently running, not yet committed or failed. */
+		inFlight: number;
+	};
+	schedules: {
+		registered: number;
+	};
+};
+
+/**
  * A live engine event (see {@link SyncEngine.onActivity}): a committed change or
  * a mutation outcome. `at` is `Date.now()`. (Live subscription counts come from
  * the {@link EngineInspection} snapshot.)

@@ -44,7 +44,8 @@ import type { ScheduleDefinition } from './schedule';
 import type {
 	CollectionKind,
 	EngineActivity,
-	EngineInspection
+	EngineInspection,
+	EngineMetrics
 } from './devtools';
 import type { SchemaDefinition, TableSchema } from './schema';
 import type { CrdtMergeable } from '../crdt';
@@ -294,6 +295,16 @@ export type SyncEngine = {
 	 */
 	inspect: () => EngineInspection;
 	/**
+	 * Operator-shaped engine metrics — counters + memory estimates + throughput
+	 * totals since engine start. Distinct from {@link SyncEngine.inspect}: this
+	 * is what a PaaS host scrapes on an interval to answer "is this engine
+	 * healthy" and "what's its resource footprint." Feed it to
+	 * `@absolutejs/metering` for per-engine cost attribution.
+	 *
+	 * Added in 1.13.0.
+	 */
+	metrics: () => EngineMetrics;
+	/**
 	 * Subscribe to the live engine activity stream (changes, mutation outcomes,
 	 * subscribe/unsubscribe). Returns an unsubscribe. Powers the devtools feed.
 	 */
@@ -432,6 +443,13 @@ export type LoggedChange = {
 	version: number;
 	table: string;
 	change: RowChange<unknown>;
+	/**
+	 * Wall-clock when this change was logged (Date.now()). Used by the
+	 * engine's time-based retention sweep (`changeLogRetainMs`) and
+	 * surfaced as the change-log age in {@link SyncEngine.metrics}.
+	 * Added in 1.13.0; pre-1.13.0 consumers of `LoggedChange` ignore it.
+	 */
+	at: number;
 };
 
 /** Thrown by {@link SyncEngine.streamChanges} when `since` is older than the
@@ -498,6 +516,16 @@ export type SyncEngineOptions = {
 	 * snapshot. Defaults to 1024.
 	 */
 	changeLogSize?: number;
+	/**
+	 * Time-based change-log retention: drop entries older than this many ms,
+	 * in addition to the count cap above. Lets a high-throughput engine keep
+	 * a SHORT log (e.g. "60s of changes") regardless of count, which both
+	 * bounds memory and bounds the catch-up work on reconnect. Defaults to
+	 * `null` — only the count cap (`changeLogSize`) applies.
+	 *
+	 * Added in 1.13.0.
+	 */
+	changeLogRetainMs?: number | null;
 	/**
 	 * Run every mutation inside your database's transaction (see
 	 * {@link TransactionRunner}): the handler's writes commit all-or-nothing, and
@@ -799,8 +827,15 @@ export const createSyncEngine = (
 	// Monotonic change feed: every applyChange bumps `version` and appends to a
 	// bounded log, so a client can resume from the version it last applied.
 	const changeLogSize = options.changeLogSize ?? 1024;
+	const changeLogRetainMs = options.changeLogRetainMs ?? null;
 	const changeLog: LoggedChange[] = [];
 	let version = 0;
+	// Engine-level counters surfaced via `engine.metrics()` (1.13.0).
+	const engineStartedAt = Date.now();
+	let mutationsCompleted = 0;
+	let mutationsFailed = 0;
+	let mutationsRetried = 0;
+	let mutationsInFlight = 0;
 
 	// Cross-client reactive query cache (1.3+). Keyed by stableSubKey, holds
 	// the result + read set so a fresh subscribe with the same key reuses the
@@ -1472,8 +1507,18 @@ export const createSyncEngine = (
 
 	const logChange = (changeVersion: number, entry: LoggedChange) => {
 		changeLog.push(entry);
+		// Count-based cap.
 		if (changeLog.length > changeLogSize) {
 			changeLog.shift();
+		}
+		// Time-based retention (1.13.0): drop entries older than the
+		// configured window. Cheap when the log is small or the head is
+		// fresh — we stop the moment we find a young-enough entry.
+		if (changeLogRetainMs !== null && changeLogRetainMs > 0) {
+			const cutoff = entry.at - changeLogRetainMs;
+			while (changeLog.length > 0 && changeLog[0]!.at < cutoff) {
+				changeLog.shift();
+			}
 		}
 		// Atomic with the log push — every active CDC streamer sees every
 		// entry exactly once, in version order, with no chance of a missed
@@ -1491,10 +1536,11 @@ export const createSyncEngine = (
 	) => {
 		version += 1;
 		const changeVersion = version;
-		logChange(changeVersion, { version: changeVersion, table, change });
+		const at = Date.now();
+		logChange(changeVersion, { version: changeVersion, table, change, at });
 		emitActivity({
 			type: 'change',
-			at: Date.now(),
+			at,
 			table,
 			op: change.op,
 			version: changeVersion
@@ -1541,11 +1587,12 @@ export const createSyncEngine = (
 			ViewDiff<unknown>[]
 		>();
 		const reactiveChanges: ReactiveChange[] = [];
+		const batchAt = Date.now();
 		for (const { table, change } of changes) {
-			logChange(batchVersion, { version: batchVersion, table, change });
+			logChange(batchVersion, { version: batchVersion, table, change, at: batchAt });
 			emitActivity({
 				type: 'change',
-				at: Date.now(),
+				at: batchAt,
 				table,
 				op: change.op,
 				version: batchVersion
@@ -2283,6 +2330,8 @@ export const createSyncEngine = (
 			// runInTransaction wraps each individual attempt.
 			let lastError: unknown;
 			let attemptsMade = 0;
+			mutationsInFlight += 1;
+			try {
 			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 				attemptsMade = attempt;
 				try {
@@ -2291,6 +2340,7 @@ export const createSyncEngine = (
 							? await runInTransaction((tx) => runHandler(tx))
 							: await runHandler(undefined);
 					await applyChangeBatch(buffered);
+					mutationsCompleted += 1;
 					emitActivity({
 						type: 'mutation',
 						at: Date.now(),
@@ -2306,6 +2356,7 @@ export const createSyncEngine = (
 						isRetryable(error) &&
 						elapsedMs < maxElapsedMs;
 					if (!canRetry) break;
+					mutationsRetried += 1;
 
 					const rawDelay = computeDelay(attempt);
 					// Cap the delay so we don't blow past maxElapsedMs while
@@ -2336,6 +2387,7 @@ export const createSyncEngine = (
 				}
 			}
 
+			mutationsFailed += 1;
 			emitActivity({
 				type: 'mutation',
 				at: Date.now(),
@@ -2353,6 +2405,9 @@ export const createSyncEngine = (
 				);
 			}
 			throw lastError;
+			} finally {
+				mutationsInFlight -= 1;
+			}
 		},
 
 		runMutations: async (specs, ctx) => {
@@ -2677,6 +2732,46 @@ export const createSyncEngine = (
 					ownsTables: [...pack.ownsTables],
 					readsTables: [...pack.readsTables]
 				}))
+			};
+		},
+
+		metrics: () => {
+			const now = Date.now();
+			const byCollection: Record<string, number> = {};
+			let totalSubscriptions = 0;
+			for (const [name, subs] of active) {
+				byCollection[name] = subs.size;
+				totalSubscriptions += subs.size;
+			}
+			const oldest = changeLog[0];
+			return {
+				at: now,
+				changeLog: {
+					capacity: changeLogSize,
+					entries: changeLog.length,
+					oldestAgeMs: oldest ? now - oldest.at : null,
+					oldestVersion: oldest ? oldest.version : null,
+					retainMs: changeLogRetainMs
+				},
+				mutations: {
+					completed: mutationsCompleted,
+					failed: mutationsFailed,
+					inFlight: mutationsInFlight,
+					retried: mutationsRetried
+				},
+				reactiveCache: {
+					capacity: reactiveCacheMax,
+					entries: cachedReruns.size
+				},
+				schedules: {
+					registered: schedules.size
+				},
+				subscriptions: {
+					byCollection,
+					total: totalSubscriptions
+				},
+				uptimeMs: now - engineStartedAt,
+				version
 			};
 		},
 
