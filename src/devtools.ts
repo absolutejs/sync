@@ -143,7 +143,11 @@ export const syncDevtools = ({
 				headers: {
 					'cache-control': 'no-cache, no-transform',
 					connection: 'keep-alive',
-					'content-type': 'text/event-stream'
+					'content-type': 'text/event-stream',
+					// Tell nginx (and other reverse proxies) not to buffer the
+					// stream — without this it holds chunks back and the SSE
+					// connection tears (ERR_INCOMPLETE_CHUNKED_ENCODING).
+					'x-accel-buffering': 'no'
 				}
 			});
 		});
