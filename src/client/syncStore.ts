@@ -1,6 +1,7 @@
 import type { ServerFrame } from '../engine/connection';
 import type { RowKey } from '../engine/types';
 import type { MutationStorage, PendingMutationRecord } from './syncCollection';
+import { jsonSerializer, type FrameSerializer } from '../serializer';
 
 export type SyncStoreStatus = 'connecting' | 'ready' | 'closed';
 
@@ -56,6 +57,11 @@ export type SyncStoreOptions<Row, M extends MutationMap> = {
 	/** Persist the pending-mutation queue across reloads (offline). */
 	storage?: MutationStorage;
 	onError?: (error: unknown) => void;
+	/**
+	 * Wire-format serializer (1.16.0). Defaults to `jsonSerializer`. MUST
+	 * match the server's `syncSocket` serializer.
+	 */
+	serializer?: FrameSerializer;
 };
 
 export type SyncStore<Row, M extends MutationMap> = {
@@ -106,6 +112,7 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 	const maxReconnectMs = options.maxReconnectMs ?? 10_000;
 	const reconcileGraceMs = options.reconcileGraceMs ?? 3000;
 	const mutations = options.mutations ?? ({} as M);
+	const serializer: FrameSerializer = options.serializer ?? jsonSerializer;
 	const Impl = options.webSocketImpl ?? globalThis.WebSocket;
 	if (!Impl) {
 		throw new Error(
@@ -286,16 +293,14 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 		ws.onopen = () => {
 			attempt = 0;
 			connected = true;
-			ws.send(
-				JSON.stringify({
-					type: 'subscribe',
-					id: SUBSCRIPTION_ID,
-					collection: options.collection,
-					params: options.params,
-					// Resume from what we've applied (catch-up instead of snapshot).
-					since: appliedVersion > 0 ? appliedVersion : undefined
-				})
-			);
+			ws.send(serializer.encodeClient({
+				type: 'subscribe',
+				id: SUBSCRIPTION_ID,
+				collection: options.collection,
+				params: options.params,
+				// Resume from what we've applied (catch-up instead of snapshot).
+				since: appliedVersion > 0 ? appliedVersion : undefined
+			}) as string);
 			// Retry mutations that failed/queued while offline.
 			for (const mutation of pending) {
 				if (!mutation.settled && !mutation.inFlight) {
@@ -305,11 +310,12 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 		};
 		ws.onmessage = (event) => {
 			try {
-				applyFrame(
-					JSON.parse(event.data as string) as ServerFrame<Row>
-				);
+				const decoded = serializer.decode(event.data);
+				if (decoded !== null && typeof decoded === 'object') {
+					applyFrame(decoded as ServerFrame<Row>);
+				}
 			} catch {
-				// ignore non-JSON frames
+				// ignore unparseable frames
 			}
 		};
 		ws.onclose = () => {
@@ -436,7 +442,10 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 			}
 			try {
 				socket?.send(
-					JSON.stringify({ type: 'unsubscribe', id: SUBSCRIPTION_ID })
+					serializer.encodeClient({
+						type: 'unsubscribe',
+						id: SUBSCRIPTION_ID
+					}) as string
 				);
 				socket?.close();
 			} catch {

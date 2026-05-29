@@ -6,6 +6,7 @@ import type {
 	SyncCollectionState,
 	SyncCollectionStatus
 } from './syncCollection';
+import { jsonSerializer, type FrameSerializer } from '../serializer';
 
 export type SyncClientOptions = {
 	/** WebSocket URL of the {@link syncSocket} endpoint (e.g. `ws://host/sync/ws`). */
@@ -18,6 +19,13 @@ export type SyncClientOptions = {
 	maxReconnectMs?: number;
 	/** Called with the message of any server `error` frame. */
 	onError?: (message: unknown) => void;
+	/**
+	 * Wire-format serializer (1.16.0). Defaults to `jsonSerializer` — the
+	 * historical JSON-over-WS behavior. MUST match the server's `syncSocket`
+	 * serializer; opt into a binary one (msgpack, cbor, custom) on both
+	 * ends to cut bandwidth + parse CPU on large snapshots.
+	 */
+	serializer?: FrameSerializer;
 };
 
 export type SyncCollectionHandleOptions<T> = {
@@ -101,6 +109,7 @@ type Entry = {
 export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	const reconnectMs = options.reconnectMs ?? 500;
 	const maxReconnectMs = options.maxReconnectMs ?? 10_000;
+	const serializer: FrameSerializer = options.serializer ?? jsonSerializer;
 	const Impl = options.webSocketImpl ?? globalThis.WebSocket;
 	if (!Impl) {
 		throw new Error(
@@ -258,29 +267,30 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		}
 	};
 
+	const wsSend = (payload: string | ArrayBufferLike | Uint8Array) => {
+		// Native WebSocket.send accepts string | ArrayBufferLike | Blob | ArrayBufferView.
+		socket?.send(payload as string);
+	};
+
 	const sendSubscribe = (entry: Entry) => {
-		socket?.send(
-			JSON.stringify({
-				type: 'subscribe',
-				id: entry.id,
-				collection: entry.collection,
-				params: entry.params,
-				since:
-					entry.appliedVersion > 0 ? entry.appliedVersion : undefined
-			})
-		);
+		wsSend(serializer.encodeClient({
+			type: 'subscribe',
+			id: entry.id,
+			collection: entry.collection,
+			params: entry.params,
+			since:
+				entry.appliedVersion > 0 ? entry.appliedVersion : undefined
+		}));
 	};
 
 	const sendMutate = (mutation: PendingMutation) => {
 		if (connected) {
-			socket?.send(
-				JSON.stringify({
-					type: 'mutate',
-					mutationId: mutation.mutationId,
-					name: mutation.name,
-					args: mutation.args
-				})
-			);
+			wsSend(serializer.encodeClient({
+				type: 'mutate',
+				mutationId: mutation.mutationId,
+				name: mutation.name,
+				args: mutation.args
+			}));
 		}
 	};
 
@@ -304,9 +314,12 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		};
 		ws.onmessage = (event) => {
 			try {
-				applyFrame(JSON.parse(event.data as string) as ServerFrame);
+				const decoded = serializer.decode(event.data);
+				if (decoded !== null && typeof decoded === 'object') {
+					applyFrame(decoded as ServerFrame);
+				}
 			} catch {
-				// ignore non-JSON frames
+				// ignore unparseable frames
 			}
 		};
 		ws.onclose = () => {
@@ -383,9 +396,10 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				entry.closed = true;
 				entries.delete(entryId);
 				if (connected) {
-					socket?.send(
-						JSON.stringify({ type: 'unsubscribe', id: entryId })
-					);
+					wsSend(serializer.encodeClient({
+						type: 'unsubscribe',
+						id: entryId
+					}));
 				}
 			}
 		};

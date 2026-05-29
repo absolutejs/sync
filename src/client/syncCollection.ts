@@ -1,5 +1,6 @@
 import type { ServerFrame } from '../engine/connection';
 import type { RowKey } from '../engine/types';
+import { jsonSerializer, type FrameSerializer } from '../serializer';
 
 export type { ServerFrame } from '../engine/connection';
 
@@ -217,6 +218,11 @@ export type SyncCollectionOptions<T> = {
 	cache?: CollectionCache<T>;
 	/** Called with each server error message. */
 	onError?: (error: unknown) => void;
+	/**
+	 * Wire-format serializer (1.16.0). Defaults to `jsonSerializer`. MUST
+	 * match the server's `syncSocket` serializer.
+	 */
+	serializer?: FrameSerializer;
 };
 
 export type SyncCollection<T> = {
@@ -277,6 +283,7 @@ export const createSyncCollection = <T>(
 	const key = options.key ?? ((row: T) => (row as { id: RowKey }).id);
 	const reconnectMs = options.reconnectMs ?? 500;
 	const maxReconnectMs = options.maxReconnectMs ?? 10_000;
+	const serializer: FrameSerializer = options.serializer ?? jsonSerializer;
 	const Impl = options.webSocketImpl ?? globalThis.WebSocket;
 	if (!Impl) {
 		throw new Error(
@@ -414,16 +421,18 @@ export const createSyncCollection = <T>(
 		// store — that's the multiplexed createSyncClient's job — so ignore it.
 	};
 
+	const wsSend = (payload: string | ArrayBufferLike | Uint8Array) => {
+		socket?.send(payload as string);
+	};
+
 	const sendMutate = (mutation: PendingMutation<T>) => {
 		if (connected) {
-			socket?.send(
-				JSON.stringify({
-					type: 'mutate',
-					mutationId: mutation.mutationId,
-					name: mutation.name,
-					args: mutation.args
-				})
-			);
+			wsSend(serializer.encodeClient({
+				type: 'mutate',
+				mutationId: mutation.mutationId,
+				name: mutation.name,
+				args: mutation.args
+			}));
 		}
 	};
 
@@ -437,16 +446,14 @@ export const createSyncCollection = <T>(
 		ws.onopen = () => {
 			attempt = 0;
 			connected = true;
-			ws.send(
-				JSON.stringify({
-					type: 'subscribe',
-					id: SUBSCRIPTION_ID,
-					collection: options.collection,
-					params: options.params,
-					// Resume from what we've applied (catch-up instead of snapshot).
-					since: appliedVersion > 0 ? appliedVersion : undefined
-				})
-			);
+			ws.send(serializer.encodeClient({
+				type: 'subscribe',
+				id: SUBSCRIPTION_ID,
+				collection: options.collection,
+				params: options.params,
+				// Resume from what we've applied (catch-up instead of snapshot).
+				since: appliedVersion > 0 ? appliedVersion : undefined
+			}) as string);
 			// Replay anything still pending across the (re)connect.
 			for (const mutation of pending) {
 				sendMutate(mutation);
@@ -454,7 +461,10 @@ export const createSyncCollection = <T>(
 		};
 		ws.onmessage = (event) => {
 			try {
-				applyFrame(JSON.parse(event.data as string) as ServerFrame<T>);
+				const decoded = serializer.decode(event.data);
+				if (decoded !== null && typeof decoded === 'object') {
+					applyFrame(decoded as ServerFrame<T>);
+				}
 			} catch {
 				// ignore non-JSON frames
 			}
@@ -586,9 +596,10 @@ export const createSyncCollection = <T>(
 				clearTimeout(reconnectTimer);
 			}
 			try {
-				socket?.send(
-					JSON.stringify({ type: 'unsubscribe', id: SUBSCRIPTION_ID })
-				);
+				wsSend(serializer.encodeClient({
+					type: 'unsubscribe',
+					id: SUBSCRIPTION_ID
+				}));
 				socket?.close();
 			} catch {
 				// socket already closing/closed

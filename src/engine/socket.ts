@@ -3,6 +3,8 @@ import { createSyncConnection } from './connection';
 import type { SyncConnection, SyncConnectionStats } from './connection';
 import type { PresenceHub } from './presence';
 import type { SyncEngine } from './syncEngine';
+import type { FrameSerializer } from '../serializer';
+import { jsonSerializer } from '../serializer';
 
 /**
  * Diagnostic surfaced via {@link SyncSocketOptions.onSlow} when a connection
@@ -62,6 +64,14 @@ export type SyncSocketOptions = {
 	 * Added in 1.14.0.
 	 */
 	closeOnSlow?: boolean;
+	/**
+	 * Wire-format serializer (1.16.0). Default `jsonSerializer` —
+	 * preserves the pre-1.16 behavior. Both ends of the connection MUST
+	 * use the same serializer; opt into a binary one (msgpack, cbor, or
+	 * a custom layout) on BOTH this plugin AND the client to cut the
+	 * bandwidth + parse CPU.
+	 */
+	serializer?: FrameSerializer;
 };
 
 type TrackedConnection = {
@@ -90,7 +100,8 @@ export const syncSocket = ({
 	presence,
 	maxBufferedBytes,
 	onSlow,
-	closeOnSlow = false
+	closeOnSlow = false,
+	serializer = jsonSerializer
 }: SyncSocketOptions) => {
 	const connections = new Map<string, TrackedConnection>();
 	const threshold = maxBufferedBytes ?? Infinity;
@@ -117,10 +128,11 @@ export const syncSocket = ({
 
 			// Permissive shape: we read `getBufferedAmount` + `close` if the
 			// runtime supports them (Bun's ServerWebSocket does) — fall back
-			// silently for test fakes.
+			// silently for test fakes. Accepts both string and Uint8Array
+			// payloads (binary serializers via 1.16.0).
 			const bunWs = ws as unknown as {
 				id: string;
-				send: (data: string | Uint8Array) => number;
+				send: (data: string | Uint8Array | ArrayBuffer) => number;
 				getBufferedAmount?: () => number;
 				close?: () => void;
 			};
@@ -130,8 +142,12 @@ export const syncSocket = ({
 					engine,
 					ctx,
 					presence,
+					serializer,
 					send: (frame) => {
-						const ret = bunWs.send(JSON.stringify(frame));
+						const payload = serializer.encodeServer(frame);
+						const ret = bunWs.send(
+							typeof payload === 'string' ? payload : (payload as Uint8Array)
+						);
 						const buffered = bunWs.getBufferedAmount?.() ?? 0;
 
 						const overBuffer = buffered > threshold;

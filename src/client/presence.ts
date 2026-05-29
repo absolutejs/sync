@@ -1,4 +1,5 @@
 import type { PresenceMember } from '../engine/presence';
+import { jsonSerializer, type FrameSerializer } from '../serializer';
 
 export type { PresenceMember } from '../engine/presence';
 
@@ -17,6 +18,11 @@ export type PresenceClientOptions<S> = {
 	reconnectMs?: number;
 	/** Max reconnect backoff (ms). Defaults to 10000. */
 	maxReconnectMs?: number;
+	/**
+	 * Wire-format serializer (1.16.0). Defaults to `jsonSerializer`. MUST
+	 * match the server's `syncSocket` serializer.
+	 */
+	serializer?: FrameSerializer;
 };
 
 export type PresenceClient<S> = {
@@ -43,6 +49,7 @@ export const createPresence = <S>(
 ): PresenceClient<S> => {
 	const reconnectMs = options.reconnectMs ?? 500;
 	const maxReconnectMs = options.maxReconnectMs ?? 10_000;
+	const serializer: FrameSerializer = options.serializer ?? jsonSerializer;
 	const Impl = options.webSocketImpl ?? globalThis.WebSocket;
 	if (!Impl) {
 		throw new Error(
@@ -77,7 +84,11 @@ export const createPresence = <S>(
 
 	const send = (frame: unknown) => {
 		if (connected) {
-			socket?.send(JSON.stringify(frame));
+			// Presence sends are presence-* ClientFrames; the serializer
+			// validates structurally on encode.
+			socket?.send(
+				serializer.encodeClient(frame as Parameters<FrameSerializer['encodeClient']>[0]) as string
+			);
 		}
 	};
 
@@ -90,14 +101,12 @@ export const createPresence = <S>(
 		ws.onopen = () => {
 			attempt = 0;
 			connected = true;
-			ws.send(
-				JSON.stringify({
-					type: 'presence-join',
-					room: options.room,
-					memberId: id,
-					state
-				})
-			);
+			ws.send(serializer.encodeClient({
+				type: 'presence-join',
+				room: options.room,
+				memberId: id,
+				state
+			}) as string);
 		};
 		ws.onmessage = (event) => {
 			let frame: {
@@ -107,11 +116,11 @@ export const createPresence = <S>(
 				updated?: PresenceMember<S>[];
 				left?: string[];
 			};
-			try {
-				frame = JSON.parse(event.data as string);
-			} catch {
+			const decoded = serializer.decode(event.data);
+			if (decoded === null || typeof decoded !== 'object') {
 				return;
 			}
+			frame = decoded as typeof frame;
 			if (frame.type !== 'presence' || frame.room !== options.room) {
 				return;
 			}

@@ -4,6 +4,43 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.16.0] — 2026-05-29
+
+### Added — pluggable wire-format serializer
+
+- **`FrameSerializer` interface + `jsonSerializer` default**, exported from
+  `@absolutejs/sync`. The serializer owns the wire format only — frame-shape
+  validation stays in the engine, so the SAME validation works for JSON,
+  msgpack, cbor, or any binary layout. The default `jsonSerializer`
+  preserves every existing call site's behavior.
+- **Threaded through every layer:**
+  - Server: `createSyncConnection({ serializer })` + `syncSocket({ serializer })`.
+  - Client: `createSyncClient({ serializer })`,
+    `createSyncCollection({ serializer })`, `syncStore({ serializer })`,
+    `createPresence({ serializer })`.
+- Both ends MUST use the same serializer; opt into a binary one on BOTH
+  ends to cut the bandwidth + parse CPU on large snapshots — the
+  customer-app side wins observable bytes-egress + faster cold reads.
+
+### Why this matters for the PaaS
+
+JSON is great until you're sending a 1 MB initial hydrate per reconnect.
+At a million reconnect-events/day across tenants, the meter's
+`bytesEgress` line item is the actual customer bill — cutting it 40-60%
+with msgpack/cbor is real money. This release ships the seam without
+prescribing a specific binary encoder; pick the one your client lib
+already has and plug it in.
+
+### Notes
+
+- The `decode` step accepts strings, `Uint8Array`, and `ArrayBuffer` —
+  Bun's WS gives bytes for binary frames; Browser WS gives ArrayBuffer.
+  `jsonSerializer.decode` handles all three by UTF-8 decoding when
+  needed.
+- A custom serializer's `encodeServer` / `encodeClient` may return
+  `string | ArrayBufferLike | Uint8Array`. The WS adapter passes
+  through whatever shape the WS impl accepts.
+
 ## [1.15.0] — 2026-05-29
 
 ### Added — AbortSignal on subscribe + hydrate

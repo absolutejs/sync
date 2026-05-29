@@ -1,5 +1,7 @@
 import type { PresenceHandle, PresenceHub, PresenceMember } from './presence';
 import type { Subscription, SyncEngine } from './syncEngine';
+import type { FrameSerializer } from '../serializer';
+import { jsonSerializer } from '../serializer';
 
 /**
  * Wire protocol for the sync-engine WebSocket. One connection multiplexes many
@@ -72,10 +74,22 @@ export type SyncConnectionOptions = {
 	 * connection tracks consecutive `-1` returns and surfaces them via
 	 * `connection.stats().slowSendsRecent`. Legacy `void`-returning sends
 	 * keep working unchanged.
+	 *
+	 * NOTE: 1.16.0 — `send` receives the typed `ServerFrame`. The connection
+	 * does NOT pre-serialize; the WS adapter (`syncSocket`) wraps `send` to
+	 * call `serializer.encodeServer(frame)` before `ws.send(...)`. This keeps
+	 * the connection layer transport-agnostic.
 	 */
 	send: (frame: ServerFrame) => void | number;
 	/** Optional presence hub; enables the `presence-*` frames (see createPresenceHub). */
 	presence?: PresenceHub;
+	/**
+	 * Wire-format serializer (1.16.0). Defaults to `jsonSerializer` —
+	 * the historical JSON-over-WS behavior. Both ends of the connection
+	 * MUST use the same serializer; pair this option with the matching
+	 * client-side `serializer` to opt into binary frames.
+	 */
+	serializer?: FrameSerializer;
 };
 
 /**
@@ -109,14 +123,14 @@ export type SyncConnection = {
 	stats: () => SyncConnectionStats;
 };
 
-const parseFrame = (raw: unknown): ClientFrame | undefined => {
+const parseFrame = (raw: unknown, serializer: FrameSerializer): ClientFrame | undefined => {
+	// 1.16.0: hand off the wire decode to the serializer (default JSON).
+	// The shape validation below is identical regardless of wire format —
+	// the serializer just produces an object, we walk it for type safety.
 	let value: unknown = raw;
-	if (typeof value === 'string') {
-		try {
-			value = JSON.parse(value);
-		} catch {
-			return undefined;
-		}
+	if (typeof value === 'string' || value instanceof Uint8Array || value instanceof ArrayBuffer) {
+		value = serializer.decode(raw);
+		if (value === null) return undefined;
 	}
 	if (typeof value !== 'object' || value === null) {
 		return undefined;
@@ -202,7 +216,8 @@ export const createSyncConnection = ({
 	engine,
 	ctx,
 	send: rawSend,
-	presence
+	presence,
+	serializer = jsonSerializer
 }: SyncConnectionOptions): SyncConnection => {
 	const subscriptions = new Map<string, Subscription<unknown>>();
 	// This connection's presence memberships (one per room), torn down on close.
@@ -276,7 +291,7 @@ export const createSyncConnection = ({
 	};
 
 	const handle = async (raw: unknown) => {
-		const frame = parseFrame(raw);
+		const frame = parseFrame(raw, serializer);
 		if (frame === undefined) {
 			send({ type: 'error', message: 'Malformed sync frame' });
 			return;
