@@ -4,6 +4,25 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.10.0] — 2026-05-28
+
+### Added
+
+- **New subpath `@absolutejs/sync/code-mode`** — exposes the engine's
+  mutation surface as a host-tool map shape-compatible with
+  `@absolutejs/ai`'s `codeModeTool({ tools })`. The factory
+  `engineMutationsAsHostTools({ engine, ctx, mutations })` returns
+  `Record<hostFnName, CodeModeHostTool>` with auto-derived JS-safe
+  names (`'comments:create'` → `comments_create`), throws at build
+  time on unregistered names or duplicate host-fn names, and threads
+  a per-call `ctx()` factory through every mutation in the script.
+  Tests cover the documented v0.1 partial-failure semantics: each
+  `runMutation` runs in its own DB transaction, and a later throw does
+  NOT roll back earlier commits. Cross-mutation atomicity is a
+  deliberate v0.2 followup; this slice ships honest semantics rather
+  than a transactional promise the engine can't keep without new
+  primitives. SB-1 ("Code Mode as a sync primitive") groundwork.
+
 ## [1.9.2] — 2026-05-28
 
 ### Added
