@@ -4,6 +4,26 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.12.0] — 2026-05-29
+
+### Added
+
+- **`SandboxConfig.unsafeHost` escape hatch** — opt-in map of host
+  functions a `sandboxedHandler` may call as
+  `unsafeHost.fnName(...args)`. Without this option the sandbox stays
+  hermetic; with it, the engine routes declared host calls through the
+  existing `__dispatch` Reference (no extra IPC primitive) so an
+  isolated mutation can reach a payment gateway / queue / SDK / mailer
+  when it has to. The name is deliberately loud — anyone reading the
+  handler source sees the escape immediately. Convex actions are the
+  same pattern; the trade-off is the same: retries WILL re-fire the
+  host fn, so make it idempotent or pair with compensation. Undeclared
+  calls throw a clear `unsafeHost.${fnName} ... was not declared`
+  error; thrown host errors propagate into the sandbox as normal JS
+  errors. The wrapped handler signature becomes
+  `(args, ctx, actions, unsafeHost)` — fully backwards-compatible (the
+  4th param is just ignored by existing handlers). SB-5.
+
 ## [1.11.0] — 2026-05-29
 
 ### Added

@@ -511,4 +511,151 @@ describe('sandboxed mutations', () => {
 		const result = await engine.runMutation('explicitWorker', { n: 7 }, {});
 		expect(result).toBe('ok');
 	});
+
+	test('unsafeHost: declared fn runs on the host and returns its value', async () => {
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('items'));
+		const seen: Array<{ amount: number; token: string }> = [];
+		engine.registerMutation(
+			defineMutation({
+				name: 'payments:charge',
+				sandbox: {
+					unsafeHost: {
+						chargeStripe: (
+							input: { amount: number; token: string }
+						) => {
+							seen.push(input);
+							return { id: `ch_${input.amount}`, ok: true };
+						}
+					}
+				},
+				sandboxedHandler: `async (args, ctx, actions, unsafeHost) => {
+					const receipt = await unsafeHost.chargeStripe({
+						amount: args.amount,
+						token: args.token
+					});
+					return receipt;
+				}`
+			})
+		);
+		const result = (await engine.runMutation(
+			'payments:charge',
+			{ amount: 4200, token: 'tok-demo' },
+			{}
+		)) as { id: string; ok: boolean };
+		expect(result).toEqual({ id: 'ch_4200', ok: true });
+		expect(seen).toEqual([{ amount: 4200, token: 'tok-demo' }]);
+	});
+
+	test('unsafeHost: undeclared fn throws a clear, instructive error', async () => {
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'badEscape',
+				sandbox: { unsafeHost: { allowed: () => 'ok' } },
+				sandboxedHandler: `async (args, ctx, actions, unsafeHost) => {
+					return await unsafeHost.notDeclared({ x: 1 });
+				}`
+			})
+		);
+		const error = (await rejection(
+			engine.runMutation('badEscape', {}, {})
+		)) as Error;
+		expect(error.message).toMatch(/unsafeHost\.notDeclared/);
+		expect(error.message).toMatch(/not declared/);
+	});
+
+	test('unsafeHost: thrown host error propagates into the sandbox', async () => {
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'catchableHostFailure',
+				sandbox: {
+					unsafeHost: {
+						boom: () => {
+							throw new Error('payment-gateway: declined');
+						}
+					}
+				},
+				sandboxedHandler: `async (args, ctx, actions, unsafeHost) => {
+					try {
+						await unsafeHost.boom();
+						return { caught: false };
+					} catch (e) {
+						return { caught: true, message: e.message };
+					}
+				}`
+			})
+		);
+		const result = (await engine.runMutation(
+			'catchableHostFailure',
+			{},
+			{}
+		)) as { caught: boolean; message?: string };
+		expect(result.caught).toBe(true);
+		expect(result.message).toMatch(/declined/);
+	});
+
+	test('unsafeHost: without any sandbox.unsafeHost config, calling through still gives a clear "not declared" error', async () => {
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'noEscapeConfig',
+				sandboxedHandler: `async (args, ctx, actions, unsafeHost) => {
+					await unsafeHost.anything();
+					return 'unreachable';
+				}`
+			})
+		);
+		const error = (await rejection(
+			engine.runMutation('noEscapeConfig', {}, {})
+		)) as Error;
+		expect(error.message).toMatch(/unsafeHost\.anything/);
+	});
+
+	test('unsafeHost: interleaves cleanly with actions.* writes (single fan-out)', async () => {
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('items'));
+		const sideEffects: string[] = [];
+		engine.registerMutation(
+			defineMutation({
+				name: 'orderThenCharge',
+				sandbox: {
+					unsafeHost: {
+						chargeStripe: () => {
+							sideEffects.push('charge');
+							return { ok: true };
+						}
+					}
+				},
+				sandboxedHandler: `async (args, ctx, actions, unsafeHost) => {
+					await actions.change('items', { op: 'insert', row: { id: 1, n: args.n } });
+					const receipt = await unsafeHost.chargeStripe({ amount: args.n });
+					await actions.change('items', { op: 'insert', row: { id: 2, n: args.n * 2 } });
+					return { paid: receipt.ok, total: args.n * 3 };
+				}`
+			})
+		);
+		const diffs: Array<{ added: Item[] }> = [];
+		await engine.subscribe<Item>({
+			collection: 'items',
+			ctx: {},
+			onDiff: (diff) => {
+				diffs.push({ added: diff.added });
+			},
+			params: undefined
+		});
+		const result = (await engine.runMutation(
+			'orderThenCharge',
+			{ n: 7 },
+			{}
+		)) as { paid: boolean; total: number };
+		expect(result).toEqual({ paid: true, total: 21 });
+		expect(sideEffects).toEqual(['charge']);
+		expect(diffs).toHaveLength(1);
+		expect(diffs[0]!.added.map((row) => row.id).sort()).toEqual([1, 2]);
+	});
 });

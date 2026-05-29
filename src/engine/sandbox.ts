@@ -186,6 +186,58 @@ export type SandboxConfig = {
 	 * reachable (e.g. CI with a known image).
 	 */
 	backend?: 'auto' | 'ffi' | 'worker';
+	/**
+	 * **Escape hatch.** Map of host functions the sandboxed handler may
+	 * call as `unsafeHost.fnName(...args)`. The name is deliberately
+	 * loud: anyone reading the source must see immediately that a
+	 * sandboxed mutation is reaching through to non-deterministic host
+	 * code (third-party API, queue push, email send, anything that
+	 * touches the outside world).
+	 *
+	 * Without this option, the sandbox is hermetic — only `args`,
+	 * `ctx`, and `actions` are reachable. Declare an entry here, name
+	 * it visibly (e.g. `chargeStripe`, `sendSlackPing`), and the engine
+	 * exposes it on the sandbox-side `unsafeHost` Proxy. The fn runs on
+	 * the host; its return value is structured-cloned back across the
+	 * isolate boundary; thrown errors propagate into the sandbox as
+	 * normal JS errors the handler can catch.
+	 *
+	 * The deterministic-mutation guarantees stop at the call site —
+	 * retries WILL re-fire these host fns (they're outside the
+	 * transaction). Treat them as side effects and either make them
+	 * idempotent or pair them with explicit compensation in the
+	 * handler. Convex's actions are the same model; this is the same
+	 * trade.
+	 *
+	 * @example
+	 * ```ts
+	 * defineMutation({
+	 *   name: 'payments:checkout',
+	 *   sandboxedHandler: `async (args, ctx, actions, unsafeHost) => {
+	 *     const order = await actions.insert('orders', { ...args, status: 'pending' });
+	 *     const receipt = await unsafeHost.chargeStripe({
+	 *       amount: order.amount,
+	 *       token: args.token,
+	 *     });
+	 *     await actions.update('orders', { id: order.id, status: 'paid', receipt });
+	 *     return order;
+	 *   }`,
+	 *   sandbox: {
+	 *     unsafeHost: {
+	 *       chargeStripe: ({ amount, token }) =>
+	 *         stripe.charges.create({ amount, source: token }),
+	 *     },
+	 *   },
+	 * });
+	 * ```
+	 */
+	// `any[]` (not `unknown[]`) for ergonomics — consumers write typed
+	// fns like `(input: { amount: number }) => …` and would otherwise
+	// have to cast inside every body to satisfy contravariance. The
+	// sandbox-side dispatch doesn't enforce arg types anyway (they
+	// cross structured-clone); validate inside the fn.
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	unsafeHost?: Record<string, (...args: any[]) => unknown | Promise<unknown>>;
 };
 
 let isolatedJscModule: IsolatedJscModule | undefined;
@@ -222,7 +274,7 @@ const wrap = (source: string): string => `
 		const userFn = (${source});
 		if (typeof userFn !== 'function') {
 			throw new Error(
-				'sandboxedHandler must evaluate to (args, ctx, actions) => result; got ' +
+				'sandboxedHandler must evaluate to (args, ctx, actions, unsafeHost) => result; got ' +
 					typeof userFn
 			);
 		}
@@ -234,7 +286,18 @@ const wrap = (source: string): string => `
 			now: () => __dispatch(__callId, 'now'),
 			fetch: (url, init) => __dispatch(__callId, 'fetch', url, init)
 		};
-		return userFn(args, ctx, actions);
+		// Escape hatch — host fns the mutation explicitly opted in to.
+		// The Proxy means every property access is a host call; the
+		// engine throws if the property name isn't declared in the
+		// mutation's sandbox.unsafeHost map.
+		const unsafeHost = new Proxy({}, {
+			get: (_target, fnName) => {
+				if (typeof fnName !== 'string') return undefined;
+				return (...callArgs) =>
+					__dispatch(__callId, 'unsafeHost', fnName, callArgs);
+			}
+		});
+		return userFn(args, ctx, actions, unsafeHost);
 	}
 `;
 
@@ -262,6 +325,7 @@ const compile = async (
 	// concurrent-safe: every call has its own callId → its own slot,
 	// no shared-mutable-state races.
 	const callMap = new Map<number, MutationActions>();
+	const unsafeHost = config.unsafeHost;
 	const dispatch = new Reference(((
 		callId: unknown,
 		op: unknown,
@@ -290,6 +354,19 @@ const compile = async (
 					rest[0] as string,
 					rest[1] as RequestInit | undefined
 				);
+			case 'unsafeHost': {
+				const fnName = rest[0] as string;
+				const callArgs = (rest[1] as unknown[]) ?? [];
+				if (
+					unsafeHost === undefined ||
+					typeof unsafeHost[fnName] !== 'function'
+				) {
+					throw new Error(
+						`sandboxedHandler called unsafeHost.${fnName}() but it was not declared in the mutation's sandbox.unsafeHost config. Declare it (and only the host fns you intend to expose) to opt in to the escape hatch.`
+					);
+				}
+				return unsafeHost[fnName](...callArgs);
+			}
 			default:
 				throw new Error(`unknown sandbox action op: ${String(op)}`);
 		}
