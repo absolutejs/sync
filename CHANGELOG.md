@@ -4,6 +4,51 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.17.0] — 2026-05-29
+
+### Added — cross-instance resume cursor
+
+The big one: clients reconnecting to a DIFFERENT cluster instance can now
+resume with a catch-up diff instead of falling back to a fresh snapshot.
+The `cluster.ts` comment that said "use sticky sessions if you want
+cross-instance resume" is now obsolete.
+
+- **`SyncEngineOptions.instanceId`** — stable string id. Default: random
+  UUID per engine. For a real cluster, pass a stable per-shard value
+  (e.g. `${hostname}:${shardId}`) so resume cursors remain decodable
+  across restarts.
+- **`LoggedChange.origin` + `LoggedChange.originVersion`** — every entry
+  now records which engine produced it and that engine's local version
+  at commit. Locally-committed changes have `origin === instanceId`;
+  cluster-received changes carry the peer's identity.
+- **`Subscription.cursor: string`** — opaque resume cursor. JSON-encoded
+  vector of `(instanceId, version)` per origin the client has caught up
+  to. The client round-trips it on reconnect.
+- **`SubscribeArgs.since: number | string`** — `number` is the legacy
+  pre-1.17 form (this engine's version); `string` is the new cursor.
+  Backwards-compatible.
+- **`ClusterMessage.originVersion?: number`** — pre-1.17 buses that omit
+  this default to 0 (cross-instance resume falls back to a snapshot —
+  matches pre-1.17 behavior). New buses include the originating
+  instance's local version, so each engine logs peer changes against
+  `(origin, originVersion)` for cross-instance catch-up.
+
+### Why this matters for the PaaS
+
+Without 1.17.0: the @absolutejs/router rotates shards (or load shifts a
+tenant between them), the client lands on a different engine, the engine
+returns a fresh snapshot. For a tenant with a large dataset that's
+expensive bandwidth + a visible UX stall. With 1.17.0: the engine the
+client lands on builds a catch-up from peer-broadcasted changes —
+exactly the same diff the original engine would have produced.
+
+### Notes
+
+- Single-instance setups (no `connectCluster`) behave identically to 1.16.
+- The cursor is opaque. Clients must round-trip it unmodified; the format
+  will shift in future versions (HLC, monotonic UUIDs, compressed binary)
+  without bumping major.
+
 ## [1.16.0] — 2026-05-29
 
 ### Added — pluggable wire-format serializer

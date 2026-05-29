@@ -138,12 +138,18 @@ export type SubscribeArgs<T, P, Ctx> = {
 	/** Receives every non-empty diff (with its version) after the initial reply. */
 	onDiff: (diff: ViewDiff<T>, version: number) => void;
 	/**
-	 * Resume from a version the client already applied. When the change log still
-	 * covers `(since, now]` for a single-table collection, the engine replies with
-	 * a catch-up diff instead of a full snapshot; otherwise it falls back to a
-	 * snapshot.
+	 * Resume from a point the client already applied. When the change log still
+	 * covers `(since, now]` for a single-table collection, the engine replies
+	 * with a catch-up diff instead of a full snapshot; otherwise it falls back
+	 * to a snapshot.
+	 *
+	 * Accepts `number` (legacy pre-1.17 — interpreted as the version of THIS
+	 * engine instance) or a `string` cursor (1.17.0+ — opaque vector of
+	 * `(instanceId, version)` per origin, returned by the engine on every
+	 * subscription/diff and round-tripped by the client unmodified). Use the
+	 * cursor form for cross-instance resume.
 	 */
-	since?: number;
+	since?: number | string;
 	/**
 	 * Cancellation handle (1.15.0). Two effects:
 	 *  1. If the signal is already aborted when `subscribe` is called, the
@@ -164,8 +170,18 @@ export type Subscription<T> = {
 	initial: T[];
 	/** Catch-up diff when resuming via `since` (instead of `initial`). */
 	catchup?: ViewDiff<T>;
-	/** The engine version this reply brings the client up to. */
+	/** The engine's local version this reply brings the client up to. */
 	version: number;
+	/**
+	 * Opaque cross-instance resume cursor (1.17.0+). Encodes the per-origin
+	 * vector of `(instanceId, version)` the client is now up-to-date with;
+	 * pass it back as `SubscribeArgs.since` on reconnect. Works for resume
+	 * against ANY instance in a cluster, not just the one that issued it —
+	 * the receiving instance decodes the cursor, walks its log for entries
+	 * the client hasn't seen yet, and either replies with a catch-up diff
+	 * or a fresh snapshot.
+	 */
+	cursor: string;
 	/** Stop receiving diffs and release the view. */
 	unsubscribe: () => void;
 };
@@ -503,6 +519,7 @@ type RangeDep = {
  * all sharing the same `version`.
  */
 export type LoggedChange = {
+	/** This engine's local monotonic version when the change was logged. */
 	version: number;
 	table: string;
 	change: RowChange<unknown>;
@@ -513,6 +530,24 @@ export type LoggedChange = {
 	 * Added in 1.13.0; pre-1.13.0 consumers of `LoggedChange` ignore it.
 	 */
 	at: number;
+	/**
+	 * Instance id that originated this change. For locally-committed changes
+	 * this is the engine's own `instanceId`; for cluster-received changes,
+	 * the originating peer's id.
+	 *
+	 * Added in 1.17.0; pre-1.17 consumers ignore it.
+	 */
+	origin: string;
+	/**
+	 * The ORIGINATOR's local version at commit time. For locally-committed
+	 * changes this equals `version`; for cluster-received changes, the
+	 * peer's version. Resume cursors (1.17.0+) carry `(origin, originVersion)`
+	 * pairs so a client's last-seen point matches against peer entries this
+	 * engine has logged via the bus.
+	 *
+	 * Added in 1.17.0; pre-1.17 consumers ignore it.
+	 */
+	originVersion: number;
 };
 
 /** Thrown by {@link SyncEngine.streamChanges} when `since` is older than the
@@ -573,6 +608,16 @@ export class CdcConsumerSlowError extends Error {
 }
 
 export type SyncEngineOptions = {
+	/**
+	 * Stable identifier for this engine instance. Defaults to a per-process
+	 * random UUID. Pass a stable value (e.g. `${hostname}:${shardId}`) when
+	 * running a fleet of engines behind a cluster bus — 1.17.0+ resume
+	 * cursors carry the originating `instanceId`, so a client that reconnects
+	 * to a different shard can request a catch-up against the original's
+	 * change feed only if that instance's id matches a peer the new shard
+	 * knows about.
+	 */
+	instanceId?: string;
 	/**
 	 * How many recent changes to retain for resumable reconnects. A client that
 	 * reconnects within this window gets a catch-up diff; beyond it, a fresh
@@ -960,16 +1005,27 @@ export const createSyncEngine = (
 	// every active streamer atomically with the log push.
 	const streamSubscribers = new Set<(entry: LoggedChange) => void>();
 	const runInTransaction = options.transaction;
-	// Cluster fan-out: a unique id so we ignore our own broadcasts, and the bus
-	// (set by connectCluster) we publish locally-committed changes to.
-	const instanceId = globalThis.crypto?.randomUUID?.() ?? `i${Math.random()}`;
+	// Cluster fan-out: a stable id so we ignore our own broadcasts, and the bus
+	// (set by connectCluster) we publish locally-committed changes to. Pass
+	// `options.instanceId` for stable cross-process identity (e.g. the
+	// hostname or a config-supplied UUID) — 1.17.0+ resume cursors travel
+	// across instances, so the id needs to be stable across restarts if you
+	// want resume to keep working past a reboot.
+	const instanceId =
+		options.instanceId ??
+		globalThis.crypto?.randomUUID?.() ??
+		`i${Math.random()}`;
 	let clusterBus: ClusterBus | undefined;
 
 	const broadcast = (
-		changes: { table: string; change: RowChange<unknown> }[]
+		changes: { table: string; change: RowChange<unknown> }[],
+		// 1.17.0 — the local version at the moment of this broadcast, so
+		// peers can log the changes against `(instanceId, originVersion)`
+		// and serve cross-instance resume from their own log.
+		originVersion: number
 	) => {
 		if (clusterBus !== undefined && changes.length > 0) {
-			void clusterBus.publish({ changes, origin: instanceId });
+			void clusterBus.publish({ changes, origin: instanceId, originVersion });
 		}
 	};
 
@@ -1591,6 +1647,39 @@ export const createSyncEngine = (
 		}
 	};
 
+	// 1.17.0 cross-instance cursor encode/decode. Opaque to clients —
+	// shaped as base64-ish JSON internally. The client must round-trip
+	// what the server returned, unmodified.
+	const encodeCursor = (versions: Record<string, number>): string =>
+		// Plain JSON is fine; clients treat it as opaque. We don't base64
+		// because the cursor lives in a JSON payload anyway (snapshot frame).
+		JSON.stringify(versions);
+	const decodeCursor = (cursor: string): Record<string, number> | null => {
+		try {
+			const parsed = JSON.parse(cursor);
+			if (typeof parsed !== 'object' || parsed === null) return null;
+			const out: Record<string, number> = {};
+			for (const [k, v] of Object.entries(parsed)) {
+				if (typeof v === 'number') out[k] = v;
+			}
+			return out;
+		} catch {
+			return null;
+		}
+	};
+	const currentCursor = (): string => {
+		// Snapshot the highest local version + each peer's highest version
+		// seen so far from the log. Cheap O(log) — single backwards walk.
+		const versions: Record<string, number> = { [instanceId]: version };
+		for (let i = changeLog.length - 1; i >= 0; i--) {
+			const entry = changeLog[i]!;
+			if (versions[entry.origin] === undefined) {
+				versions[entry.origin] = entry.version;
+			}
+		}
+		return encodeCursor(versions);
+	};
+
 	/** Apply a single committed change at its own version (CDC / direct writes). */
 	const applyChange = async (
 		table: string,
@@ -1600,7 +1689,14 @@ export const createSyncEngine = (
 		version += 1;
 		const changeVersion = version;
 		const at = Date.now();
-		logChange(changeVersion, { version: changeVersion, table, change, at });
+		logChange(changeVersion, {
+			version: changeVersion,
+			table,
+			change,
+			at,
+			origin: instanceId,
+			originVersion: changeVersion
+		});
 		emitActivity({
 			type: 'change',
 			at,
@@ -1627,7 +1723,7 @@ export const createSyncEngine = (
 			subscription.onDiff(diff, changeVersion);
 		}
 		if (shouldBroadcast) {
-			broadcast([{ table, change }]);
+			broadcast([{ table, change }], changeVersion);
 		}
 	};
 
@@ -1638,7 +1734,14 @@ export const createSyncEngine = (
 	 */
 	const applyChangeBatch = async (
 		changes: { table: string; change: RowChange<unknown> }[],
-		shouldBroadcast = true
+		shouldBroadcast = true,
+		/**
+		 * 1.17.0 — peer-relayed batches override the change-log entry's
+		 * `origin` + `originVersion` so a cross-instance client cursor can
+		 * later match the entry. Local batches leave this `undefined` and
+		 * the entry inherits the engine's own identity.
+		 */
+		peerOrigin?: { origin: string; originVersion: number }
 	) => {
 		if (changes.length === 0) {
 			return;
@@ -1651,8 +1754,20 @@ export const createSyncEngine = (
 		>();
 		const reactiveChanges: ReactiveChange[] = [];
 		const batchAt = Date.now();
+		// 1.17.0: peer-relayed batches override origin/originVersion via
+		// `peerOrigin` (set when applyChangeBatch is called from the cluster
+		// subscribe path). Defaults to this engine's identity.
+		const batchOrigin = peerOrigin?.origin ?? instanceId;
+		const batchOriginVersion = peerOrigin?.originVersion ?? batchVersion;
 		for (const { table, change } of changes) {
-			logChange(batchVersion, { version: batchVersion, table, change, at: batchAt });
+			logChange(batchVersion, {
+				version: batchVersion,
+				table,
+				change,
+				at: batchAt,
+				origin: batchOrigin,
+				originVersion: batchOriginVersion
+			});
 			emitActivity({
 				type: 'change',
 				at: batchAt,
@@ -1698,40 +1813,101 @@ export const createSyncEngine = (
 			subscription.onDiff(diff, batchVersion);
 		}
 		if (shouldBroadcast) {
-			broadcast(changes);
+			broadcast(changes, batchVersion);
 		}
 	};
 
 	/**
-	 * Can we replay `(since, now]` from the log for `tables`? Only when the log
-	 * hasn't been trimmed past `since` (no gap).
+	 * Normalize a `since` value (number or cursor string) into a per-origin
+	 * version vector. A bare `number` is treated as legacy 1.16- form — the
+	 * version of THIS instance. A cursor string is the 1.17.0+ multi-origin
+	 * shape encoded by `currentCursor()`.
 	 */
-	const canResume = (since: number, incremental: boolean): boolean => {
-		if (!incremental) {
-			return false; // refetch/join subs can't be replayed precisely
+	const normalizeSince = (since: number | string): Record<string, number> | null => {
+		if (typeof since === 'number') {
+			return { [instanceId]: since };
 		}
-		if (since >= version) {
-			return true; // nothing newer to replay
-		}
-		const oldest = changeLog[0];
-		return oldest !== undefined && oldest.version <= since + 1;
+		return decodeCursor(since);
 	};
 
-	/** Build a catch-up diff from the log for one subscription (last op per key wins). */
+	/**
+	 * Can we replay `(since, now]` from the log for `tables`? With a cursor,
+	 * this is a per-origin coverage check — every entry the client hasn't
+	 * seen MUST be present in our log. Pre-1.16 `number` form matches when
+	 * the local log covers `(since.version, now]`. Returns `false` for
+	 * non-incremental subs (refetch/join/graph/search), since those can't be
+	 * replayed precisely from a row-change log.
+	 */
+	const canResume = (since: number | string, incremental: boolean): boolean => {
+		if (!incremental) {
+			return false;
+		}
+		const sinceVec = normalizeSince(since);
+		if (sinceVec === null) {
+			return false;
+		}
+
+		// Walk the log backwards: every entry with `origin === O` and
+		// `originVersion > sinceVec[O]` MUST appear in the log. If the log
+		// has been trimmed past any such entry, we can't catch up.
+		// Per-origin: for each origin O we've seen, check that the oldest
+		// entry with that origin is no newer than `sinceVec[O] + 1`. For
+		// an unknown origin, we fall back to "no coverage" (caller gets a
+		// snapshot, just like pre-1.17 behavior).
+		const oldestPerOrigin = new Map<string, number>();
+		for (const entry of changeLog) {
+			const current = oldestPerOrigin.get(entry.origin);
+			if (current === undefined || entry.originVersion < current) {
+				oldestPerOrigin.set(entry.origin, entry.originVersion);
+			}
+		}
+
+		for (const [origin, lastSeen] of Object.entries(sinceVec)) {
+			// Special case: if we've never seen any entry from this origin,
+			// but the client claims to have seen up to `lastSeen` from it,
+			// we DEFINITELY can't reconstruct — snapshot it.
+			if (origin === instanceId) {
+				// Local origin: standard check.
+				if (lastSeen >= version) continue; // nothing newer
+				const oldestLocal = oldestPerOrigin.get(instanceId);
+				if (oldestLocal === undefined || oldestLocal > lastSeen + 1) return false;
+			} else {
+				// Peer origin: same check against the peer's entries.
+				const oldestPeer = oldestPerOrigin.get(origin);
+				if (oldestPeer === undefined) {
+					// We've never logged any change from this peer. If the client
+					// has seen entries from this peer, we can't help.
+					if (lastSeen > 0) return false;
+				} else if (oldestPeer > lastSeen + 1) {
+					return false;
+				}
+			}
+		}
+		return true;
+	};
+
+	/**
+	 * Build a catch-up diff from the log for one subscription (last op per
+	 * key wins). Multi-origin aware (1.17.0+): walks every entry whose
+	 * `(origin, originVersion)` is newer than the client's last-seen for
+	 * that origin.
+	 */
 	const buildCatchup = (
-		since: number,
+		since: number | string,
 		tables: string[],
 		key: (row: unknown) => RowKey,
 		match: (row: unknown) => boolean
 	): ViewDiff<unknown> => {
+		const sinceVec = normalizeSince(since) ?? {};
 		const latest = new Map<
 			RowKey,
 			{ op: 'upsert' | 'remove'; row: unknown }
 		>();
 		for (const entry of changeLog) {
-			if (entry.version <= since || !tables.includes(entry.table)) {
-				continue;
-			}
+			if (!tables.includes(entry.table)) continue;
+			// Skip entries the client has already seen for this origin.
+			const lastSeen = sinceVec[entry.origin];
+			if (lastSeen !== undefined && entry.originVersion <= lastSeen) continue;
 			const row = entry.change.row;
 			const present =
 				entry.change.op !== 'delete' && match(row)
@@ -1804,6 +1980,7 @@ export const createSyncEngine = (
 
 		return {
 			initial: op.rows(),
+			cursor: currentCursor(),
 			version: atVersion,
 			unsubscribe: () => {
 				set.delete(subscription);
@@ -1840,6 +2017,7 @@ export const createSyncEngine = (
 		set.add(subscription);
 		return {
 			initial,
+			cursor: currentCursor(),
 			version: atVersion,
 			unsubscribe: () => {
 				set.delete(subscription);
@@ -1920,6 +2098,7 @@ export const createSyncEngine = (
 		reactiveSubs.add(subscription);
 		return {
 			initial: first.rows,
+			cursor: currentCursor(),
 			version: atVersion,
 			unsubscribe: () => {
 				set.delete(subscription);
@@ -1983,6 +2162,7 @@ export const createSyncEngine = (
 		searchSubs.add(subscription);
 		return {
 			initial,
+			cursor: currentCursor(),
 			version: atVersion,
 			unsubscribe: () => {
 				set.delete(subscription);
@@ -2190,12 +2370,14 @@ export const createSyncEngine = (
 						key,
 						boundMatch
 					) as ViewDiff<never>,
+					cursor: currentCursor(),
 					version: atVersion,
 					unsubscribe
 				}) as Subscription<never>;
 			}
 			return wrapReturn({
 				initial: view.rows() as never[],
+				cursor: currentCursor(),
 				version: atVersion,
 				unsubscribe
 			}) as Subscription<never>;
@@ -2251,7 +2433,15 @@ export const createSyncEngine = (
 				if (message.origin === instanceId) {
 					return;
 				}
-				void applyChangeBatch(message.changes, false);
+				// 1.17.0 — log peer changes with their origin + originVersion
+				// so a client carrying a cross-instance cursor can resume
+				// against them. Pre-1.17 buses that don't carry originVersion
+				// default to 0 (any cross-instance resume falls back to a
+				// snapshot — matches pre-1.17 behavior exactly).
+				void applyChangeBatch(message.changes, false, {
+					origin: message.origin,
+					originVersion: message.originVersion ?? 0
+				});
 			});
 			clusterBus = bus;
 

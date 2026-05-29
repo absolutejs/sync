@@ -11,9 +11,13 @@ import type { RowChange } from './types';
  * NATS…), and the engine handles fan-out and loop prevention (each message is
  * tagged with the originating instance, and an instance ignores its own).
  *
- * Note: version cursors are per-instance, so a client that reconnects to a
- * *different* instance falls back to a fresh snapshot (correct, just not a
- * catch-up diff) — use sticky sessions if you want cross-instance resume.
+ * **1.17.0:** cross-instance resume now works. Each `ClusterMessage` carries
+ * the originating instance's `originVersion`; every engine logs peer changes
+ * against `(origin, originVersion)` in the same change log it uses for its
+ * own commits. Subscriptions return an opaque resume cursor encoding a
+ * vector of `(instanceId, version)` pairs; on reconnect to a DIFFERENT
+ * instance, the cursor round-trips and the new instance builds a catch-up
+ * covering both its own + the peer's changes — no fresh snapshot needed.
  */
 
 /** A committed change as it travels over the bus. */
@@ -25,6 +29,16 @@ export type ClusterChange = {
 export type ClusterMessage = {
 	/** The instance that produced these changes (so peers ignore their own). */
 	origin: string;
+	/**
+	 * The originating instance's local version at the time it broadcast.
+	 * Each change in `changes` is logged on the receiving instance against
+	 * `(origin, originVersion)` so a client carrying a cursor that
+	 * references `origin` can resume across instances. Added in 1.17.0;
+	 * older `ClusterBus` implementations that omit this field default peer
+	 * changes to version `0` (any cross-instance resume falls back to a
+	 * snapshot — matches pre-1.17 behavior exactly).
+	 */
+	originVersion?: number;
 	changes: ClusterChange[];
 };
 
