@@ -389,6 +389,36 @@ export type SyncEngine = {
 	 */
 	metrics: () => EngineMetrics;
 	/**
+	 * Capture the engine's change log + version as a serializable
+	 * {@link ChangeLogSnapshot} the host can persist (disk, S3, the cluster
+	 * bus) and restore on the next boot via
+	 * {@link SyncEngineOptions.initialChangeLog} or
+	 * {@link SyncEngine.importChangeLog}. The receiving engine MUST share this
+	 * engine's `instanceId` — otherwise the resume contract silently breaks.
+	 *
+	 * Cheap: the snapshot's `entries` is a shallow copy of the bounded log
+	 * (capped by `changeLogSize` / `changeLogRetainMs`). Call on a timer or on
+	 * graceful shutdown — both are fine; the snapshot is monotonic in commit
+	 * order, so a partial roll-forward (apply entries newer than the snapshot
+	 * from another source) is safe.
+	 *
+	 * Added in 1.19.0.
+	 */
+	exportChangeLog: () => ChangeLogSnapshot;
+	/**
+	 * Adopt a {@link ChangeLogSnapshot} into a running engine that has not yet
+	 * committed any local changes (its `version` is 0). The snapshot's
+	 * `instanceId` MUST match this engine's `instanceId`. Throws otherwise.
+	 *
+	 * Convenience for hosts that want to set up the engine, register surfaces,
+	 * AND THEN restore. Equivalent to passing the snapshot via
+	 * `createSyncEngine({ initialChangeLog })` if you have it at construction
+	 * time. Returns the number of entries imported.
+	 *
+	 * Added in 1.19.0.
+	 */
+	importChangeLog: (snapshot: ChangeLogSnapshot) => number;
+	/**
 	 * Subscribe to the live engine activity stream (changes, mutation outcomes,
 	 * subscribe/unsubscribe). Returns an unsubscribe. Powers the devtools feed.
 	 */
@@ -619,6 +649,36 @@ export class CdcConsumerSlowError extends Error {
 	}
 }
 
+/**
+ * Serializable snapshot of an engine's change log + monotonic version, returned
+ * by {@link SyncEngine.exportChangeLog} and consumed by
+ * {@link SyncEngineOptions.initialChangeLog} or
+ * {@link SyncEngine.importChangeLog}.
+ *
+ * The PaaS host persists this on shard rotation (every N seconds or on graceful
+ * shutdown) and hands it back to the replacement engine so resume cursors
+ * referencing this `instanceId` keep working past the restart. Bounded by the
+ * receiving engine's `changeLogSize` + `changeLogRetainMs` policies — entries
+ * that exceed either cap on import are trimmed exactly as if they had been
+ * logged live.
+ *
+ * Added in 1.19.0.
+ */
+export type ChangeLogSnapshot = {
+	/** The exporting engine's `instanceId`. Receiver MUST match. */
+	instanceId: string;
+	/** The exporting engine's monotonic version at snapshot time. */
+	version: number;
+	/** Every retained log entry, in commit order (oldest first). */
+	entries: ReadonlyArray<LoggedChange>;
+	/**
+	 * Optional version-stamp the host may use to compare snapshots without
+	 * deserializing the entries (e.g. for incremental persistence). Set to
+	 * `Date.now()` at export time. Receivers ignore this field.
+	 */
+	exportedAt?: number;
+};
+
 export type SyncEngineOptions = {
 	/**
 	 * Stable identifier for this engine instance. Defaults to a per-process
@@ -717,6 +777,22 @@ export type SyncEngineOptions = {
 	 * @see {@link BridgeFetchConfig}
 	 */
 	bridgeFetch?: BridgeFetchConfig;
+	/**
+	 * Seed the engine's change log on boot from a prior snapshot — produced by
+	 * {@link SyncEngine.exportChangeLog} on the previous instance, persisted by
+	 * the host across a shard reboot, then handed back here. Cursors that
+	 * referenced this engine's `instanceId` stay resumable past the restart
+	 * (provided their last-seen point still lives in the retained log).
+	 *
+	 * The snapshot's `instanceId` MUST match `options.instanceId` (otherwise
+	 * `createSyncEngine` throws — a wrong-id restore would silently break the
+	 * resume contract). Snapshot `version` becomes this engine's local
+	 * monotonic version; entries are inserted in version order. Subscribers,
+	 * permissions, schemas, schedules, packs, mutations, and the reactive
+	 * cache are NOT in the snapshot — re-register them as normal after
+	 * `createSyncEngine` returns. Added in 1.19.0.
+	 */
+	initialChangeLog?: ChangeLogSnapshot;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -1028,6 +1104,47 @@ export const createSyncEngine = (
 		globalThis.crypto?.randomUUID?.() ??
 		`i${Math.random()}`;
 	let clusterBus: ClusterBus | undefined;
+
+	// 1.19.0: optional boot-time restore from a prior engine's snapshot. Must
+	// happen BEFORE any local writes — we validate by checking version === 0
+	// inside importChangeLog and call it once here from the construction path.
+	const importChangeLog = (snapshot: ChangeLogSnapshot): number => {
+		if (version !== 0) {
+			throw new Error(
+				`[sync] importChangeLog: engine already has version ${version}; ` +
+					`restore must happen before any local writes commit.`
+			);
+		}
+		if (snapshot.instanceId !== instanceId) {
+			throw new Error(
+				`[sync] importChangeLog: snapshot instanceId "${snapshot.instanceId}" ` +
+					`does not match this engine's instanceId "${instanceId}". ` +
+					`Pass options.instanceId = "${snapshot.instanceId}" to createSyncEngine.`
+			);
+		}
+		// Adopt version + entries. logChange's retention sweeps still apply,
+		// so over-large snapshots get trimmed exactly like live logs would.
+		version = snapshot.version;
+		for (const entry of snapshot.entries) {
+			changeLog.push(entry);
+		}
+		// Apply count cap once after the bulk push (cheaper than per-entry).
+		while (changeLog.length > changeLogSize) {
+			changeLog.shift();
+		}
+		// Apply time-based retention to the imported tail.
+		if (changeLogRetainMs !== null && changeLogRetainMs > 0) {
+			const cutoff = Date.now() - changeLogRetainMs;
+			while (changeLog.length > 0 && changeLog[0]!.at < cutoff) {
+				changeLog.shift();
+			}
+		}
+		return snapshot.entries.length;
+	};
+
+	if (options.initialChangeLog !== undefined) {
+		importChangeLog(options.initialChangeLog);
+	}
 
 	const broadcast = (
 		changes: { table: string; change: RowChange<unknown> }[],
@@ -3039,6 +3156,15 @@ export const createSyncEngine = (
 				}))
 			};
 		},
+
+		exportChangeLog: () => ({
+			entries: changeLog.slice(),
+			exportedAt: Date.now(),
+			instanceId,
+			version
+		}),
+
+		importChangeLog,
 
 		metrics: () => {
 			const now = Date.now();

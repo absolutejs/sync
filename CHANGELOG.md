@@ -4,6 +4,52 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.19.0] — 2026-05-29
+
+### Added — change-log snapshot / restore for shard reboots
+
+The PaaS host needs a way to keep cursor resumability across a shard
+restart. 1.17.0/1.18.0 made the engine cluster-aware but tied resume
+to *peers being online*; if the engine that minted a cursor went down
+and a fresh process started in its place, the local-origin entries
+were gone and any cursor referencing them fell back to a fresh
+snapshot.
+
+1.19.0 lets the host persist the engine's bounded change log + version
+and restore it on the replacement process:
+
+- **`engine.exportChangeLog()`** returns a serializable
+  `ChangeLogSnapshot` (`instanceId`, `version`, `entries`,
+  `exportedAt`). Cheap — shallow slice of the bounded log; no
+  iteration, no permission walk, no view materialization. Call on a
+  timer (every 5s) or on `SIGTERM`; both are safe because the log is
+  monotonic in commit order.
+- **`engine.importChangeLog(snapshot)`** adopts the snapshot into a
+  fresh engine (`version === 0`). Throws if `version > 0` (a partial
+  restore would re-broadcast the snapshot's contents under the wrong
+  version, breaking cursors).
+- **`createSyncEngine({ initialChangeLog })`** convenience for the
+  boot path — restore happens once at construction before any
+  surfaces are registered. The engine's `instanceId` MUST match the
+  snapshot's `instanceId`, otherwise construction throws (a wrong-id
+  restore silently breaks the resume contract for every existing
+  cursor; failing loud is the right default).
+- Imported entries respect the receiving engine's `changeLogSize` and
+  `changeLogRetainMs` policies — over-large snapshots get trimmed
+  exactly as if the entries had been logged live.
+
+7 new tests in `tests/changeLogSnapshot.test.ts`:
+- export shape + shallow-copy semantics,
+- boot-time restore preserves cursor resumability across reboot,
+- restored engine continues to serve cluster resumes (peer entries
+  carry through),
+- refuses cross-instance restore (wrong `instanceId`),
+- refuses post-write import (`version > 0`),
+- trims oversized snapshots,
+- export is a snapshot (subsequent writes don't mutate it).
+
+Test count: 539 → 546 (+7).
+
 ## [1.18.2] — 2026-05-29
 
 ### Fixed — peer-only cursor resume
