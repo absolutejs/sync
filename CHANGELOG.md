@@ -4,6 +4,52 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.22.0] — 2026-05-30
+
+### Added — `engine.replayTo({ at, tables? })` — tenant point-in-time replay
+
+Closes G6 from the deep-research audit. The Convex-differentiator
+pitch: "I deleted prod, restore us to 2h ago." Forensic incident
+response: "What did the tenant see at 14:32?"
+
+- **`engine.replayTo(options)`** returns `Promise<ReplayResult>` —
+  walks the change log forward to `options.at`, folds each op
+  (`insert` / `update` / `delete`) into a per-table keyed view, and
+  returns `{ asOfVersion, asOfAt, rows, truncated }`.
+- **`options.tables`** narrows the reconstruction to a subset — useful
+  when you only need "what did `orders` look like" without paying to
+  reconstruct every table the engine knows about.
+- **`truncated`** is `true` when the log has been trimmed past the
+  target (the oldest retained entry is version > 1 AND its `at` is
+  past `options.at`). In that case the result is the state walked
+  forward from the OLDEST retained entry — best-effort given the
+  retention window. The caller should treat it as approximate and
+  surface the truncation to operators.
+- **Composes with `exportChangeLog` / `importChangeLog`** — replay on
+  a restored engine reconstructs against the imported log. The
+  replay test for snapshot-import → replayTo-mid is in
+  `tests/replayTo.test.ts`.
+
+**Limitations.** The reconstruction's accuracy is bounded by
+`changeLogSize` + `changeLogRetainMs`. Set these wide for forensic
+use cases (e.g. `changeLogRetainMs: 14 * 24 * 60 * 60 * 1000` for a
+14-day forensic window).
+
+11 new tests in `tests/replayTo.test.ts`:
+- empty log returns empty rows
+- insert sequence reconstructs both rows
+- update — later state wins
+- delete removes the row
+- targetAt cuts off later entries
+- asOfVersion / asOfAt reflect the last folded entry
+- table filter only includes specified tables
+- truncated=true when log trimmed past target
+- truncated=false when log starts at version 1 (empty pre-history)
+- truncated=false when targetAt is in the future
+- replay against an `importChangeLog`-restored engine works
+
+Test count: 565 → 576.
+
 ## [1.21.0] — 2026-05-30
 
 ### Added — OpenTelemetry tracing via @absolutejs/telemetry

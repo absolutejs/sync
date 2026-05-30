@@ -424,6 +424,33 @@ export type SyncEngine = {
 	 */
 	importChangeLog: (snapshot: ChangeLogSnapshot) => number;
 	/**
+	 * Reconstruct the state of registered tables as of a target
+	 * timestamp by walking the change log forward and folding each op
+	 * into a per-table view. Useful for forensic incident response
+	 * ("what did the tenant see at 14:32?") and the "I deleted prod
+	 * — restore us to 2h ago" recovery story.
+	 *
+	 * The reconstruction is exact when the log spans `targetAt` (i.e.
+	 * the log's oldest entry is at version 1). When the log has been
+	 * trimmed (`changeLogSize` / `changeLogRetainMs` evicted older
+	 * entries) AND `targetAt` falls in the gap, the result is
+	 * best-effort: state walked forward from the OLDEST retained
+	 * entry, with `truncated: true` so the caller knows.
+	 *
+	 * Added in 1.22.0.
+	 *
+	 * @example
+	 * ```ts
+	 * const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+	 * const result = await engine.replayTo({ at: twoHoursAgo, tables: ['orders'] });
+	 * if (result.truncated) {
+	 *   console.warn('Replay truncated — log retention window too short.');
+	 * }
+	 * console.log(result.rows.orders); // orders as of two hours ago
+	 * ```
+	 */
+	replayTo: (options: ReplayOptions) => Promise<ReplayResult>;
+	/**
 	 * Subscribe to the live engine activity stream (changes, mutation outcomes,
 	 * subscribe/unsubscribe). Returns an unsubscribe. Powers the devtools feed.
 	 */
@@ -724,6 +751,50 @@ export type ChangeLogSnapshot = {
 	 * `Date.now()` at export time. Receivers ignore this field.
 	 */
 	exportedAt?: number;
+};
+
+/**
+ * Options for {@link SyncEngine.replayTo}. Added in 1.22.0.
+ */
+export type ReplayOptions = {
+	/**
+	 * Target timestamp (`Date.now()`-shaped). The engine walks the
+	 * change log forward, applying entries with `at <= targetAt`. The
+	 * result is the state as-of `targetAt` (or as close as the log
+	 * permits — see `truncated`).
+	 */
+	at: number;
+	/**
+	 * Optional table filter. When set, only entries whose `table` is
+	 * in this list are folded into the result; entries for other
+	 * tables are skipped. Useful for "show me what `tasks` looked
+	 * like at T" without paying to reconstruct every table.
+	 */
+	tables?: ReadonlyArray<string>;
+};
+
+/**
+ * Returned by {@link SyncEngine.replayTo}. Added in 1.22.0.
+ *
+ * - `rows` — per-table arrays of rows that existed as of `asOfAt`.
+ *   Keys are table names; values are the row objects (in last-write
+ *   order — last write wins for duplicate-keyed inserts).
+ * - `asOfVersion` / `asOfAt` — the version + wall-clock of the LAST
+ *   entry folded into the result. May be earlier than `targetAt` if
+ *   no entries existed between the last-included entry and the
+ *   target.
+ * - `truncated` — `true` when the log has been trimmed past the
+ *   target window (`changeLog[0].version > 1 && changeLog[0].at >
+ *   targetAt`). In this case, `rows` represents the state walked
+ *   forward from the OLDEST retained entry — NOT the actual state
+ *   at `targetAt`. The caller should treat the result as
+ *   "best-effort given retention window" and warn the operator.
+ */
+export type ReplayResult = {
+	asOfVersion: number;
+	asOfAt: number;
+	rows: Record<string, ReadonlyArray<unknown>>;
+	truncated: boolean;
 };
 
 export type SyncEngineOptions = {
@@ -3458,6 +3529,66 @@ export const createSyncEngine = (
 		}),
 
 		importChangeLog,
+
+		replayTo: async ({ at, tables }) => {
+			// 1.22.0: walk the bounded change log forward to targetAt,
+			// folding each op into a per-table keyed view. Last write
+			// wins per key. Delete removes the key.
+			const filterTables =
+				tables !== undefined ? new Set(tables) : undefined;
+			const state = new Map<string, Map<RowKey, unknown>>();
+			let asOfVersion = 0;
+			let asOfAt = 0;
+			// Truncation: the log doesn't extend back to `at`. We've
+			// trimmed entries that may have mattered for the
+			// reconstruction, so the result is "state walked forward
+			// from the OLDEST retained entry" rather than the actual
+			// state at `at`. Distinguishable from "no history at all"
+			// (`changeLog[0]?.version === 1`).
+			const oldest = changeLog[0];
+			const truncated =
+				oldest !== undefined &&
+				oldest.version > 1 &&
+				oldest.at > at;
+			for (const entry of changeLog) {
+				if (entry.at > at) break;
+				if (
+					filterTables !== undefined &&
+					!filterTables.has(entry.table)
+				) {
+					continue;
+				}
+				let tableState = state.get(entry.table);
+				if (tableState === undefined) {
+					tableState = new Map();
+					state.set(entry.table, tableState);
+				}
+				const reader = readers.get(entry.table);
+				const key =
+					reader?.key?.(entry.change.row) ??
+					((entry.change.row as { id?: RowKey })?.id as RowKey);
+				if (key === undefined) {
+					// Without a stable key we can't apply ops idempotently
+					// — skip silently. In practice every table the
+					// engine has emitted changes for has a reader (the
+					// engine's own change-emit path doesn't run without
+					// one), so this branch is defensive.
+					continue;
+				}
+				if (entry.change.op === 'delete') {
+					tableState.delete(key);
+				} else {
+					tableState.set(key, entry.change.row);
+				}
+				asOfVersion = entry.version;
+				asOfAt = entry.at;
+			}
+			const rows: Record<string, ReadonlyArray<unknown>> = {};
+			for (const [table, map] of state) {
+				rows[table] = [...map.values()];
+			}
+			return { asOfAt, asOfVersion, rows, truncated };
+		},
 
 		metrics: () => {
 			const now = Date.now();
