@@ -1877,6 +1877,10 @@ export const createSyncEngine = (
 			}
 		}
 
+		// Log-wide watermark: the smallest version still in the log. If this
+		// is past `lastSeen + 1`, ANY entries between the cursor and oldestLogVersion
+		// were trimmed (regardless of origin).
+		const oldestLogVersion = changeLog[0]?.version;
 		for (const [origin, lastSeen] of Object.entries(sinceVec)) {
 			// Special case: if we've never seen any entry from this origin,
 			// but the client claims to have seen up to `lastSeen` from it,
@@ -1885,7 +1889,22 @@ export const createSyncEngine = (
 				// Local origin: standard check.
 				if (lastSeen >= version) continue; // nothing newer
 				const oldestLocal = oldestPerOrigin.get(instanceId);
-				if (oldestLocal === undefined || oldestLocal > lastSeen + 1) return false;
+				// If we have local entries, walk them: they must reach back
+				// to lastSeen + 1.
+				if (oldestLocal !== undefined) {
+					if (oldestLocal > lastSeen + 1) return false;
+					continue;
+				}
+				// No local entries — the version bumps since mint were all
+				// from peer broadcasts. Resume is safe ONLY if the log itself
+				// hasn't been trimmed past the mint point (otherwise some
+				// local entries existed but were retired).
+				if (
+					oldestLogVersion !== undefined &&
+					oldestLogVersion > lastSeen + 1
+				) {
+					return false;
+				}
 			} else {
 				// Peer origin: same check against the peer's entries.
 				const oldestPeer = oldestPerOrigin.get(origin);

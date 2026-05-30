@@ -4,6 +4,29 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.18.2] — 2026-05-29
+
+### Fixed — peer-only cursor resume
+
+- **Cross-instance cursor resume falsely fell back to snapshot when an
+  engine had only peer-broadcast entries in its log.** `canResume`'s
+  local-origin branch required `oldestPerOrigin.get(instanceId)` to be
+  defined when the cursor's `lastSeen < version` — but `version`
+  increments on peer-batch apply too, so an engine that had only
+  applied peer changes (and never made local writes since the cursor
+  was minted) hit `oldestLocal === undefined` and bailed out to a
+  fresh snapshot.
+
+  Fixed by relaxing the local-origin check: when there are no local
+  entries in the log, fall through to a log-wide watermark check (the
+  log's oldest version must not exceed `lastSeen + 1`). The peer-origin
+  walk still independently verifies that every peer's tail is present.
+
+  Surfaced by a mixed-inline+spill cross-instance resume test in
+  `@absolutejs/sync-bus-pg`'s integration suite — the second instance
+  had logged the peer's two changes but never written its own, and
+  the resume path snapshot'd instead of catching up.
+
 ## [1.18.1] — 2026-05-29
 
 ### Fixed
