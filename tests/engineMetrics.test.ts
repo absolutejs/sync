@@ -48,11 +48,15 @@ describe('engine.metrics()', () => {
 		const { engine } = makeEngine();
 		const subA = await engine.subscribe<Task>({
 			collection: 'tasks',
-			onDiff: () => {}
+			ctx: {},
+			onDiff: () => {},
+			params: undefined
 		});
 		const subB = await engine.subscribe<Task>({
 			collection: 'tasks',
-			onDiff: () => {}
+			ctx: {},
+			onDiff: () => {},
+			params: undefined
 		});
 		const after = engine.metrics();
 		expect(after.subscriptions.total).toBe(2);
@@ -68,11 +72,11 @@ describe('engine.metrics()', () => {
 	test('tracks change-log state and version', async () => {
 		const { engine } = makeEngine();
 		await engine.applyChange<Task>('tasks', {
-			op: 'upsert',
+			op: 'insert',
 			row: { id: 1, title: 'one' }
 		});
 		await engine.applyChange<Task>('tasks', {
-			op: 'upsert',
+			op: 'insert',
 			row: { id: 2, title: 'two' }
 		});
 		const snap = engine.metrics();
@@ -133,7 +137,7 @@ describe('changeLogRetainMs (time-based change-log retention)', () => {
 	test('retains entries within the window, drops older', async () => {
 		const { engine } = makeEngine({ changeLogRetainMs: 50 });
 		await engine.applyChange<Task>('tasks', {
-			op: 'upsert',
+			op: 'insert',
 			row: { id: 1, title: 'first' }
 		});
 		expect(engine.metrics().changeLog.entries).toBe(1);
@@ -142,7 +146,7 @@ describe('changeLogRetainMs (time-based change-log retention)', () => {
 		// per-entry sweep runs on logChange; the old entry should fall off.
 		await new Promise((resolve) => setTimeout(resolve, 80));
 		await engine.applyChange<Task>('tasks', {
-			op: 'upsert',
+			op: 'insert',
 			row: { id: 2, title: 'second' }
 		});
 		const snap = engine.metrics();
@@ -155,7 +159,7 @@ describe('changeLogRetainMs (time-based change-log retention)', () => {
 		const { engine } = makeEngine();
 		for (let i = 1; i <= 5; i++) {
 			await engine.applyChange<Task>('tasks', {
-				op: 'upsert',
+				op: 'insert',
 				row: { id: i, title: `t-${i}` }
 			});
 		}
@@ -172,7 +176,7 @@ describe('changeLogRetainMs (time-based change-log retention)', () => {
 		});
 		for (let i = 1; i <= 5; i++) {
 			await engine.applyChange<Task>('tasks', {
-				op: 'upsert',
+				op: 'insert',
 				row: { id: i, title: `t-${i}` }
 			});
 		}
@@ -186,7 +190,7 @@ describe('LoggedChange.at (1.13.0)', () => {
 	test('exposed on streamChanges entries', async () => {
 		const { engine } = makeEngine();
 		await engine.applyChange<Task>('tasks', {
-			op: 'upsert',
+			op: 'insert',
 			row: { id: 1, title: 'x' }
 		});
 

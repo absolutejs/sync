@@ -52,7 +52,11 @@ describe('@absolutejs/sync/code-mode', () => {
 		const result = await hostTools.demo_do!.handler({ note: 'hello' });
 		expect(result).toEqual({ id: 'note-hello' });
 		expect(seen).toEqual([
-			{ ctx: { userId: 'alice' }, name: 'demo:do', payload: { note: 'hello' } }
+			{
+				ctx: { userId: 'alice' },
+				name: 'demo:do',
+				payload: { note: 'hello' }
+			}
 		]);
 	});
 

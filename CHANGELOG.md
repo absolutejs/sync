@@ -4,6 +4,18 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.18.1] — 2026-05-29
+
+### Fixed
+
+- **Stale `dist/engine/cluster.d.ts`** missing the 1.17.0
+  `ClusterMessage.originVersion` field. The source had it; the published
+  type bundle didn't because the build that shipped 1.17.0 / 1.18.0
+  carried a cached `.d.ts` from an earlier build. Downstream `ClusterBus`
+  adapters (e.g. `@absolutejs/sync-bus-pg`) saw type errors when
+  populating `originVersion`. Rebuilt + republished — no source-code
+  changes vs 1.18.0.
+
 ## [1.18.0] — 2026-05-29
 
 ### Added — client-side cursor plumbing

@@ -521,9 +521,10 @@ describe('sandboxed mutations', () => {
 				name: 'payments:charge',
 				sandbox: {
 					unsafeHost: {
-						chargeStripe: (
-							input: { amount: number; token: string }
-						) => {
+						chargeStripe: (input: {
+							amount: number;
+							token: string;
+						}) => {
 							seen.push(input);
 							return { id: `ch_${input.amount}`, ok: true };
 						}
