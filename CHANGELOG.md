@@ -4,6 +4,38 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.23.0] — 2026-05-30
+
+### Added — `syncDevtools` point-in-time replay surface
+
+Wires the 1.22.0 `engine.replayTo()` API into the live devtools
+dashboard. Operators get a clickable surface to reconstruct tenant
+state at a target timestamp without writing code.
+
+- **`GET <path>/replay?at=<ms>&tables=<csv>`** — JSON endpoint that
+  parses the query, calls `engine.replayTo({ at, tables })`, and
+  returns the full `ReplayResult`. Returns `400` on missing/malformed
+  `at`; `500` (with `{ error }` body) on engine throws.
+- **Dashboard "Point-in-time replay" section.** New panel with a
+  `datetime-local` picker (defaults to 1 hour ago), a "tables" CSV
+  filter, a "max rows per table" cap (1–500), and Replay / Now
+  buttons. Results render with `asOfVersion`, formatted `asOfAt`, a
+  truncated-warning banner when `truncated: true`, and a per-table
+  collapsible pane (row count + first N rows in formatted JSON).
+- **Composes with custom mount path.** `syncDevtools({ engine, path:
+  '/_admin/sync' })` exposes the replay endpoint at
+  `/_admin/sync/replay` automatically.
+
+5 new tests in `tests/devtoolsReplay.test.ts`:
+- dashboard HTML serves at the configured path and references the
+  replay/stream URLs
+- replay returns JSON with reconstructed rows at a timestamp
+- `tables` CSV filter narrows the result
+- missing or malformed `at` returns 400
+- custom mount path threads through to the replay endpoint
+
+Test count: 576 → 581.
+
 ## [1.22.0] — 2026-05-30
 
 ### Added — `engine.replayTo({ at, tables? })` — tenant point-in-time replay
