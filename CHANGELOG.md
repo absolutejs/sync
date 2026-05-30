@@ -4,6 +4,51 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.20.0] — 2026-05-29
+
+### Added — mutation backpressure (`mutationConcurrency` + queue cap)
+
+A single tenant flooding `runMutation` could otherwise drive unbounded
+per-call memory growth (actions buffers, retry timers, queued sandbox
+invocations). 1.20.0 adds an optional FIFO semaphore at the mutation
+entry point so the PaaS host can bound throughput per engine:
+
+- **`SyncEngineOptions.mutationConcurrency: number`** — max in-flight
+  mutations (`runMutation` + `runMutations`). Calls beyond the cap
+  queue in arrival order and run as slots free up. Unset = unbounded
+  (matches pre-1.20 behavior).
+- **`SyncEngineOptions.mutationQueueLimit: number`** — bound on the
+  waiting queue. Excess calls throw `MutationQueueOverflowError`
+  immediately so the gateway can return a clean 429 instead of holding
+  the request open. Defaults to unbounded queue.
+- **`MutationQueueOverflowError`** (new export) — typed error with
+  a `queueLimit` field.
+- **`engine.metrics().mutations.queued`** — current queue depth,
+  surfaced for the host's per-tenant tier monitoring.
+
+Semaphore semantics:
+- A `runMutations` batch counts as **one** slot, regardless of how
+  many mutations the batch contains.
+- Authorization failures don't burn a slot (the gate runs after
+  `authorize`).
+- The slot is released in a `finally` so a thrown mutation, a
+  retries-exhausted error, an aborted transaction, etc. all properly
+  release.
+- Increment is atomic with the slot grant (synchronous within
+  `acquireMutationSlot`) so concurrent calls can't both pass the
+  capacity check.
+
+7 new tests in `tests/mutationConcurrency.test.ts`:
+- cap = 2 holds the line at 2 in-flight with 3 queued,
+- queueLimit overflow rejects immediately,
+- no-setting case is a no-op (back-compat),
+- queue count returns to 0 on mutation failure,
+- FIFO arrival order preserved through the queue,
+- `runMutations` batch = 1 slot,
+- unauthorized doesn't consume a slot.
+
+Test count: 546 → 553.
+
 ## [1.19.0] — 2026-05-29
 
 ### Added — change-log snapshot / restore for shard reboots

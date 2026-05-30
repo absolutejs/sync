@@ -94,6 +94,11 @@ export type EngineMetrics = {
 		retried: number;
 		/** Currently running, not yet committed or failed. */
 		inFlight: number;
+		/**
+		 * Waiting in the `mutationConcurrency` queue. Always `0` when
+		 * `mutationConcurrency` is unset (no semaphore). Added in 1.20.0.
+		 */
+		queued: number;
 	};
 	schedules: {
 		registered: number;

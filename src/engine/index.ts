@@ -142,16 +142,19 @@ export {
 	CdcConsumerSlowError,
 	createSyncEngine,
 	MissedChangesError,
+	MutationQueueOverflowError,
 	SchemaError,
 	UnauthorizedError
 } from './syncEngine';
 export type {
+	ChangeLogSnapshot,
 	CrdtFields,
 	LoggedChange,
 	StreamChangesOptions,
 	SubscribeArgs,
 	Subscription,
-	SyncEngine
+	SyncEngine,
+	SyncEngineOptions
 } from './syncEngine';
 
 export { syncCdc } from './cdc';

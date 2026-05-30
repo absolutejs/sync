@@ -650,6 +650,26 @@ export class CdcConsumerSlowError extends Error {
 }
 
 /**
+ * Thrown by `runMutation` / `runMutations` when `mutationConcurrency` is
+ * saturated AND the waiting queue is already at `mutationQueueLimit`. The
+ * caller sees this immediately (no queue time) so the host can shed load
+ * with a clean 429 instead of letting the queue grow unboundedly. Added
+ * in 1.20.0.
+ */
+export class MutationQueueOverflowError extends Error {
+	readonly queueLimit: number;
+	constructor(queueLimit: number) {
+		super(
+			`Mutation queue overflowed (limit ${queueLimit}); the engine is at ` +
+				`its mutationConcurrency cap and the waiting queue is full. ` +
+				`Retry later or shed load at the gateway.`
+		);
+		this.name = 'MutationQueueOverflowError';
+		this.queueLimit = queueLimit;
+	}
+}
+
+/**
  * Serializable snapshot of an engine's change log + monotonic version, returned
  * by {@link SyncEngine.exportChangeLog} and consumed by
  * {@link SyncEngineOptions.initialChangeLog} or
@@ -793,6 +813,35 @@ export type SyncEngineOptions = {
 	 * `createSyncEngine` returns. Added in 1.19.0.
 	 */
 	initialChangeLog?: ChangeLogSnapshot;
+	/**
+	 * Maximum concurrent in-flight mutations (`runMutation` + `runMutations`).
+	 * Calls beyond the limit wait in a FIFO queue and run as slots free up;
+	 * `engine.metrics().mutations.queued` surfaces the queue depth.
+	 *
+	 * A single tenant flooding `runMutation` can otherwise drive unbounded
+	 * memory growth (per-mutation `actions` buffers, retry timers, sandbox
+	 * invocations queued against the isolate pool). Set this to a value
+	 * appropriate for the host's tenant tier — e.g. `32` for a free tier,
+	 * `256` for paid. Without this option the engine is unbounded
+	 * (matching pre-1.20 behavior).
+	 *
+	 * Sandboxed mutations are gated by the same semaphore. If you need
+	 * finer-grained control (sandbox-only throttling), see
+	 * `@absolutejs/isolated-jsc`'s pool size — that's the lower layer.
+	 *
+	 * Added in 1.20.0.
+	 */
+	mutationConcurrency?: number;
+	/**
+	 * Cap on the queue of waiting mutations once `mutationConcurrency` is
+	 * saturated. Calls beyond this cap throw {@link MutationQueueOverflowError}
+	 * immediately instead of queueing — the host can surface a clean 429 or
+	 * apply a tenant-specific shed policy. Defaults to unbounded (queue
+	 * never rejects). Only meaningful when `mutationConcurrency` is set.
+	 *
+	 * Added in 1.20.0.
+	 */
+	mutationQueueLimit?: number;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -1032,6 +1081,55 @@ export const createSyncEngine = (
 	let mutationsFailed = 0;
 	let mutationsRetried = 0;
 	let mutationsInFlight = 0;
+
+	// 1.20.0: optional FIFO semaphore gating mutation entry. Capacity is
+	// `mutationConcurrency`; waiters queue with optional `mutationQueueLimit`
+	// rejection. New arrivals that find ANY queued waiter also queue (FIFO
+	// preservation), so a steady arrival rate can't starve an early waiter.
+	const mutationWaiters: (() => void)[] = [];
+	let mutationsQueued = 0;
+
+	const acquireMutationSlot = async (): Promise<void> => {
+		const limit = options.mutationConcurrency;
+		if (limit === undefined) {
+			// No semaphore — still bump the metric so `inFlight` is
+			// always accurate, but skip all the queue plumbing.
+			mutationsInFlight += 1;
+			return;
+		}
+		// FIFO: if a slot is open AND no waiters are queued, take it
+		// synchronously. The increment is part of the same synchronous
+		// step as the check, so two arrivals can't both pass when only
+		// one slot remains.
+		if (mutationsInFlight < limit && mutationWaiters.length === 0) {
+			mutationsInFlight += 1;
+			return;
+		}
+		// Queue, or reject if the queue is also capped.
+		const queueLimit = options.mutationQueueLimit;
+		if (queueLimit !== undefined && mutationsQueued >= queueLimit) {
+			throw new MutationQueueOverflowError(queueLimit);
+		}
+		mutationsQueued += 1;
+		try {
+			await new Promise<void>((resolve) => {
+				mutationWaiters.push(resolve);
+			});
+		} finally {
+			mutationsQueued -= 1;
+		}
+		// Wake means a slot just opened up FOR US (`releaseMutationSlot`
+		// only resolves one waiter per release). Claim it now — atomic
+		// with the wake step.
+		mutationsInFlight += 1;
+	};
+
+	const releaseMutationSlot = (): void => {
+		mutationsInFlight -= 1;
+		if (options.mutationConcurrency === undefined) return;
+		const next = mutationWaiters.shift();
+		if (next !== undefined) next();
+	};
 
 	// Cross-client reactive query cache (1.3+). Keyed by stableSubKey, holds
 	// the result + read set so a fresh subscribe with the same key reuses the
@@ -2707,6 +2805,11 @@ export const createSyncEngine = (
 					throw new UnauthorizedError(`run mutation "${name}"`);
 				}
 			}
+			// 1.20.0: gate at the entry. Wait if `mutationConcurrency`
+			// is saturated; throw `MutationQueueOverflowError` if the
+			// queue is also capped and full. Authorization fails before
+			// the gate so a denied call never burns a slot.
+			await acquireMutationSlot();
 
 			// Pick the handler shape: in-process function or sandboxed string
 			// source (runs inside @absolutejs/isolated-jsc). Sandbox runner is
@@ -2752,7 +2855,6 @@ export const createSyncEngine = (
 			// runInTransaction wraps each individual attempt.
 			let lastError: unknown;
 			let attemptsMade = 0;
-			mutationsInFlight += 1;
 			try {
 			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 				attemptsMade = attempt;
@@ -2828,7 +2930,7 @@ export const createSyncEngine = (
 			}
 			throw lastError;
 			} finally {
-				mutationsInFlight -= 1;
+				releaseMutationSlot();
 			}
 		},
 
@@ -2849,6 +2951,9 @@ export const createSyncEngine = (
 				}
 				return { args: spec.args, mutation, name: spec.name };
 			});
+			// 1.20.0: the whole batch is one slot. Resolve names BEFORE
+			// the gate so an unknown-mutation typo never queues.
+			await acquireMutationSlot();
 
 			const runBatch = async (tx: unknown) => {
 				const results: unknown[] = [];
@@ -2912,6 +3017,8 @@ export const createSyncEngine = (
 					status: 'error'
 				});
 				throw error;
+			} finally {
+				releaseMutationSlot();
 			}
 		},
 
@@ -3188,6 +3295,7 @@ export const createSyncEngine = (
 					completed: mutationsCompleted,
 					failed: mutationsFailed,
 					inFlight: mutationsInFlight,
+					queued: mutationsQueued,
 					retried: mutationsRetried
 				},
 				reactiveCache: {
