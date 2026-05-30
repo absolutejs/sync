@@ -144,6 +144,7 @@ export {
 	MissedChangesError,
 	MutationQueueOverflowError,
 	SchemaError,
+	SubscriptionLimitError,
 	UnauthorizedError
 } from './syncEngine';
 export type {

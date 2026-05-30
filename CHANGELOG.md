@@ -4,6 +4,44 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.20.1] — 2026-05-29
+
+### Added — subscription backpressure (`subscriptionLimit`)
+
+Symmetric to 1.20.0's mutation backpressure on the read side. A single
+tenant opening thousands of subscriptions would otherwise exhaust the
+engine's per-subscription bookkeeping (`active` Maps, `tableIndex`,
+the reactive cache, per-row diff computation). 1.20.1 adds an optional
+per-tenant cap at `engine.subscribe`:
+
+- **`SyncEngineOptions.subscriptionLimit`** —
+  `{ max: number; key: (ctx, args) => string | undefined }`.
+  Returning a string from `key()` enrolls the call in the cap;
+  returning `undefined` exempts it (use for internal / system
+  subscriptions that shouldn't count against any tenant).
+- **`SubscriptionLimitError`** (new export) — typed error with
+  `tenantKey`, `limit`, `active` fields. Thrown BEFORE authorize,
+  hydrate, or any subscription state allocation, so a rejected call
+  leaks nothing.
+- **`engine.metrics().subscriptions.byTenant`** — current per-key
+  tally. Empty `{}` when no `subscriptionLimit` is configured.
+- The slot is released by the wrapped `unsubscribe`, which is
+  idempotent (calling twice is a no-op). Failed `authorize`,
+  schema errors, mid-flight aborts, etc. release the slot before
+  re-throwing — no leak by one per failed call.
+- AbortSignal-driven unsubscribe also releases the slot.
+
+7 new tests in `tests/subscriptionLimit.test.ts`:
+- per-tenant cap holds,
+- different keys count separately,
+- undefined key skips the cap,
+- unset option leaves `byTenant` empty (back-compat),
+- failed authorize releases the slot,
+- `SubscriptionLimitError` carries diagnostic fields,
+- abort-triggered unsubscribe releases the slot and is idempotent.
+
+Test count: 553 → 560.
+
 ## [1.20.0] — 2026-05-29
 
 ### Added — mutation backpressure (`mutationConcurrency` + queue cap)

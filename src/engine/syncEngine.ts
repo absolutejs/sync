@@ -670,6 +670,28 @@ export class MutationQueueOverflowError extends Error {
 }
 
 /**
+ * Thrown by `engine.subscribe` when the calling tenant's active-subscription
+ * count is already at the configured `subscriptionLimit.max`. The caller sees
+ * this immediately — BEFORE authorize, hydrate, or any subscription state
+ * allocation — so a rejected call leaks nothing. Added in 1.20.1.
+ */
+export class SubscriptionLimitError extends Error {
+	readonly tenantKey: string;
+	readonly limit: number;
+	readonly active: number;
+	constructor(tenantKey: string, limit: number, active: number) {
+		super(
+			`Tenant "${tenantKey}" is at the subscription cap ` +
+				`(${active}/${limit}). Close an existing subscription before opening another.`
+		);
+		this.name = 'SubscriptionLimitError';
+		this.tenantKey = tenantKey;
+		this.limit = limit;
+		this.active = active;
+	}
+}
+
+/**
  * Serializable snapshot of an engine's change log + monotonic version, returned
  * by {@link SyncEngine.exportChangeLog} and consumed by
  * {@link SyncEngineOptions.initialChangeLog} or
@@ -842,6 +864,28 @@ export type SyncEngineOptions = {
 	 * Added in 1.20.0.
 	 */
 	mutationQueueLimit?: number;
+	/**
+	 * Per-tenant active-subscription cap. Symmetric to
+	 * {@link SyncEngineOptions.mutationConcurrency} on the read side: a
+	 * single tenant opening thousands of subscriptions would otherwise
+	 * exhaust the engine's per-subscription bookkeeping
+	 * (`active`/`tableIndex` Maps, the reactive cache, per-row diff
+	 * computation cost).
+	 *
+	 * `key` derives a tenant identifier from `(ctx, args)`; returning
+	 * `undefined` skips the cap for that call (e.g. internal/system
+	 * subscriptions). When the active count for a key reaches `max`, the
+	 * next `subscribe` throws {@link SubscriptionLimitError} BEFORE any
+	 * authorize, hydrate, or state allocation — so a denied call leaks
+	 * nothing.
+	 *
+	 * Active counts are surfaced through `engine.metrics().subscriptions.byTenant`
+	 * for tier monitoring. Added in 1.20.1.
+	 */
+	subscriptionLimit?: {
+		max: number;
+		key: (ctx: unknown, args: { collection: string }) => string | undefined;
+	};
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -1129,6 +1173,38 @@ export const createSyncEngine = (
 		if (options.mutationConcurrency === undefined) return;
 		const next = mutationWaiters.shift();
 		if (next !== undefined) next();
+	};
+
+	// 1.20.1: per-tenant subscription cap. Active count keyed by the
+	// host-supplied `subscriptionLimit.key(ctx, args)`. `undefined` from
+	// `key()` means "exempt this call from the cap" — internal / system
+	// subscriptions can skip the bookkeeping entirely.
+	const subscriptionsByTenant = new Map<string, number>();
+
+	const acquireSubscriptionSlot = (
+		ctx: unknown,
+		args: { collection: string }
+	): string | undefined => {
+		const cap = options.subscriptionLimit;
+		if (cap === undefined) return undefined;
+		const tenantKey = cap.key(ctx, args);
+		if (tenantKey === undefined) return undefined;
+		const active = subscriptionsByTenant.get(tenantKey) ?? 0;
+		if (active >= cap.max) {
+			throw new SubscriptionLimitError(tenantKey, cap.max, active);
+		}
+		subscriptionsByTenant.set(tenantKey, active + 1);
+		return tenantKey;
+	};
+
+	const releaseSubscriptionSlot = (tenantKey: string | undefined): void => {
+		if (tenantKey === undefined) return;
+		const active = subscriptionsByTenant.get(tenantKey);
+		if (active === undefined || active <= 1) {
+			subscriptionsByTenant.delete(tenantKey);
+		} else {
+			subscriptionsByTenant.set(tenantKey, active - 1);
+		}
 	};
 
 	// Cross-client reactive query cache (1.3+). Keyed by stableSubKey, holds
@@ -2458,16 +2534,37 @@ export const createSyncEngine = (
 				throw new Error(`Unknown collection "${collection}"`);
 			}
 
+			// (1.20.1) Per-tenant cap. Acquired BEFORE authorize/hydrate/any
+			// state allocation. If subscribe throws between here and the
+			// successful return (auth rejection, abort, schema error, etc.)
+			// we release in the `catch` below — otherwise the wrapped
+			// `unsubscribe` is the release path.
+			const tenantSlot = acquireSubscriptionSlot(ctx, { collection });
+			let slotHandedOff = false;
+			try {
+
 			const typedOnDiff = onDiff as OnDiff;
 			const subscribeSet = subsFor(collection);
 
 			// Wrap the eventual return so we (a) re-check signal after the
-			// async setup (catches mid-flight aborts), and (b) auto-call
-			// unsubscribe when signal fires after the subscription is live.
+			// async setup (catches mid-flight aborts), (b) auto-call
+			// unsubscribe when signal fires after the subscription is live,
+			// and (c) decrement the tenant's active-sub count idempotently
+			// when unsubscribe runs.
 			const wrapReturn = <T>(sub: Subscription<T>): Subscription<T> => {
 				checkAborted(signal);
-				linkAbortToUnsubscribe(signal, sub.unsubscribe);
-				return sub;
+				const innerUnsubscribe = sub.unsubscribe;
+				let released = false;
+				const wrappedUnsubscribe = (): void => {
+					if (released) return;
+					released = true;
+					releaseSubscriptionSlot(tenantSlot);
+					innerUnsubscribe();
+				};
+				const wrapped = { ...sub, unsubscribe: wrappedUnsubscribe };
+				linkAbortToUnsubscribe(signal, wrappedUnsubscribe);
+				slotHandedOff = true;
+				return wrapped;
 			};
 
 			const registeredKind = (registered as { kind?: string }).kind;
@@ -2630,6 +2727,14 @@ export const createSyncEngine = (
 				version: atVersion,
 				unsubscribe
 			}) as Subscription<never>;
+			} catch (error) {
+				// (1.20.1) If anything between acquire and the successful
+				// return throws (authorize, abort, schema error, etc.),
+				// release the tenant slot so the cap doesn't leak by one
+				// per failed call.
+				if (!slotHandedOff) releaseSubscriptionSlot(tenantSlot);
+				throw error;
+			}
 		},
 
 		hydrate: async (collection, params, ctx, options) => {
@@ -3307,6 +3412,7 @@ export const createSyncEngine = (
 				},
 				subscriptions: {
 					byCollection,
+					byTenant: Object.fromEntries(subscriptionsByTenant),
 					total: totalSubscriptions
 				},
 				uptimeMs: now - engineStartedAt,

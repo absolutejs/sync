@@ -80,6 +80,14 @@ export type EngineMetrics = {
 		total: number;
 		/** Per-collection breakdown — the values sum to `total`. */
 		byCollection: Record<string, number>;
+		/**
+		 * Per-tenant tally — populated only when
+		 * `SyncEngineOptions.subscriptionLimit` is set; otherwise `{}`. The
+		 * key is whatever `subscriptionLimit.key(ctx, args)` returns; the
+		 * value is the count of active subscriptions for that key. Added
+		 * in 1.20.1.
+		 */
+		byTenant: Record<string, number>;
 	};
 	reactiveCache: {
 		entries: number;
