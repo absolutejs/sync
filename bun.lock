@@ -4,9 +4,13 @@
   "workspaces": {
     "": {
       "name": "@absolutejs/live",
+      "dependencies": {
+        "@absolutejs/telemetry": "^0.0.2",
+      },
       "devDependencies": {
         "@absolutejs/absolute": "^0.19.0-beta.1051",
         "@absolutejs/isolated-jsc": "0.8.0",
+        "@absolutejs/telemetry": "^0.0.2",
         "@angular/core": "^21.0.0",
         "@elysiajs/cron": "^1.4.2",
         "@elysiajs/eden": "^1.4.9",
@@ -64,6 +68,8 @@
     "@absolutejs/native-windows-arm64": ["@absolutejs/native-windows-arm64@0.19.0-beta.1008", "", { "os": "win32", "cpu": "arm64" }, "sha512-9jmCGG900P1WIKBZf5BwfVrReHkW5g7dxmx05H8llANQry9+kQYHNavvhZOuyYvymAa5DFOaIVHGg7opBi/MDg=="],
 
     "@absolutejs/native-windows-x64": ["@absolutejs/native-windows-x64@0.19.0-beta.1008", "", { "os": "win32", "cpu": "x64" }, "sha512-mXIL6AzV0gznwXz6gF+dtT4DIwxKMriF+WYxcjAPlf4xWD0S3ZS8jafHwQXi0RJn0pIX4TIIOhRz0JnVlka3zA=="],
+
+    "@absolutejs/telemetry": ["@absolutejs/telemetry@0.0.2", "", {}, "sha512-MwbcKNZaY8ByzZ7HKergCmGkc219A5cQfn0lyljmWMYxdXecuXp2I5JkCu28K52vgbC0z1b03grVNHQgBeg5sQ=="],
 
     "@angular/core": ["@angular/core@21.2.14", "", { "dependencies": { "tslib": "^2.3.0" }, "peerDependencies": { "@angular/compiler": "21.2.14", "rxjs": "^6.5.3 || ^7.4.0", "zone.js": "~0.15.0 || ~0.16.0" }, "optionalPeers": ["@angular/compiler", "zone.js"] }, "sha512-Z1Ivjh7L2lT//8LA7vQ3tj7Rg6wl2XRA5kPSAukgn8u0Yu0XxG8NE8KG0Eypb3v9CEcbwATwpgnxzbJFZ8TFcw=="],
 

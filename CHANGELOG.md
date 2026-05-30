@@ -4,6 +4,41 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.21.0] — 2026-05-30
+
+### Added — OpenTelemetry tracing via @absolutejs/telemetry
+
+Closes G2 from the deep-research audit for the sync engine. Customer
+SREs investigating a slow tenant can now follow one trace from the
+HTTP request span (via `@elysiajs/opentelemetry`) down into individual
+sync mutations and subscriptions.
+
+- **`SyncEngineOptions.tracerProvider?: TracerProvider`** — any
+  `@opentelemetry/api`-compatible `TracerProvider`. When supplied,
+  `engine.runMutation` and `engine.subscribe` emit named spans with
+  `ABS_ATTRS` semantic attributes (`abs.engine.id`, `abs.collection`,
+  `abs.mutation`). When omitted, all tracing is a zero-allocation
+  noop — existing call sites pay nothing.
+- **`sync.runMutation` span** wraps the entire mutation lifecycle
+  including retries, the sandboxed-handler path, and the
+  `applyChangeBatch` commit. Attributes: `abs.engine.id`,
+  `abs.mutation`. Errors recorded via `span.recordException` +
+  `ERROR` status.
+- **`sync.subscribe` span** wraps the setup cost (authorize / hydrate
+  / view materialization). The Subscription lives past this span ending
+  — the ongoing reactive lifetime isn't a single span (would be
+  unbounded).
+- **`@absolutejs/telemetry` is a regular dep, not a peer.** Tiny
+  (~250 LOC, zero transitive deps); bundling it avoids consumer-side
+  peer-dep gymnastics. The dep adds no runtime cost when `tracerProvider`
+  is undefined — the noop tracer is a singleton.
+
+5 new tests in `tests/tracing.test.ts`: captures spans through a mock
+`TracerProvider`, verifies the right names + ABS_ATTRS + lifecycle
+(success path, throw path, both for `runMutation` and `subscribe`).
+
+Test count: 560 → 565.
+
 ## [1.20.1] — 2026-05-29
 
 ### Added — subscription backpressure (`subscriptionLimit`)

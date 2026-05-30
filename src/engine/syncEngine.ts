@@ -1,3 +1,8 @@
+import {
+	ABS_ATTRS,
+	tracerOrNoop,
+	type TracerProvider as TelemetryTracerProvider
+} from '@absolutejs/telemetry';
 import type {
 	CollectionContext,
 	CollectionDefinition,
@@ -886,6 +891,27 @@ export type SyncEngineOptions = {
 		max: number;
 		key: (ctx: unknown, args: { collection: string }) => string | undefined;
 	};
+	/**
+	 * Optional OpenTelemetry tracer provider. When set, the engine
+	 * wraps `subscribe`, `runMutation`, `runMutations`, and cluster
+	 * fan-out in spans named `sync.<op>` with `ABS_ATTRS` semantic
+	 * conventions (`abs.engine.id`, `abs.collection`, `abs.mutation`,
+	 * etc.). When absent, all tracing is a zero-allocation noop —
+	 * existing call sites pay nothing. Added in 1.21.0.
+	 *
+	 * Pass any `@opentelemetry/api`-compatible `TracerProvider`. See
+	 * `@absolutejs/telemetry` for the type shape — sync re-uses its
+	 * helpers but doesn't peer-dep `@opentelemetry/api` directly.
+	 *
+	 * @example
+	 * ```ts
+	 * import { NodeTracerProvider } from '@opentelemetry/sdk-node';
+	 * const tp = new NodeTracerProvider({ ... });
+	 * tp.register();
+	 * const engine = createSyncEngine({ tracerProvider: tp });
+	 * ```
+	 */
+	tracerProvider?: TelemetryTracerProvider;
 };
 
 const defaultKey = (row: unknown): RowKey => (row as { id: RowKey }).id;
@@ -1278,6 +1304,11 @@ export const createSyncEngine = (
 		globalThis.crypto?.randomUUID?.() ??
 		`i${Math.random()}`;
 	let clusterBus: ClusterBus | undefined;
+
+	// 1.21.0: OTel tracer (noop when options.tracerProvider is unset).
+	// All hot-path tracing flows through this — zero allocations when
+	// the provider is absent because the noop tracer is a singleton.
+	const tracer = tracerOrNoop(options.tracerProvider, '@absolutejs/sync');
 
 	// 1.19.0: optional boot-time restore from a prior engine's snapshot. Must
 	// happen BEFORE any local writes — we validate by checking version === 0
@@ -2524,6 +2555,17 @@ export const createSyncEngine = (
 		},
 
 		subscribe: async ({ collection, params, ctx, onDiff, since, signal }) => {
+			// 1.21.0: wrap subscribe setup in a span. The Subscription
+			// lives past `subscribe()` returning — the span only covers
+			// the setup cost (authorize / hydrate / view materialization),
+			// not the ongoing reactive lifetime.
+			const subscribeSpan = tracer.startSpan('sync.subscribe', {
+				attributes: {
+					[ABS_ATTRS.engineId]: instanceId,
+					[ABS_ATTRS.collection]: collection
+				}
+			});
+			try {
 			// (1.15.0) Cheap up-front check — if the consumer already aborted
 			// before we got here, throw before any side effect (no authorize,
 			// no hydrate, no view materialization).
@@ -2735,6 +2777,22 @@ export const createSyncEngine = (
 				if (!slotHandedOff) releaseSubscriptionSlot(tenantSlot);
 				throw error;
 			}
+			} catch (spanError) {
+				// 1.21.0: outer span wrap — re-throw, recording any
+				// failure (subscribe-time errors are common and worth
+				// surfacing).
+				subscribeSpan.recordException(spanError);
+				subscribeSpan.setStatus({
+					code: 2 /* SpanStatusCode.ERROR */,
+					message:
+						spanError instanceof Error
+							? spanError.message
+							: String(spanError)
+				});
+				throw spanError;
+			} finally {
+				subscribeSpan.end();
+			}
 		},
 
 		hydrate: async (collection, params, ctx, options) => {
@@ -2900,10 +2958,19 @@ export const createSyncEngine = (
 		migrate: (table, row) => migrateRow(table, row) as typeof row,
 
 		runMutation: async (name, args, ctx) => {
-			const mutation = mutations.get(name);
-			if (mutation === undefined) {
-				throw new Error(`Unknown mutation "${name}"`);
-			}
+			// 1.21.0: wrap the entire mutation lifecycle in a span. Noop
+			// when no tracerProvider was supplied.
+			const span = tracer.startSpan('sync.runMutation', {
+				attributes: {
+					[ABS_ATTRS.engineId]: instanceId,
+					[ABS_ATTRS.mutation]: name
+				}
+			});
+			try {
+				const mutation = mutations.get(name);
+				if (mutation === undefined) {
+					throw new Error(`Unknown mutation "${name}"`);
+				}
 			if (mutation.authorize !== undefined) {
 				const allowed = await mutation.authorize(args, ctx);
 				if (!allowed) {
@@ -3036,6 +3103,20 @@ export const createSyncEngine = (
 			throw lastError;
 			} finally {
 				releaseMutationSlot();
+			}
+			} catch (spanError) {
+				// 1.21.0: outer span wrap — record any throw, rethrow.
+				span.recordException(spanError);
+				span.setStatus({
+					code: 2 /* SpanStatusCode.ERROR */,
+					message:
+						spanError instanceof Error
+							? spanError.message
+							: String(spanError)
+				});
+				throw spanError;
+			} finally {
+				span.end();
 			}
 		},
 
