@@ -168,6 +168,22 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
   graph** — composable `filter`/`map`/`join`/`aggregate`/`orderBy` operators + a
   declarative `query` builder run as live collections (`defineGraphCollection`),
   covering filter → multi-join → group-by pipelines with inner **and left** joins.
+- **M6 (done in 1.17.0 → 1.18.2 + bus-pg 0.1.1):** cross-instance resume. Engines
+  carry a stable `instanceId`; resume cursors are multi-origin version vectors;
+  `ClusterBus` envelope ships `originVersion` end-to-end so peer-broadcast log
+  entries serve catch-up diffs against cursors minted on a different shard.
+  `@absolutejs/sync-bus-pg` ships the Postgres LISTEN/NOTIFY adapter with inline +
+  spill-table envelopes. Cross-instance resume integration tested against real
+  PG. **No sticky sessions required.**
+- **M7 (done in 1.19.0):** shard-reboot continuity. `engine.exportChangeLog()` /
+  `importChangeLog(snapshot)` + `createSyncEngine({ initialChangeLog })` let the
+  host persist the bounded log + version and restore it on the replacement process.
+  Cursors that reference the restarted shard's `instanceId` keep working.
+- **M8 (done in 1.20.0 / 1.20.1):** multi-tenant safety. `mutationConcurrency` +
+  `mutationQueueLimit` bound write throughput; `subscriptionLimit: { max, key }`
+  bounds reads. Both surface their counters in `engine.metrics()`; both throw
+  typed errors (`MutationQueueOverflowError`, `SubscriptionLimitError`) so the
+  gateway can shed load with a clean 429.
 
 ## Risks / open questions
 
@@ -176,14 +192,27 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
 - **Joins/aggregations:** differential dataflow is the answer but is the complex part;
   keep it behind M5 and a small operator set.
 - **Memory:** server-held materialized views per connection — bound them, evict cold
-  subscriptions, consider `bun:sqlite` spill.
-- **Fan-out:** many subscribers to a hot query — share one materialization, push the
-  same diff (Zero dedupes object updates this way).
-- **Multi-instance (addressed):** the hub is in-process, but `engine.connectCluster`
-  fans changes across instances over a pluggable `ClusterBus` (Redis stream /
-  Postgres `LISTEN` — an adapter, not core). Version cursors stay per-instance, so
-  cross-instance reconnect falls back to a snapshot (correct) unless you use
-  sticky sessions.
+  subscriptions, consider `bun:sqlite` spill. Per-tenant subscription cap shipped in
+  1.20.1 (`subscriptionLimit: { max, key }`) so a single tenant can't exhaust the
+  bookkeeping; engine-wide eviction policy still TODO.
+- **Fan-out (closed in 1.1.0):** per-batch reactive-rerun memoization keyed by
+  `(collection, params, ctx)` brings 1k subscribers from ~1645ms p50 down to ~66ms.
+  Cross-batch sharing rides on the reactive cache.
+- **Multi-instance (closed across 1.17.0 → 1.18.2 + `@absolutejs/sync-bus-pg`
+  0.1.1):** `engine.connectCluster(bus)` fans changes across instances. Resume cursors
+  are multi-origin vectors (per `(instanceId, originVersion)`), so a client reconnecting
+  to ANY shard gets a catch-up diff from peer-broadcast log entries — **no sticky
+  sessions required**. `engine.exportChangeLog()` / `importChangeLog(snapshot)` +
+  `createSyncEngine({ initialChangeLog })` (1.19.0) keep cursors resumable across a
+  shard reboot. Pluggable `ClusterBus` adapter; `@absolutejs/sync-bus-pg` ships the
+  Postgres LISTEN/NOTIFY implementation with inline + spill-table envelope (8K
+  payload limit handled transparently).
+- **Multi-tenant safety (closed in 1.20.0 / 1.20.1):** `mutationConcurrency` +
+  `mutationQueueLimit` cap concurrent in-flight + queued mutations per engine, with
+  `MutationQueueOverflowError` for clean gateway shedding. `subscriptionLimit: { max,
+  key }` caps active subscriptions per tenant key with `SubscriptionLimitError`
+  thrown before any state allocation. Both surface counters via `engine.metrics()`
+  for tier monitoring.
 
 ## Prior art
 
