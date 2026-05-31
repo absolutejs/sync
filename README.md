@@ -41,7 +41,10 @@ top-N ordering are maintained incrementally through a composable operator graph
 > Operator-grade primitives also shipped — **point-in-time replay**
 > (`engine.replayTo`, 1.22; clickable Replay panel in `syncDevtools`, 1.23) and
 > **tenant migration** (`engine.fence` / `exportSnapshot` / `importSnapshot`,
-> 1.24). Everything ships as subpaths of this one package.
+> 1.24). Everything ships as subpaths of this one package. See
+> [Substrate complete (G1–G7)](https://absolutejs.com/documentation/substrate-audit)
+> for the consolidated record of the seven cross-cutting substrate gaps and
+> what closed each.
 
 ## Install
 
