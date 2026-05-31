@@ -38,7 +38,10 @@ top-N ordering are maintained incrementally through a composable operator graph
 > search, scheduled functions, a live devtools dashboard, conflict-free
 > collaborative editing (CRDTs), CDC for Postgres/MySQL/SQLite, incremental
 > aggregations + joins, and a declarative operator graph) are in place.
-> Everything ships as subpaths of this one package.
+> Operator-grade primitives also shipped — **point-in-time replay**
+> (`engine.replayTo`, 1.22; clickable Replay panel in `syncDevtools`, 1.23) and
+> **tenant migration** (`engine.fence` / `exportSnapshot` / `importSnapshot`,
+> 1.24). Everything ships as subpaths of this one package.
 
 ## Install
 
@@ -365,7 +368,7 @@ it, ~3 store round-trips every 20ms ran the voice pipeline far slower than real 
 | `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                       | Elysia plugin: SSE stream of hub events.                                                                                                                                       |
 | `syncSocket({ engine, path?, resolveContext? })`                                           | Elysia WebSocket plugin for the sync engine.                                                                                                                                   |
 | `scheduled({ engine, prefix?, onError? })` _(`/scheduled` subpath)_                        | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). Kept off the main entry so `syncSocket` needs no cron dep.               |
-| `syncDevtools({ engine, path?, snapshotMs? })`                                             | Elysia plugin: a live devtools dashboard (collections, subscription counts, mutations, schedules, change feed) over SSE. Backed by `engine.inspect()` + `engine.onActivity()`. |
+| `syncDevtools({ engine, path?, snapshotMs? })`                                             | Elysia plugin: a live devtools dashboard (collections, subscription counts, mutations, schedules, change feed) over SSE. Backed by `engine.inspect()` + `engine.onActivity()`. **1.23** also exposes a Point-in-time replay panel (datetime picker + tables filter) and a `GET <path>/replay?at=<ms>&tables=<csv>` JSON endpoint wrapping `engine.replayTo`. |
 | `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })` | In-memory cache + write-behind persistence.                                                                                                                                    |
 
 ### `@absolutejs/sync/client`
@@ -438,6 +441,10 @@ mutate({
 | `createTextIndex({ key, fields, tokenize?, stopwords?, k1?, b? })`                       | Incremental BM25 full-text index (keyword search). Implements `SearchIndex`; usable standalone or inside a search collection.                                                                                                                                                                                                            |
 | `createVectorIndex({ key, embedding, metric? })`                                         | Incremental vector index (cosine/dot/euclidean exact k-NN) for semantic search — pairs with `@absolutejs/ai` / `@absolutejs/rag` for RAG retrieval on your own data.                                                                                                                                                                     |
 | `defineSchedule({ name, pattern, run })` + `registerSchedule` / `runSchedule`            | Scheduled function: `run({ db, actions })` fires on a cron `pattern`; its writes go live through the change feed. Wire triggers with the `scheduled` plugin (or call `runSchedule(name)` on demand).                                                                                                                                     |
+| `engine.replayTo({ at, tables? })` _(1.22)_                                              | Walk the bounded change log forward to a target timestamp and return `{ asOfVersion, asOfAt, rows, truncated }`. Forensic incident response ("what did the tenant see at 14:32?") + restore-from-time ("revert to 2 hours ago"). `truncated: true` when the log doesn't extend back to `at` — widen `changeLogRetainMs` for forensic use cases. |
+| `engine.fence({ reason })` _(1.24)_                                                      | Pause new mutations on the engine — the source half of tenant migration. `runMutation` rejects with `EngineFencedError`; subscribe / hydrate / streamChanges stay open. Multiple fences compose; every handle must `lift()` before the engine unfences. `lift()` is idempotent.                                                          |
+| `engine.exportSnapshot({ tables?, ctx? })` _(1.24)_                                      | Walk every registered reader's `all(ctx)` and return a portable `EngineSnapshot { sourceInstanceId, version, exportedAt, tables }`. Detached from `ChangeLogSnapshot` — snapshots carry live state, not history.                                                                                                                         |
+| `engine.importSnapshot(snapshot, { tables?, onProgress?, ctx? })` _(1.24)_               | Bulk-load an `EngineSnapshot` on the target via each table's registered writer. Returns `{ tablesImported, rowsImported, perTable, skipped }`. Tables in the snapshot without a writer on the target surface in `skipped` so misconfigured targets don't silently drop rows.                                                            |
 
 ### `@absolutejs/sync/crdt`
 
