@@ -53,6 +53,14 @@ import type {
 	EngineMetrics
 } from './devtools';
 import type { SchemaDefinition, TableSchema } from './schema';
+import {
+	EngineFencedError,
+	type EngineSnapshot,
+	type ExportSnapshotOptions,
+	type FenceHandle,
+	type ImportSnapshotOptions,
+	type MigrationImportResult
+} from './migrate';
 import type { CrdtMergeable } from '../crdt';
 import type { ClusterBus } from './cluster';
 import type { ChangeSource, RowChange, RowKey, ViewDiff } from './types';
@@ -450,6 +458,62 @@ export type SyncEngine = {
 	 * ```
 	 */
 	replayTo: (options: ReplayOptions) => Promise<ReplayResult>;
+	/**
+	 * Pause new mutations on the engine — the source half of the G7 tenant
+	 * migration contract. While at least one fence is held, `runMutation`
+	 * rejects with {@link EngineFencedError}; subscribe/hydrate continue to
+	 * work, so live readers stay served while the snapshot is in flight.
+	 *
+	 * Multiple fence handles compose — the engine stays fenced until every
+	 * handle has been `lift()`-ed. Lifting is idempotent.
+	 *
+	 * Out of scope: out-of-band writes (CDC drivers, raw SQL). The caller
+	 * is responsible for halting those before fencing, otherwise the
+	 * snapshot will drift between `exportSnapshot` and import on the target.
+	 *
+	 * Added in 1.24.0.
+	 */
+	fence: (options: { reason: string }) => FenceHandle;
+	/**
+	 * Capture the engine's current per-table state into a portable
+	 * {@link EngineSnapshot}. Walks every registered reader's `all(ctx)`
+	 * and collects the rows. Used to ship a tenant between engines (G7).
+	 *
+	 * Pair with `fence()` on the source to stop drift, then
+	 * `importSnapshot()` on the target. The shape is intentionally
+	 * detached from `ChangeLogSnapshot` — snapshots carry live state, not
+	 * history. Use `exportChangeLog()` separately if you need forensic
+	 * continuity at the target instanceId.
+	 *
+	 * Added in 1.24.0.
+	 *
+	 * @example
+	 * const fence = source.fence({ reason: 'tenant move' });
+	 * try {
+	 *   const snapshot = await source.exportSnapshot();
+	 *   await target.importSnapshot(snapshot);
+	 * } finally { fence.lift(); }
+	 */
+	exportSnapshot: (options?: ExportSnapshotOptions) => Promise<EngineSnapshot>;
+	/**
+	 * Bulk-load an {@link EngineSnapshot} into this engine via each table's
+	 * registered writer. Tables present in the snapshot but missing a
+	 * writer here are surfaced in `result.skipped` so the operator can
+	 * detect a misconfigured target. The target half of the G7 migration
+	 * contract.
+	 *
+	 * Inserts do NOT emit change events to subscribers — the import is
+	 * meant to land on a fresh target whose clients will re-hydrate after
+	 * the DNS cutover. If you need to fan changes out (e.g. mid-flight
+	 * cutover), drain the change log via `streamChanges()` and
+	 * `applyChange()` separately.
+	 *
+	 * Added in 1.24.0.
+	 */
+	importSnapshot: (
+		snapshot: EngineSnapshot,
+		options?: ImportSnapshotOptions
+	) => Promise<MigrationImportResult>;
 	/**
 	 * Subscribe to the live engine activity stream (changes, mutation outcomes,
 	 * subscribe/unsubscribe). Returns an unsubscribe. Powers the devtools feed.
@@ -1229,6 +1293,13 @@ export const createSyncEngine = (
 	// preservation), so a steady arrival rate can't starve an early waiter.
 	const mutationWaiters: (() => void)[] = [];
 	let mutationsQueued = 0;
+
+	// 1.24.0: G7 migration fence. While `activeFences` is non-empty,
+	// `runMutation` rejects with EngineFencedError. Reads remain
+	// available so the snapshot transport doesn't block subscribers.
+	// Multi-fence compose: every handle must lift() before the engine
+	// unfences. The reason of the OLDEST fence is reported on rejection.
+	const activeFences = new Set<FenceHandle>();
 
 	const acquireMutationSlot = async (): Promise<void> => {
 		const limit = options.mutationConcurrency;
@@ -3038,6 +3109,14 @@ export const createSyncEngine = (
 				}
 			});
 			try {
+				// 1.24.0: reject early when fenced — before authorize, before
+				// slot acquisition. Operators expect a fenced engine to be a
+				// hard wall, not a queue.
+				if (activeFences.size > 0) {
+					const oldest = activeFences.values().next()
+						.value as FenceHandle;
+					throw new EngineFencedError(oldest.reason);
+				}
 				const mutation = mutations.get(name);
 				if (mutation === undefined) {
 					throw new Error(`Unknown mutation "${name}"`);
@@ -3588,6 +3667,77 @@ export const createSyncEngine = (
 				rows[table] = [...map.values()];
 			}
 			return { asOfAt, asOfVersion, rows, truncated };
+		},
+
+		fence: ({ reason }) => {
+			const handle: FenceHandle = {
+				fencedAt: Date.now(),
+				reason,
+				lift: () => {
+					activeFences.delete(handle);
+				}
+			};
+			activeFences.add(handle);
+			return handle;
+		},
+
+		exportSnapshot: async ({ tables, ctx = {} }: ExportSnapshotOptions = {}) => {
+			const tableFilter = tables !== undefined ? new Set(tables) : undefined;
+			const rows: Record<string, ReadonlyArray<unknown>> = {};
+			for (const [table, reader] of readers) {
+				if (tableFilter !== undefined && !tableFilter.has(table)) {
+					continue;
+				}
+				const iterable = await reader.all(ctx);
+				rows[table] = [...iterable];
+			}
+			return {
+				exportedAt: Date.now(),
+				sourceInstanceId: instanceId,
+				tables: rows,
+				version
+			};
+		},
+
+		importSnapshot: async (
+			snapshot,
+			{ tables, onProgress, ctx = {} }: ImportSnapshotOptions = {}
+		) => {
+			const tableFilter = tables !== undefined ? new Set(tables) : undefined;
+			const perTable: Record<string, number> = {};
+			const skipped: string[] = [];
+			let tablesImported = 0;
+			let rowsImported = 0;
+			for (const [table, snapshotRows] of Object.entries(
+				snapshot.tables
+			)) {
+				if (tableFilter !== undefined && !tableFilter.has(table)) {
+					continue;
+				}
+				const writer = writers.get(table);
+				if (writer === undefined) {
+					skipped.push(table);
+					continue;
+				}
+				const total = snapshotRows.length;
+				let done = 0;
+				for (const row of snapshotRows) {
+					await writer.insert(row, ctx, undefined);
+					done += 1;
+					rowsImported += 1;
+					if (onProgress !== undefined) {
+						onProgress(table, done, total);
+					}
+				}
+				perTable[table] = done;
+				if (done > 0) tablesImported += 1;
+			}
+			return {
+				perTable,
+				rowsImported,
+				skipped,
+				tablesImported
+			};
 		},
 
 		metrics: () => {

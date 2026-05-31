@@ -4,6 +4,67 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [1.24.0] — 2026-05-30
+
+### Added — G7 tenant migration primitives (`fence` / `exportSnapshot` / `importSnapshot`)
+
+Closes G7 from the deep-research audit. The "move a tenant from
+engine A to engine B" story becomes a substrate primitive — three
+composable verbs that operators wire together.
+
+- **`engine.fence({ reason })`** — pause new mutations on the source
+  so its captured state stops drifting. `runMutation` rejects with
+  the new `EngineFencedError` (`{ reason }` propagates). Reads
+  (subscribe/hydrate/streamChanges) continue to work so live
+  subscribers don't go dark during the transfer. Returns a
+  `FenceHandle` with `lift()`; multiple fences compose — the engine
+  unfences only after every handle has been lifted. `lift()` is
+  idempotent.
+- **`engine.exportSnapshot({ tables?, ctx? })`** — walks every
+  registered reader's `all(ctx)` and returns a portable
+  `EngineSnapshot` `{ sourceInstanceId, version, exportedAt, tables
+  }`. Optionally narrowed to a subset of tables. Detached from
+  `ChangeLogSnapshot`: snapshots carry live state, not history.
+- **`engine.importSnapshot(snapshot, { tables?, onProgress?, ctx? })`**
+  — on the target, bulk-loads via each table's registered writer.
+  Per-table progress callback fires for every row. Tables in the
+  snapshot with no writer on the target are surfaced in
+  `result.skipped` so a misconfigured target doesn't silently drop
+  data. Returns `{ tablesImported, rowsImported, perTable, skipped }`.
+
+```ts
+const fence = source.fence({ reason: 'tenant-7 → us-east-2' });
+try {
+  const snapshot = await source.exportSnapshot();
+  await transport(snapshot); // S3, message bus, etc.
+  await target.importSnapshot(snapshot, {
+    onProgress: (table, done, total) =>
+      console.log(`${table}: ${done}/${total}`)
+  });
+} finally { fence.lift(); }
+```
+
+**Out of scope** (caller's responsibility): out-of-band writes
+(CDC drivers, raw SQL). The fence only blocks mutations going
+through `runMutation`; if you're driving the engine from CDC, halt
+the CDC pipe before fencing.
+
+12 new tests in `tests/migrate.test.ts`:
+- runMutation throws EngineFencedError while fenced
+- subscribe + hydrate continue while fenced
+- multiple fences compose; engine unfences only after every lift
+- lift() is idempotent
+- snapshots every reader by default
+- narrows to the requested tables
+- reports the source engine version
+- rehydrates the target engine via its writers
+- reports tables with no writer in `skipped`
+- honors the tables filter on import
+- fires onProgress for each inserted row
+- end-to-end cross-region tenant move preserves data
+
+Test count: 581 → 593.
+
 ## [1.23.0] — 2026-05-30
 
 ### Added — `syncDevtools` point-in-time replay surface

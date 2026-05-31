@@ -158,6 +158,15 @@ export type {
 	SyncEngineOptions
 } from './syncEngine';
 
+export { EngineFencedError } from './migrate';
+export type {
+	EngineSnapshot,
+	ExportSnapshotOptions,
+	FenceHandle,
+	ImportSnapshotOptions,
+	MigrationImportResult
+} from './migrate';
+
 export { syncCdc } from './cdc';
 export type { SyncCdcOptions } from './cdc';
 export type { CrdtMergeable } from '../crdt';
