@@ -1,4 +1,4 @@
-import type { RowKey } from './types';
+import type { RowChange, RowKey } from './types';
 
 /**
  * App-provided context for a subscription — typically the authenticated session
@@ -34,6 +34,19 @@ export type CollectionDefinition<T, P = void, Ctx = CollectionContext> = {
 	 * two in lockstep — the planned adapter convenience.)
 	 */
 	match?: (row: T, params: P, ctx: Ctx) => boolean;
+	/**
+	 * Refetch-fallback gate (multi-table / shape-mismatched collections that can't
+	 * use `match`). Without it, ANY change to a read table re-hydrates EVERY
+	 * subscription — even ones the change can't touch. Given the RAW change (the
+	 * source row, which may differ from `T` and be partial), return `false` ONLY
+	 * when the change provably can't affect this subscription's result, to skip
+	 * its re-hydrate; the fan-out drops from O(all subscribers) to O(affected).
+	 *
+	 * Conservative: a `false` that should have been `true` DROPS an update, so
+	 * default to `true` when unsure (e.g. a delete whose row lacks your scope
+	 * field). Ignored when `match` is set (incremental routing is already exact).
+	 */
+	affects?: (change: RowChange<unknown>, params: P, ctx: Ctx) => boolean;
 	/**
 	 * Access control: return `false` (or throw) to deny the subscription. Runs
 	 * before `hydrate`. Without it a collection is world-readable, so treat it as

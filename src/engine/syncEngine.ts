@@ -593,6 +593,12 @@ type ActiveSubscription =
 			incremental: boolean;
 			/** Re-run the bound hydrate for the refetch fallback. */
 			rehydrate: () => Promise<Iterable<unknown>>;
+			/**
+			 * Refetch-fallback gate (bound `definition.affects`): when present and
+			 * it returns false for a change, skip this subscription's re-hydrate —
+			 * the change provably can't affect it.
+			 */
+			affects?: (change: RowChange<unknown>) => boolean;
 			/** Result-row identity (used to net a batch's diffs). */
 			key: (row: unknown) => RowKey;
 			onDiff: OnDiff;
@@ -1592,6 +1598,11 @@ export const createSyncEngine = (
 				// rather than a wrong diff.
 				return subscription.view.reset(await subscription.rehydrate());
 			}
+		}
+		// Refetch-fallback gate: skip the re-hydrate when the collection's
+		// `affects` proves this change can't touch this subscription's result.
+		if (subscription.affects && !subscription.affects(change)) {
+			return EMPTY_DIFF;
 		}
 		return subscription.view.reset(await subscription.rehydrate());
 	};
@@ -2897,6 +2908,15 @@ export const createSyncEngine = (
 					// the refetch fallback.
 					const incremental =
 						match !== undefined && tables.length === 1;
+					// Refetch-fallback gate: only meaningful when NOT incremental
+					// (incremental already routes exactly). Bound to this
+					// subscription's params/ctx so the dispatch loop can ask
+					// "could this change touch you?" before re-hydrating.
+					const boundAffects =
+						!incremental && definition.affects
+							? (change: RowChange<unknown>) =>
+									definition.affects!(change, params, ctx)
+							: undefined;
 					// Fold the read rule into the incremental predicate (also used by the
 					// catch-up builder), so an unreadable row never enters the view.
 					const boundMatch = incremental
@@ -2922,6 +2942,7 @@ export const createSyncEngine = (
 						view,
 						incremental,
 						rehydrate,
+						...(boundAffects ? { affects: boundAffects } : {}),
 						key,
 						onDiff: typedOnDiff
 					};

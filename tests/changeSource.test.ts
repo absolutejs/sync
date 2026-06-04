@@ -222,3 +222,61 @@ describe('connectSource', () => {
 		expect(engine.metrics().source.changesReceived).toBe(1);
 	});
 });
+
+describe('affects gate (refetch fallback)', () => {
+	test('skips re-hydrate for subscriptions a change provably cannot touch', async () => {
+		type Order = { id: number; userId: number };
+		const orders: Order[] = [
+			{ id: 1, userId: 5 },
+			{ id: 2, userId: 9 }
+		];
+		const hydrateCalls = new Map<number, number>();
+		const engine = createSyncEngine();
+		engine.register(
+			defineCollection<Order, { userId: number }>({
+				name: 'userOrders',
+				// Multi-table → refetch fallback (no incremental match).
+				tables: ['orders', 'order_items'],
+				hydrate: (p) => {
+					hydrateCalls.set(p.userId, (hydrateCalls.get(p.userId) ?? 0) + 1);
+
+					return orders.filter((o) => o.userId === p.userId);
+				},
+				key: (o) => o.id,
+				// The change's raw row carries userId — gate on it.
+				affects: (change, p) =>
+					(change.row as { userId?: number }).userId === p.userId
+			})
+		);
+
+		const five = collectDiffs<Order>();
+		const nine = collectDiffs<Order>();
+		await engine.subscribe<Order, { userId: number }>({
+			collection: 'userOrders',
+			params: { userId: 5 },
+			ctx: {},
+			onDiff: five.onDiff
+		});
+		await engine.subscribe<Order, { userId: number }>({
+			collection: 'userOrders',
+			params: { userId: 9 },
+			ctx: {},
+			onDiff: nine.onDiff
+		});
+		// One hydrate each on subscribe.
+		expect(hydrateCalls.get(5)).toBe(1);
+		expect(hydrateCalls.get(9)).toBe(1);
+
+		// A change for user 5: only user 5's subscription re-hydrates.
+		orders.push({ id: 3, userId: 5 });
+		await engine.applyChange<Order>('orders', {
+			op: 'insert',
+			row: { id: 3, userId: 5 }
+		});
+
+		expect(hydrateCalls.get(5)).toBe(2); // re-hydrated
+		expect(hydrateCalls.get(9)).toBe(1); // gated out — NOT re-hydrated
+		expect(five.diffs.at(-1)?.added.map((o) => o.id)).toEqual([3]);
+		expect(nine.diffs.length).toBe(0); // no diff for the unaffected sub
+	});
+});
