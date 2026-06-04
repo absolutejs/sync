@@ -182,4 +182,43 @@ describe('connectSource', () => {
 		await disconnect();
 		expect(stopped).toBe(true);
 	});
+
+	test('metrics().source tracks connection + delivery liveness', async () => {
+		const engine = createSyncEngine();
+		engine.register(
+			defineCollection<Order>({
+				name: 'orders',
+				hydrate: () => []
+			})
+		);
+
+		// Wired but nothing connected yet.
+		expect(engine.metrics().source).toEqual({
+			changesReceived: 0,
+			connected: 0,
+			lastChangeAgeMs: null,
+			lastChangeAt: null
+		});
+
+		let emit: EmitChange | undefined;
+		const source: ChangeSource = {
+			start: (fn) => {
+				emit = fn;
+			},
+			stop: () => {}
+		};
+		const disconnect = await engine.connectSource(source);
+		expect(engine.metrics().source.connected).toBe(1);
+
+		await emit?.('orders', { op: 'insert', row: { id: 1, userId: 5 } });
+		const after = engine.metrics().source;
+		expect(after.changesReceived).toBe(1);
+		expect(after.lastChangeAt).not.toBeNull();
+		expect(after.lastChangeAgeMs).not.toBeNull();
+
+		await disconnect();
+		expect(engine.metrics().source.connected).toBe(0);
+		// The delivery counters persist after disconnect (cumulative since start).
+		expect(engine.metrics().source.changesReceived).toBe(1);
+	});
 });

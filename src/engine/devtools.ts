@@ -111,6 +111,21 @@ export type EngineMetrics = {
 	schedules: {
 		registered: number;
 	};
+	/**
+	 * Change-source liveness, aggregated across every `connectSource` (e.g. a
+	 * CDC adapter). Lets a health check distinguish a healthy-but-quiet feed
+	 * from a wired-but-silent or disconnected one. Added in 2.1.0.
+	 */
+	source: {
+		/** Currently-connected change sources (0 once all have disconnected). */
+		connected: number;
+		/** Total changes delivered by connected sources since engine start. */
+		changesReceived: number;
+		/** `Date.now()` of the most recent source change, or `null` if none yet. */
+		lastChangeAt: number | null;
+		/** Wall-clock age of the most recent source change in ms, or `null`. */
+		lastChangeAgeMs: number | null;
+	};
 };
 
 /**

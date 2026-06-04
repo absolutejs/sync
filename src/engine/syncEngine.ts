@@ -494,7 +494,9 @@ export type SyncEngine = {
 	 *   await target.importSnapshot(snapshot);
 	 * } finally { fence.lift(); }
 	 */
-	exportSnapshot: (options?: ExportSnapshotOptions) => Promise<EngineSnapshot>;
+	exportSnapshot: (
+		options?: ExportSnapshotOptions
+	) => Promise<EngineSnapshot>;
 	/**
 	 * Bulk-load an {@link EngineSnapshot} into this engine via each table's
 	 * registered writer. Tables present in the snapshot but missing a
@@ -567,7 +569,11 @@ export type SyncEngine = {
  * reconnect can resume across shards. Pre-1.18 callers that ignore the 3rd
  * arg keep working unchanged.
  */
-type OnDiff = (diff: ViewDiff<unknown>, version: number, cursor?: string) => void;
+type OnDiff = (
+	diff: ViewDiff<unknown>,
+	version: number,
+	cursor?: string
+) => void;
 
 type JoinState = {
 	op: EquiJoin<unknown, unknown, unknown>;
@@ -1286,6 +1292,14 @@ export const createSyncEngine = (
 	let mutationsFailed = 0;
 	let mutationsRetried = 0;
 	let mutationsInFlight = 0;
+	// Change-source liveness surfaced via `engine.metrics().source` — lets a
+	// health check tell whether a connected CDC feed is actually delivering
+	// (a `connected` source with `changesReceived === 0` long after boot is a
+	// wired-but-silent feed; `lastChangeAt` ages let external alerting catch a
+	// feed that went quiet). Aggregates across every `connectSource`.
+	let connectedSources = 0;
+	let sourceChangesReceived = 0;
+	let sourceLastChangeAt: number | null = null;
 
 	// 1.20.0: optional FIFO semaphore gating mutation entry. Capacity is
 	// `mutationConcurrency`; waiters queue with optional `mutationQueueLimit`
@@ -1501,7 +1515,11 @@ export const createSyncEngine = (
 		originVersion: number
 	) => {
 		if (clusterBus !== undefined && changes.length > 0) {
-			void clusterBus.publish({ changes, origin: instanceId, originVersion });
+			void clusterBus.publish({
+				changes,
+				origin: instanceId,
+				originVersion
+			});
 		}
 	};
 
@@ -2302,7 +2320,9 @@ export const createSyncEngine = (
 	 * version of THIS instance. A cursor string is the 1.17.0+ multi-origin
 	 * shape encoded by `currentCursor()`.
 	 */
-	const normalizeSince = (since: number | string): Record<string, number> | null => {
+	const normalizeSince = (
+		since: number | string
+	): Record<string, number> | null => {
 		if (typeof since === 'number') {
 			return { [instanceId]: since };
 		}
@@ -2317,7 +2337,10 @@ export const createSyncEngine = (
 	 * non-incremental subs (refetch/join/graph/search), since those can't be
 	 * replayed precisely from a row-change log.
 	 */
-	const canResume = (since: number | string, incremental: boolean): boolean => {
+	const canResume = (
+		since: number | string,
+		incremental: boolean
+	): boolean => {
 		if (!incremental) {
 			return false;
 		}
@@ -2405,7 +2428,8 @@ export const createSyncEngine = (
 			if (!tables.includes(entry.table)) continue;
 			// Skip entries the client has already seen for this origin.
 			const lastSeen = sinceVec[entry.origin];
-			if (lastSeen !== undefined && entry.originVersion <= lastSeen) continue;
+			if (lastSeen !== undefined && entry.originVersion <= lastSeen)
+				continue;
 			const row = entry.change.row;
 			const present =
 				entry.change.op !== 'delete' && match(row)
@@ -2696,7 +2720,14 @@ export const createSyncEngine = (
 			registry.set(collection.name, collection);
 		},
 
-		subscribe: async ({ collection, params, ctx, onDiff, since, signal }) => {
+		subscribe: async ({
+			collection,
+			params,
+			ctx,
+			onDiff,
+			since,
+			signal
+		}) => {
 			// 1.21.0: wrap subscribe setup in a span. The Subscription
 			// lives past `subscribe()` returning — the span only covers
 			// the setup cost (authorize / hydrate / view materialization),
@@ -2708,217 +2739,226 @@ export const createSyncEngine = (
 				}
 			});
 			try {
-			// (1.15.0) Cheap up-front check — if the consumer already aborted
-			// before we got here, throw before any side effect (no authorize,
-			// no hydrate, no view materialization).
-			checkAborted(signal);
-
-			const registered = registry.get(collection);
-			if (registered === undefined) {
-				throw new Error(`Unknown collection "${collection}"`);
-			}
-
-			// (1.20.1) Per-tenant cap. Acquired BEFORE authorize/hydrate/any
-			// state allocation. If subscribe throws between here and the
-			// successful return (auth rejection, abort, schema error, etc.)
-			// we release in the `catch` below — otherwise the wrapped
-			// `unsubscribe` is the release path.
-			const tenantSlot = acquireSubscriptionSlot(ctx, { collection });
-			let slotHandedOff = false;
-			try {
-
-			const typedOnDiff = onDiff as OnDiff;
-			const subscribeSet = subsFor(collection);
-
-			// Wrap the eventual return so we (a) re-check signal after the
-			// async setup (catches mid-flight aborts), (b) auto-call
-			// unsubscribe when signal fires after the subscription is live,
-			// and (c) decrement the tenant's active-sub count idempotently
-			// when unsubscribe runs.
-			const wrapReturn = <T>(sub: Subscription<T>): Subscription<T> => {
+				// (1.15.0) Cheap up-front check — if the consumer already aborted
+				// before we got here, throw before any side effect (no authorize,
+				// no hydrate, no view materialization).
 				checkAborted(signal);
-				const innerUnsubscribe = sub.unsubscribe;
-				let released = false;
-				const wrappedUnsubscribe = (): void => {
-					if (released) return;
-					released = true;
-					releaseSubscriptionSlot(tenantSlot);
-					innerUnsubscribe();
-				};
-				const wrapped = { ...sub, unsubscribe: wrappedUnsubscribe };
-				linkAbortToUnsubscribe(signal, wrappedUnsubscribe);
-				slotHandedOff = true;
-				return wrapped;
-			};
 
-			const registeredKind = (registered as { kind?: string }).kind;
-			if (registeredKind === 'join') {
-				const joined = await subscribeJoin(
-					collection,
-					registered as JoinCollectionDefinition<
-						unknown,
-						unknown,
-						unknown,
-						unknown,
-						unknown
-					>,
-					params,
-					ctx,
-					typedOnDiff,
-					subscribeSet
-				);
-				return wrapReturn(joined) as Subscription<never>;
-			}
-			if (registeredKind === 'graph') {
-				const graphed = await subscribeGraph(
-					collection,
-					registered as GraphCollectionDefinition<
-						unknown,
-						unknown,
-						unknown
-					>,
-					params,
-					ctx,
-					typedOnDiff,
-					subscribeSet
-				);
-				return wrapReturn(graphed) as Subscription<never>;
-			}
-			if (registeredKind === 'reactive') {
-				const reactived = await subscribeReactive(
-					collection,
-					registered as ReactiveQueryDefinition<
-						unknown,
-						unknown,
-						unknown
-					>,
-					params,
-					ctx,
-					typedOnDiff,
-					subscribeSet
-				);
-				return wrapReturn(reactived) as Subscription<never>;
-			}
-			if (registeredKind === 'search') {
-				const searched = await subscribeSearch(
-					collection,
-					registered as SearchCollectionDefinition<
-						unknown,
-						unknown,
-						unknown
-					>,
-					params,
-					ctx,
-					typedOnDiff,
-					subscribeSet
-				);
-				return wrapReturn(searched) as Subscription<never>;
-			}
-			const definition = registered as CollectionDefinition<
-				unknown,
-				unknown,
-				unknown
-			>;
-
-			if (definition.authorize !== undefined) {
-				const allowed = await definition.authorize(params, ctx);
-				if (!allowed) {
-					throw new UnauthorizedError(
-						`subscribe to collection "${collection}"`
-					);
+				const registered = registry.get(collection);
+				if (registered === undefined) {
+					throw new Error(`Unknown collection "${collection}"`);
 				}
-			}
 
-			const key = definition.key ?? defaultKey;
-			const match = definition.match;
-			const tables = definition.tables ?? [collection];
-			// Declarative read rule + schema migration apply to single-table
-			// collections (their rows are that table's rows); join/aggregate
-			// collections scope via match.
-			const scopedTable = tables.length === 1 ? tables[0]! : undefined;
-			const readRule =
-				scopedTable !== undefined
-					? readRuleFor(scopedTable)
-					: undefined;
-			// Migrate the DB result to the current shape, then filter it through the
-			// read rule — so the initial snapshot and the refetch fallback are
-			// always current-shape and never include a row the caller can't see.
-			const rehydrate = async () => {
-				const raw = [...(await definition.hydrate(params, ctx))];
-				const rows =
-					scopedTable !== undefined
-						? raw.map((row) => migrateRow(scopedTable, row))
-						: raw;
-				return readRule
-					? rows.filter((row) => readRule(ctx, row))
-					: rows;
-			};
-			// Incremental matching only applies to single-table collections; a
-			// join/aggregate spanning tables can't match a single row, so it uses
-			// the refetch fallback.
-			const incremental = match !== undefined && tables.length === 1;
-			// Fold the read rule into the incremental predicate (also used by the
-			// catch-up builder), so an unreadable row never enters the view.
-			const boundMatch = incremental
-				? (row: unknown) =>
-						match(row, params, ctx) &&
-						(readRule ? readRule(ctx, row) : true)
-				: () => true;
-			const view = createMaterializedView<unknown>({
-				key,
-				match: boundMatch
-			});
+				// (1.20.1) Per-tenant cap. Acquired BEFORE authorize/hydrate/any
+				// state allocation. If subscribe throws between here and the
+				// successful return (auth rejection, abort, schema error, etc.)
+				// we release in the `catch` below — otherwise the wrapped
+				// `unsubscribe` is the release path.
+				const tenantSlot = acquireSubscriptionSlot(ctx, { collection });
+				let slotHandedOff = false;
+				try {
+					const typedOnDiff = onDiff as OnDiff;
+					const subscribeSet = subsFor(collection);
 
-			// Resume from the log when possible (catch-up diff); else send a
-			// snapshot. The view is hydrated either way so future changes match.
-			const resuming =
-				since !== undefined && canResume(since, incremental);
-			view.hydrate([...(await rehydrate())]);
-			const atVersion = version;
+					// Wrap the eventual return so we (a) re-check signal after the
+					// async setup (catches mid-flight aborts), (b) auto-call
+					// unsubscribe when signal fires after the subscription is live,
+					// and (c) decrement the tenant's active-sub count idempotently
+					// when unsubscribe runs.
+					const wrapReturn = <T>(
+						sub: Subscription<T>
+					): Subscription<T> => {
+						checkAborted(signal);
+						const innerUnsubscribe = sub.unsubscribe;
+						let released = false;
+						const wrappedUnsubscribe = (): void => {
+							if (released) return;
+							released = true;
+							releaseSubscriptionSlot(tenantSlot);
+							innerUnsubscribe();
+						};
+						const wrapped = {
+							...sub,
+							unsubscribe: wrappedUnsubscribe
+						};
+						linkAbortToUnsubscribe(signal, wrappedUnsubscribe);
+						slotHandedOff = true;
+						return wrapped;
+					};
 
-			const subscription: ActiveSubscription = {
-				kind: 'view',
-				collection,
-				view,
-				incremental,
-				rehydrate,
-				key,
-				onDiff: typedOnDiff
-			};
-			subscribeSet.add(subscription);
+					const registeredKind = (registered as { kind?: string })
+						.kind;
+					if (registeredKind === 'join') {
+						const joined = await subscribeJoin(
+							collection,
+							registered as JoinCollectionDefinition<
+								unknown,
+								unknown,
+								unknown,
+								unknown,
+								unknown
+							>,
+							params,
+							ctx,
+							typedOnDiff,
+							subscribeSet
+						);
+						return wrapReturn(joined) as Subscription<never>;
+					}
+					if (registeredKind === 'graph') {
+						const graphed = await subscribeGraph(
+							collection,
+							registered as GraphCollectionDefinition<
+								unknown,
+								unknown,
+								unknown
+							>,
+							params,
+							ctx,
+							typedOnDiff,
+							subscribeSet
+						);
+						return wrapReturn(graphed) as Subscription<never>;
+					}
+					if (registeredKind === 'reactive') {
+						const reactived = await subscribeReactive(
+							collection,
+							registered as ReactiveQueryDefinition<
+								unknown,
+								unknown,
+								unknown
+							>,
+							params,
+							ctx,
+							typedOnDiff,
+							subscribeSet
+						);
+						return wrapReturn(reactived) as Subscription<never>;
+					}
+					if (registeredKind === 'search') {
+						const searched = await subscribeSearch(
+							collection,
+							registered as SearchCollectionDefinition<
+								unknown,
+								unknown,
+								unknown
+							>,
+							params,
+							ctx,
+							typedOnDiff,
+							subscribeSet
+						);
+						return wrapReturn(searched) as Subscription<never>;
+					}
+					const definition = registered as CollectionDefinition<
+						unknown,
+						unknown,
+						unknown
+					>;
 
-			const unsubscribe = () => {
-				subscribeSet.delete(subscription);
-			};
+					if (definition.authorize !== undefined) {
+						const allowed = await definition.authorize(params, ctx);
+						if (!allowed) {
+							throw new UnauthorizedError(
+								`subscribe to collection "${collection}"`
+							);
+						}
+					}
 
-			if (resuming) {
-				return wrapReturn({
-					initial: [],
-					catchup: buildCatchup(
-						since,
-						tables,
+					const key = definition.key ?? defaultKey;
+					const match = definition.match;
+					const tables = definition.tables ?? [collection];
+					// Declarative read rule + schema migration apply to single-table
+					// collections (their rows are that table's rows); join/aggregate
+					// collections scope via match.
+					const scopedTable =
+						tables.length === 1 ? tables[0]! : undefined;
+					const readRule =
+						scopedTable !== undefined
+							? readRuleFor(scopedTable)
+							: undefined;
+					// Migrate the DB result to the current shape, then filter it through the
+					// read rule — so the initial snapshot and the refetch fallback are
+					// always current-shape and never include a row the caller can't see.
+					const rehydrate = async () => {
+						const raw = [
+							...(await definition.hydrate(params, ctx))
+						];
+						const rows =
+							scopedTable !== undefined
+								? raw.map((row) => migrateRow(scopedTable, row))
+								: raw;
+						return readRule
+							? rows.filter((row) => readRule(ctx, row))
+							: rows;
+					};
+					// Incremental matching only applies to single-table collections; a
+					// join/aggregate spanning tables can't match a single row, so it uses
+					// the refetch fallback.
+					const incremental =
+						match !== undefined && tables.length === 1;
+					// Fold the read rule into the incremental predicate (also used by the
+					// catch-up builder), so an unreadable row never enters the view.
+					const boundMatch = incremental
+						? (row: unknown) =>
+								match(row, params, ctx) &&
+								(readRule ? readRule(ctx, row) : true)
+						: () => true;
+					const view = createMaterializedView<unknown>({
 						key,
-						boundMatch
-					) as ViewDiff<never>,
-					cursor: currentCursor(),
-					version: atVersion,
-					unsubscribe
-				}) as Subscription<never>;
-			}
-			return wrapReturn({
-				initial: view.rows() as never[],
-				cursor: currentCursor(),
-				version: atVersion,
-				unsubscribe
-			}) as Subscription<never>;
-			} catch (error) {
-				// (1.20.1) If anything between acquire and the successful
-				// return throws (authorize, abort, schema error, etc.),
-				// release the tenant slot so the cap doesn't leak by one
-				// per failed call.
-				if (!slotHandedOff) releaseSubscriptionSlot(tenantSlot);
-				throw error;
-			}
+						match: boundMatch
+					});
+
+					// Resume from the log when possible (catch-up diff); else send a
+					// snapshot. The view is hydrated either way so future changes match.
+					const resuming =
+						since !== undefined && canResume(since, incremental);
+					view.hydrate([...(await rehydrate())]);
+					const atVersion = version;
+
+					const subscription: ActiveSubscription = {
+						kind: 'view',
+						collection,
+						view,
+						incremental,
+						rehydrate,
+						key,
+						onDiff: typedOnDiff
+					};
+					subscribeSet.add(subscription);
+
+					const unsubscribe = () => {
+						subscribeSet.delete(subscription);
+					};
+
+					if (resuming) {
+						return wrapReturn({
+							initial: [],
+							catchup: buildCatchup(
+								since,
+								tables,
+								key,
+								boundMatch
+							) as ViewDiff<never>,
+							cursor: currentCursor(),
+							version: atVersion,
+							unsubscribe
+						}) as Subscription<never>;
+					}
+					return wrapReturn({
+						initial: view.rows() as never[],
+						cursor: currentCursor(),
+						version: atVersion,
+						unsubscribe
+					}) as Subscription<never>;
+				} catch (error) {
+					// (1.20.1) If anything between acquire and the successful
+					// return throws (authorize, abort, schema error, etc.),
+					// release the tenant slot so the cap doesn't leak by one
+					// per failed call.
+					if (!slotHandedOff) releaseSubscriptionSlot(tenantSlot);
+					throw error;
+				}
 			} catch (spanError) {
 				// 1.21.0: outer span wrap — re-throw, recording any
 				// failure (subscribe-time errors are common and worth
@@ -2974,8 +3014,18 @@ export const createSyncEngine = (
 			applyChange(table, change as RowChange<unknown>),
 
 		connectSource: async (source) => {
-			await source.start((table, change) => applyChange(table, change));
+			await source.start((table, change) => {
+				sourceChangesReceived += 1;
+				sourceLastChangeAt = Date.now();
+				return applyChange(table, change);
+			});
+			connectedSources += 1;
+			let stopped = false;
 			return async () => {
+				if (!stopped) {
+					stopped = true;
+					connectedSources -= 1;
+				}
 				await source.stop();
 			};
 		},
@@ -3121,139 +3171,147 @@ export const createSyncEngine = (
 				if (mutation === undefined) {
 					throw new Error(`Unknown mutation "${name}"`);
 				}
-			if (mutation.authorize !== undefined) {
-				const allowed = await mutation.authorize(args, ctx);
-				if (!allowed) {
-					throw new UnauthorizedError(`run mutation "${name}"`);
+				if (mutation.authorize !== undefined) {
+					const allowed = await mutation.authorize(args, ctx);
+					if (!allowed) {
+						throw new UnauthorizedError(`run mutation "${name}"`);
+					}
 				}
-			}
-			// 1.20.0: gate at the entry. Wait if `mutationConcurrency`
-			// is saturated; throw `MutationQueueOverflowError` if the
-			// queue is also capped and full. Authorization fails before
-			// the gate so a denied call never burns a slot.
-			await acquireMutationSlot();
+				// 1.20.0: gate at the entry. Wait if `mutationConcurrency`
+				// is saturated; throw `MutationQueueOverflowError` if the
+				// queue is also capped and full. Authorization fails before
+				// the gate so a denied call never burns a slot.
+				await acquireMutationSlot();
 
-			// Pick the handler shape: in-process function or sandboxed string
-			// source (runs inside @absolutejs/isolated-jsc). Sandbox runner is
-			// built lazily and pre-cached in registerMutation.
-			const sandboxRunner = sandboxRunners.get(name);
-			const invokeHandler =
-				sandboxRunner !== undefined
-					? sandboxRunner
-					: (
-							a: unknown,
-							c: unknown,
-							actions: MutationActions
-						): Promise<unknown> =>
-							Promise.resolve(
-								// Non-null assertion: registerMutation guarantees one of
-								// handler/sandboxedHandler is defined.
-								mutation.handler!(a, c, actions)
+				// Pick the handler shape: in-process function or sandboxed string
+				// source (runs inside @absolutejs/isolated-jsc). Sandbox runner is
+				// built lazily and pre-cached in registerMutation.
+				const sandboxRunner = sandboxRunners.get(name);
+				const invokeHandler =
+					sandboxRunner !== undefined
+						? sandboxRunner
+						: (
+								a: unknown,
+								c: unknown,
+								actions: MutationActions
+							): Promise<unknown> =>
+								Promise.resolve(
+									// Non-null assertion: registerMutation guarantees one of
+									// handler/sandboxedHandler is defined.
+									mutation.handler!(a, c, actions)
+								);
+
+				// Run the handler (optionally inside the DB transaction), collecting its
+				// changes into a fresh buffer per attempt — so a transaction that retries
+				// or rolls back never double-emits or leaks a half-applied batch.
+				const runHandler = async (tx: unknown) => {
+					const { actions, buffered } = makeActions(tx, ctx, true);
+					const result = await invokeHandler(args, ctx, actions);
+					return { buffered, result };
+				};
+
+				// Resolve the retry policy once per call. When `mutation.retry` is
+				// undefined we still go through the loop, but bounded to one
+				// attempt with no backoff (cheaper than a separate code path).
+				const retry = mutation.retry;
+				const maxAttempts =
+					retry === undefined ? 1 : (retry.maxAttempts ?? 5);
+				const isRetryable =
+					retry?.isRetryable ?? isSerializationFailure;
+				const computeDelay = retry?.backoff ?? exponentialBackoff();
+				const maxElapsedMs = retry?.maxElapsedMs ?? 30_000;
+				const startedAt = Date.now();
+
+				// Each attempt builds fresh `actions`/`buffered` via the makeActions
+				// call inside runHandler, so a retry never inherits half-applied
+				// buffered changes from a failed attempt. Transactions reopen too:
+				// runInTransaction wraps each individual attempt.
+				let lastError: unknown;
+				let attemptsMade = 0;
+				try {
+					for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+						attemptsMade = attempt;
+						try {
+							const { buffered, result } =
+								runInTransaction !== undefined
+									? await runInTransaction((tx) =>
+											runHandler(tx)
+										)
+									: await runHandler(undefined);
+							await applyChangeBatch(buffered);
+							mutationsCompleted += 1;
+							emitActivity({
+								type: 'mutation',
+								at: Date.now(),
+								name,
+								status: 'ok'
+							});
+							return result;
+						} catch (error) {
+							lastError = error;
+							const elapsedMs = Date.now() - startedAt;
+							const canRetry =
+								attempt < maxAttempts &&
+								isRetryable(error) &&
+								elapsedMs < maxElapsedMs;
+							if (!canRetry) break;
+							mutationsRetried += 1;
+
+							const rawDelay = computeDelay(attempt);
+							// Cap the delay so we don't blow past maxElapsedMs while
+							// sleeping. If the cap would be negative we're already past
+							// the budget; treat as exhausted.
+							const remaining = maxElapsedMs - elapsedMs;
+							if (remaining <= 0) break;
+							const delayMs = Math.max(
+								0,
+								Math.min(rawDelay, remaining)
 							);
 
-			// Run the handler (optionally inside the DB transaction), collecting its
-			// changes into a fresh buffer per attempt — so a transaction that retries
-			// or rolls back never double-emits or leaks a half-applied batch.
-			const runHandler = async (tx: unknown) => {
-				const { actions, buffered } = makeActions(tx, ctx, true);
-				const result = await invokeHandler(args, ctx, actions);
-				return { buffered, result };
-			};
+							emitActivity({
+								type: 'mutationRetry',
+								at: Date.now(),
+								name,
+								attempt,
+								delayMs,
+								errorName:
+									error instanceof Error
+										? error.name
+										: 'Error',
+								errorMessage:
+									error instanceof Error
+										? error.message
+										: String(error)
+							});
+							if (delayMs > 0) {
+								await new Promise((resolve) =>
+									setTimeout(resolve, delayMs)
+								);
+							}
+						}
+					}
 
-			// Resolve the retry policy once per call. When `mutation.retry` is
-			// undefined we still go through the loop, but bounded to one
-			// attempt with no backoff (cheaper than a separate code path).
-			const retry = mutation.retry;
-			const maxAttempts =
-				retry === undefined ? 1 : (retry.maxAttempts ?? 5);
-			const isRetryable = retry?.isRetryable ?? isSerializationFailure;
-			const computeDelay = retry?.backoff ?? exponentialBackoff();
-			const maxElapsedMs = retry?.maxElapsedMs ?? 30_000;
-			const startedAt = Date.now();
-
-			// Each attempt builds fresh `actions`/`buffered` via the makeActions
-			// call inside runHandler, so a retry never inherits half-applied
-			// buffered changes from a failed attempt. Transactions reopen too:
-			// runInTransaction wraps each individual attempt.
-			let lastError: unknown;
-			let attemptsMade = 0;
-			try {
-			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-				attemptsMade = attempt;
-				try {
-					const { buffered, result } =
-						runInTransaction !== undefined
-							? await runInTransaction((tx) => runHandler(tx))
-							: await runHandler(undefined);
-					await applyChangeBatch(buffered);
-					mutationsCompleted += 1;
+					mutationsFailed += 1;
 					emitActivity({
 						type: 'mutation',
 						at: Date.now(),
 						name,
-						status: 'ok'
+						status: 'error'
 					});
-					return result;
-				} catch (error) {
-					lastError = error;
-					const elapsedMs = Date.now() - startedAt;
-					const canRetry =
-						attempt < maxAttempts &&
-						isRetryable(error) &&
-						elapsedMs < maxElapsedMs;
-					if (!canRetry) break;
-					mutationsRetried += 1;
-
-					const rawDelay = computeDelay(attempt);
-					// Cap the delay so we don't blow past maxElapsedMs while
-					// sleeping. If the cap would be negative we're already past
-					// the budget; treat as exhausted.
-					const remaining = maxElapsedMs - elapsedMs;
-					if (remaining <= 0) break;
-					const delayMs = Math.max(0, Math.min(rawDelay, remaining));
-
-					emitActivity({
-						type: 'mutationRetry',
-						at: Date.now(),
-						name,
-						attempt,
-						delayMs,
-						errorName:
-							error instanceof Error ? error.name : 'Error',
-						errorMessage:
-							error instanceof Error
-								? error.message
-								: String(error)
-					});
-					if (delayMs > 0) {
-						await new Promise((resolve) =>
-							setTimeout(resolve, delayMs)
+					// Wrap only when we actually burned through more than one attempt
+					// — a non-retryable first-attempt failure passes through with its
+					// original error preserved, even if `retry` is configured.
+					if (attemptsMade > 1) {
+						throw new RetriesExhaustedError(
+							attemptsMade,
+							Date.now() - startedAt,
+							lastError
 						);
 					}
+					throw lastError;
+				} finally {
+					releaseMutationSlot();
 				}
-			}
-
-			mutationsFailed += 1;
-			emitActivity({
-				type: 'mutation',
-				at: Date.now(),
-				name,
-				status: 'error'
-			});
-			// Wrap only when we actually burned through more than one attempt
-			// — a non-retryable first-attempt failure passes through with its
-			// original error preserved, even if `retry` is configured.
-			if (attemptsMade > 1) {
-				throw new RetriesExhaustedError(
-					attemptsMade,
-					Date.now() - startedAt,
-					lastError
-				);
-			}
-			throw lastError;
-			} finally {
-				releaseMutationSlot();
-			}
 			} catch (spanError) {
 				// 1.21.0: outer span wrap — record any throw, rethrow.
 				span.recordException(spanError);
@@ -3626,9 +3684,7 @@ export const createSyncEngine = (
 			// (`changeLog[0]?.version === 1`).
 			const oldest = changeLog[0];
 			const truncated =
-				oldest !== undefined &&
-				oldest.version > 1 &&
-				oldest.at > at;
+				oldest !== undefined && oldest.version > 1 && oldest.at > at;
 			for (const entry of changeLog) {
 				if (entry.at > at) break;
 				if (
@@ -3681,8 +3737,12 @@ export const createSyncEngine = (
 			return handle;
 		},
 
-		exportSnapshot: async ({ tables, ctx = {} }: ExportSnapshotOptions = {}) => {
-			const tableFilter = tables !== undefined ? new Set(tables) : undefined;
+		exportSnapshot: async ({
+			tables,
+			ctx = {}
+		}: ExportSnapshotOptions = {}) => {
+			const tableFilter =
+				tables !== undefined ? new Set(tables) : undefined;
 			const rows: Record<string, ReadonlyArray<unknown>> = {};
 			for (const [table, reader] of readers) {
 				if (tableFilter !== undefined && !tableFilter.has(table)) {
@@ -3703,7 +3763,8 @@ export const createSyncEngine = (
 			snapshot,
 			{ tables, onProgress, ctx = {} }: ImportSnapshotOptions = {}
 		) => {
-			const tableFilter = tables !== undefined ? new Set(tables) : undefined;
+			const tableFilter =
+				tables !== undefined ? new Set(tables) : undefined;
 			const perTable: Record<string, number> = {};
 			const skipped: string[] = [];
 			let tablesImported = 0;
@@ -3771,6 +3832,15 @@ export const createSyncEngine = (
 				},
 				schedules: {
 					registered: schedules.size
+				},
+				source: {
+					changesReceived: sourceChangesReceived,
+					connected: connectedSources,
+					lastChangeAgeMs:
+						sourceLastChangeAt === null
+							? null
+							: now - sourceLastChangeAt,
+					lastChangeAt: sourceLastChangeAt
 				},
 				subscriptions: {
 					byCollection,

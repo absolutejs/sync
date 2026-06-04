@@ -1,6 +1,6 @@
 {
 	"name": "@absolutejs/sync",
-	"version": "1.24.0",
+	"version": "2.1.0",
 	"description": "Lightweight reactive-push and write-behind-cache primitives for Elysia and the AbsoluteJS ecosystem — kill polling and keep a remote store off your hot path, without adopting a whole sync-engine backend.",
 	"repository": {
 		"type": "git",
@@ -144,7 +144,7 @@
 		"@modelcontextprotocol/sdk": ">= 1.29.0",
 		"@angular/core": ">= 21.0.0",
 		"@elysiajs/cron": ">= 1.4.0",
-		"drizzle-orm": ">= 0.44.0",
+		"drizzle-orm": ">=1.0.0-rc.1",
 		"elysia": ">= 1.4.26",
 		"react": ">= 19.0.0",
 		"svelte": ">= 5.0.0",
@@ -197,7 +197,7 @@
 		"@tanstack/db": "0.6.7",
 		"@types/bun": "latest",
 		"@types/react": "^19.2.0",
-		"drizzle-orm": "^0.45.2",
+		"drizzle-orm": "1.0.0-rc.3",
 		"elysia": "latest",
 		"prettier": "latest",
 		"react": "^19.2.0",
