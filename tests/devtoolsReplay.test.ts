@@ -140,9 +140,7 @@ describe('syncDevtools — /replay endpoint', () => {
 			row: { id: 7, title: 'x' }
 		});
 		const response = await app.handle(
-			new Request(
-				`http://localhost/_admin/sync/replay?at=${Date.now()}`
-			)
+			new Request(`http://localhost/_admin/sync/replay?at=${Date.now()}`)
 		);
 		expect(response.status).toBe(200);
 		const body = (await response.json()) as {

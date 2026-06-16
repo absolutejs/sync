@@ -9,9 +9,17 @@ const makeEngine = () => {
 	const engine = createSyncEngine();
 	engine.registerReader('tasks', { all: () => [...store.values()] });
 	engine.registerWriter<Task>('tasks', {
-		delete: (row) => { store.delete(row.id); },
-		insert: (data) => { store.set(data.id, data); return data; },
-		update: (data) => { store.set(data.id, data); return data; }
+		delete: (row) => {
+			store.delete(row.id);
+		},
+		insert: (data) => {
+			store.set(data.id, data);
+			return data;
+		},
+		update: (data) => {
+			store.set(data.id, data);
+			return data;
+		}
 	});
 	engine.register(
 		defineCollection<Task>({
@@ -47,18 +55,26 @@ describe('AbortSignal — subscribe (1.15.0)', () => {
 		const sub = await engine.subscribe<Task>({
 			collection: 'tasks',
 			ctx: {},
-			onDiff: (diff) => { seenDiffs.push(diff.added.length); },
+			onDiff: (diff) => {
+				seenDiffs.push(diff.added.length);
+			},
 			params: undefined,
 			signal: controller.signal
 		});
 		expect(sub.initial).toEqual([]);
 		store.set(1, { id: 1, title: 'before' });
-		await engine.applyChange<Task>('tasks', { op: 'insert', row: { id: 1, title: 'before' } });
+		await engine.applyChange<Task>('tasks', {
+			op: 'insert',
+			row: { id: 1, title: 'before' }
+		});
 		expect(seenDiffs.length).toBe(1);
 
 		controller.abort();
 		// After abort, further changes should NOT reach onDiff.
-		await engine.applyChange<Task>('tasks', { op: 'insert', row: { id: 2, title: 'after' } });
+		await engine.applyChange<Task>('tasks', {
+			op: 'insert',
+			row: { id: 2, title: 'after' }
+		});
 		expect(seenDiffs.length).toBe(1);
 	});
 
@@ -129,7 +145,12 @@ describe('AbortSignal — hydrate (1.15.0)', () => {
 		const controller = new AbortController();
 		controller.abort();
 		await expect(
-			engine.hydrate('tasks', undefined, {}, { signal: controller.signal })
+			engine.hydrate(
+				'tasks',
+				undefined,
+				{},
+				{ signal: controller.signal }
+			)
 		).rejects.toBeInstanceOf(AbortError);
 	});
 
@@ -149,9 +170,14 @@ describe('AbortSignal — hydrate (1.15.0)', () => {
 			})
 		);
 		const controller = new AbortController();
-		const pending = engine.hydrate('tasks', undefined, {}, {
-			signal: controller.signal
-		});
+		const pending = engine.hydrate(
+			'tasks',
+			undefined,
+			{},
+			{
+				signal: controller.signal
+			}
+		);
 		setTimeout(() => controller.abort(), 5);
 		await expect(pending).rejects.toBeInstanceOf(AbortError);
 	});

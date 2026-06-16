@@ -15,9 +15,17 @@ const makeEngine = () => {
 	const engine = createSyncEngine();
 	engine.registerReader('tasks', { all: () => [...store.values()] });
 	engine.registerWriter<Task>('tasks', {
-		delete: (row) => { store.delete(row.id); },
-		insert: (data) => { store.set(data.id, data); return data; },
-		update: (data) => { store.set(data.id, data); return data; }
+		delete: (row) => {
+			store.delete(row.id);
+		},
+		insert: (data) => {
+			store.set(data.id, data);
+			return data;
+		},
+		update: (data) => {
+			store.set(data.id, data);
+			return data;
+		}
 	});
 	engine.register(
 		defineCollection<Task>({
@@ -32,7 +40,11 @@ const makeEngine = () => {
 
 describe('jsonSerializer (default — 1.16.0)', () => {
 	test('encodeServer produces a JSON string that round-trips', () => {
-		const frame: ServerFrame = { type: 'ack', mutationId: 7, result: { ok: true } };
+		const frame: ServerFrame = {
+			type: 'ack',
+			mutationId: 7,
+			result: { ok: true }
+		};
 		const encoded = jsonSerializer.encodeServer(frame);
 		expect(typeof encoded).toBe('string');
 		const decoded = jsonSerializer.decode(encoded);
@@ -65,7 +77,9 @@ describe('jsonSerializer (default — 1.16.0)', () => {
 
 	test('decode returns null on malformed input', () => {
 		expect(jsonSerializer.decode('{ not json')).toBeNull();
-		expect(jsonSerializer.decode(new TextEncoder().encode('garbage'))).toBeNull();
+		expect(
+			jsonSerializer.decode(new TextEncoder().encode('garbage'))
+		).toBeNull();
 	});
 });
 
@@ -83,7 +97,8 @@ describe('createSyncConnection with a custom serializer', () => {
 				return null;
 			}
 		},
-		encodeClient: (frame: ClientFrame) => `TAGGED::${JSON.stringify(frame)}`,
+		encodeClient: (frame: ClientFrame) =>
+			`TAGGED::${JSON.stringify(frame)}`,
 		encodeServer: (frame: ServerFrame) => `TAGGED::${JSON.stringify(frame)}`
 	};
 
@@ -98,11 +113,17 @@ describe('createSyncConnection with a custom serializer', () => {
 			},
 			serializer: taggedSerializer
 		});
-		await connection.handle({ collection: 'tasks', id: 's1', type: 'subscribe' });
+		await connection.handle({
+			collection: 'tasks',
+			id: 's1',
+			type: 'subscribe'
+		});
 		// `send` in this test stores the typed frame; the encoding happens
 		// in the WS adapter. So we test the inverse: a tagged INCOMING frame
 		// is parsed by the serializer.
-		expect(sent.some((frame) => (frame as ServerFrame).type === 'snapshot')).toBe(true);
+		expect(
+			sent.some((frame) => (frame as ServerFrame).type === 'snapshot')
+		).toBe(true);
 	});
 
 	test('incoming client frames go through serializer.decode', async () => {
@@ -111,7 +132,9 @@ describe('createSyncConnection with a custom serializer', () => {
 		const connection = createSyncConnection({
 			ctx: {},
 			engine,
-			send: (frame) => { sent.push(frame); },
+			send: (frame) => {
+				sent.push(frame);
+			},
 			serializer: taggedSerializer
 		});
 		const wireFrame = `TAGGED::${JSON.stringify({
@@ -129,13 +152,19 @@ describe('createSyncConnection with a custom serializer', () => {
 		const connection = createSyncConnection({
 			ctx: {},
 			engine,
-			send: (frame) => { sent.push(frame); },
+			send: (frame) => {
+				sent.push(frame);
+			},
 			serializer: taggedSerializer
 		});
-		await connection.handle(JSON.stringify({ type: 'subscribe', id: 's', collection: 'tasks' }));
+		await connection.handle(
+			JSON.stringify({ type: 'subscribe', id: 's', collection: 'tasks' })
+		);
 		// The taggedSerializer rejects untagged JSON; engine sends a Malformed error.
 		expect(sent[0]?.type).toBe('error');
-		expect((sent[0] as { message?: string }).message).toContain('Malformed');
+		expect((sent[0] as { message?: string }).message).toContain(
+			'Malformed'
+		);
 	});
 
 	test('default jsonSerializer keeps every pre-1.16 callsite working', async () => {
@@ -144,10 +173,14 @@ describe('createSyncConnection with a custom serializer', () => {
 		const connection = createSyncConnection({
 			ctx: {},
 			engine,
-			send: (frame) => { sent.push(frame); }
+			send: (frame) => {
+				sent.push(frame);
+			}
 			// no serializer — defaults to jsonSerializer
 		});
-		await connection.handle(JSON.stringify({ collection: 'tasks', id: 's1', type: 'subscribe' }));
+		await connection.handle(
+			JSON.stringify({ collection: 'tasks', id: 's1', type: 'subscribe' })
+		);
 		expect(sent.some((frame) => frame.type === 'snapshot')).toBe(true);
 	});
 });

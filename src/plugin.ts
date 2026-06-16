@@ -42,65 +42,78 @@ export const sync = ({
 	path = '/sync',
 	resolveTopics = defaultResolveTopics,
 	heartbeatMs = 25_000
-}: SyncPluginOptions) =>
-	new Elysia({ name: '@absolutejs/sync' }).get(path, (context) => {
-		const topics = resolveTopics({
-			query: context.query as Record<string, string | undefined>,
-			request: context.request
-		});
-		const encoder = new TextEncoder();
+}: SyncPluginOptions) => {
+	const app = new Elysia({ name: '@absolutejs/sync' }).get(
+		path,
+		(context) => {
+			const topics = resolveTopics({
+				query: context.query as Record<string, string | undefined>,
+				request: context.request
+			});
+			const encoder = new TextEncoder();
 
-		const stream = new ReadableStream<Uint8Array>({
-			start(controller) {
-				const write = (chunk: string) => {
-					try {
-						controller.enqueue(encoder.encode(chunk));
-					} catch {
-						// controller already closed by an abort race
-					}
-				};
-				const send = (event: ReactiveEvent) => {
-					write(`data: ${JSON.stringify(event)}\n\n`);
-				};
-
-				send({
-					topic: SYNC_OPEN_TOPIC,
-					at: Date.now(),
-					payload: { topics }
-				});
-
-				const unsubscribe =
-					topics.length > 0 ? hub.subscribe(topics, send) : () => {};
-				const heartbeat = setInterval(
-					() => write(': ping\n\n'),
-					heartbeatMs
-				);
-
-				context.request.signal.addEventListener(
-					'abort',
-					() => {
-						clearInterval(heartbeat);
-						unsubscribe();
+			const stream = new ReadableStream<Uint8Array>({
+				start(controller) {
+					const write = (chunk: string) => {
 						try {
-							controller.close();
+							controller.enqueue(encoder.encode(chunk));
 						} catch {
-							// already closed
+							// controller already closed by an abort race
 						}
-					},
-					{ once: true }
-				);
-			}
-		});
+					};
+					const send = (event: ReactiveEvent) => {
+						write(`data: ${JSON.stringify(event)}\n\n`);
+					};
 
-		return new Response(stream, {
-			headers: {
-				'cache-control': 'no-cache, no-transform',
-				connection: 'keep-alive',
-				'content-type': 'text/event-stream',
-				// Tell nginx (and other reverse proxies) not to buffer the
-				// stream — without this it holds chunks back and the SSE
-				// connection tears (ERR_INCOMPLETE_CHUNKED_ENCODING).
-				'x-accel-buffering': 'no'
-			}
-		});
-	});
+					send({
+						topic: SYNC_OPEN_TOPIC,
+						at: Date.now(),
+						payload: { topics }
+					});
+
+					const unsubscribe =
+						topics.length > 0
+							? hub.subscribe(topics, send)
+							: () => {};
+					const heartbeat = setInterval(
+						() => write(': ping\n\n'),
+						heartbeatMs
+					);
+
+					context.request.signal.addEventListener(
+						'abort',
+						() => {
+							clearInterval(heartbeat);
+							unsubscribe();
+							try {
+								controller.close();
+							} catch {
+								// already closed
+							}
+						},
+						{ once: true }
+					);
+				}
+			});
+
+			return new Response(stream, {
+				headers: {
+					'cache-control': 'no-cache, no-transform',
+					connection: 'keep-alive',
+					'content-type': 'text/event-stream',
+					// Tell nginx (and other reverse proxies) not to buffer the
+					// stream — without this it holds chunks back and the SSE
+					// connection tears (ERR_INCOMPLETE_CHUNKED_ENCODING).
+					'x-accel-buffering': 'no'
+				}
+			});
+		}
+	);
+
+	// The single SSE route uses a CONFIGURABLE path, so Elysia keys it by
+	// `string` — a string-indexed route that would pollute a consumer's
+	// whole-server type and is reached via EventSource, not Eden. The honest
+	// public type is a base Elysia (no typed surface to preserve).
+	// eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- see comment above
+	return app as unknown as Elysia;
+};

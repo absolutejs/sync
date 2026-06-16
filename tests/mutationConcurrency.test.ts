@@ -7,7 +7,11 @@ import {
 
 type Row = { id: number; tag: string };
 
-const wire = (instanceId: string, concurrency?: number, queueLimit?: number) => {
+const wire = (
+	instanceId: string,
+	concurrency?: number,
+	queueLimit?: number
+) => {
 	const store = new Map<number, Row>();
 	const engine = createSyncEngine({
 		instanceId,

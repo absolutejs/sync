@@ -75,7 +75,12 @@ export type SyncSocketOptions = {
 };
 
 type TrackedConnection = {
-	connection: SyncConnection;
+	// Null until the async `resolveContext` resolves. Frames that arrive in that
+	// window are buffered in `pending` and replayed once the connection exists —
+	// otherwise a client that sends `subscribe` synchronously on open (every
+	// @absolutejs/sync client does) loses it whenever auth is slow (a DB lookup).
+	connection: SyncConnection | null;
+	pending: unknown[];
 	slowSignaled: boolean;
 };
 
@@ -122,10 +127,6 @@ export const syncSocket = ({
 
 	return new Elysia({ name: '@absolutejs/sync/socket' }).ws(path, {
 		async open(ws) {
-			const ctx = resolveContext
-				? await resolveContext(ws.data as Record<string, unknown>)
-				: {};
-
 			// Permissive shape: we read `getBufferedAmount` + `close` if the
 			// runtime supports them (Bun's ServerWebSocket does) — fall back
 			// silently for test fakes. Accepts both string and Uint8Array
@@ -137,40 +138,74 @@ export const syncSocket = ({
 				close?: () => void;
 			};
 
+			// Register synchronously BEFORE awaiting `resolveContext`, so frames
+			// that arrive during the (possibly slow) auth resolve are buffered in
+			// `pending` rather than dropped (the `message` handler queues them
+			// when `connection` is still null).
 			const tracked: TrackedConnection = {
-				connection: createSyncConnection({
-					engine,
-					ctx,
-					presence,
-					serializer,
-					send: (frame) => {
-						const payload = serializer.encodeServer(frame);
-						const ret = bunWs.send(
-							typeof payload === 'string' ? payload : (payload as Uint8Array)
-						);
-						const buffered = bunWs.getBufferedAmount?.() ?? 0;
-
-						const overBuffer = buffered > threshold;
-						const backpressure = ret === -1;
-						if ((overBuffer || backpressure) && !tracked.slowSignaled) {
-							tracked.slowSignaled = true;
-							fireSlow({
-								bufferedAmount: buffered,
-								reason: backpressure ? 'send-backpressure' : 'buffer-threshold',
-								stats: tracked.connection.stats(),
-								wsId: bunWs.id
-							});
-							if (closeOnSlow) bunWs.close?.();
-						}
-						return ret;
-					}
-				}),
+				connection: null,
+				pending: [],
 				slowSignaled: false
 			};
 			connections.set(bunWs.id, tracked);
+
+			const ctx = resolveContext
+				? await resolveContext(ws.data as Record<string, unknown>)
+				: {};
+
+			const connection = createSyncConnection({
+				engine,
+				ctx,
+				presence,
+				serializer,
+				send: (frame) => {
+					const payload = serializer.encodeServer(frame);
+					const ret = bunWs.send(
+						typeof payload === 'string'
+							? payload
+							: (payload as Uint8Array)
+					);
+					const buffered = bunWs.getBufferedAmount?.() ?? 0;
+
+					const overBuffer = buffered > threshold;
+					const backpressure = ret === -1;
+					if ((overBuffer || backpressure) && !tracked.slowSignaled) {
+						tracked.slowSignaled = true;
+						fireSlow({
+							bufferedAmount: buffered,
+							reason: backpressure
+								? 'send-backpressure'
+								: 'buffer-threshold',
+							stats: connection.stats(),
+							wsId: bunWs.id
+						});
+						if (closeOnSlow) bunWs.close?.();
+					}
+					return ret;
+				}
+			});
+
+			// The socket may have closed while we were awaiting auth.
+			if (!connections.has(bunWs.id)) {
+				connection.close();
+				return;
+			}
+			tracked.connection = connection;
+			// Replay anything that arrived before auth resolved, in order.
+			const buffered = tracked.pending;
+			tracked.pending = [];
+			for (const frame of buffered) {
+				await connection.handle(frame);
+			}
 		},
 		async message(ws, message) {
-			await connections.get(ws.id)?.connection.handle(message);
+			const tracked = connections.get(ws.id);
+			if (!tracked) return;
+			if (tracked.connection) {
+				await tracked.connection.handle(message);
+			} else {
+				tracked.pending.push(message);
+			}
 		},
 		drain(ws) {
 			// WS buffer cleared — re-arm slow-client detection so the next
@@ -181,7 +216,7 @@ export const syncSocket = ({
 		close(ws) {
 			const tracked = connections.get(ws.id);
 			if (tracked) {
-				tracked.connection.close();
+				tracked.connection?.close();
 				connections.delete(ws.id);
 			}
 		}

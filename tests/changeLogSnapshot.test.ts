@@ -204,13 +204,14 @@ describe('engine.exportChangeLog() / importChangeLog() — 1.19.0', () => {
 	});
 
 	test('trims imported entries that exceed changeLogSize', () => {
-		const { engine: a } = createSyncEngine({
-			changeLogSize: 1024,
-			instanceId: 'engine-A'
-		}).constructor === Function
-			? // unreachable cast, but it satisfies the constructor-type narrowing
-				({} as never)
-			: { engine: null as never };
+		const { engine: a } =
+			createSyncEngine({
+				changeLogSize: 1024,
+				instanceId: 'engine-A'
+			}).constructor === Function
+				? // unreachable cast, but it satisfies the constructor-type narrowing
+					({} as never)
+				: { engine: null as never };
 		// Use a fresh tiny engine.
 		const fresh = createSyncEngine({
 			changeLogSize: 3,

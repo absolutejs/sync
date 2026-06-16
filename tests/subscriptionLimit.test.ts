@@ -36,8 +36,7 @@ const wireEngine = (
 	});
 	engine.register(
 		defineCollection<Row>({
-			authorize: (_params, ctx: Ctx) =>
-				ctx?.tenantId !== 'deny',
+			authorize: (_params, ctx: Ctx) => ctx?.tenantId !== 'deny',
 			hydrate: () => [...store.values()],
 			key: (row) => row.id,
 			match: () => true,

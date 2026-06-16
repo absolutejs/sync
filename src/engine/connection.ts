@@ -46,7 +46,13 @@ export type FrameDiff<T = unknown> = {
  * it on `subscribe.since` to resume across cluster shards.
  */
 export type ServerFrame<T = unknown> =
-	| { type: 'snapshot'; id: string; rows: T[]; version?: number; cursor?: string }
+	| {
+			type: 'snapshot';
+			id: string;
+			rows: T[];
+			version?: number;
+			cursor?: string;
+	  }
 	| {
 			type: 'diff';
 			id: string;
@@ -137,12 +143,19 @@ export type SyncConnection = {
 	stats: () => SyncConnectionStats;
 };
 
-const parseFrame = (raw: unknown, serializer: FrameSerializer): ClientFrame | undefined => {
+const parseFrame = (
+	raw: unknown,
+	serializer: FrameSerializer
+): ClientFrame | undefined => {
 	// 1.16.0: hand off the wire decode to the serializer (default JSON).
 	// The shape validation below is identical regardless of wire format —
 	// the serializer just produces an object, we walk it for type safety.
 	let value: unknown = raw;
-	if (typeof value === 'string' || value instanceof Uint8Array || value instanceof ArrayBuffer) {
+	if (
+		typeof value === 'string' ||
+		value instanceof Uint8Array ||
+		value instanceof ArrayBuffer
+	) {
 		value = serializer.decode(raw);
 		if (value === null) return undefined;
 	}
@@ -303,7 +316,11 @@ export const createSyncConnection = ({
 		});
 	};
 
-	const bufferDiff = (diff: FrameDiff, diffVersion: number, cursor?: string) => {
+	const bufferDiff = (
+		diff: FrameDiff,
+		diffVersion: number,
+		cursor?: string
+	) => {
 		// A new version means a new batch — flush the previous one first.
 		if (pending.length > 0 && pendingVersion !== diffVersion) {
 			flush();

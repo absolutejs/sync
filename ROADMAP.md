@@ -210,7 +210,7 @@ rows a user can't read. This is mandatory for Tier 3, not optional.
 - **Multi-tenant safety (closed in 1.20.0 / 1.20.1):** `mutationConcurrency` +
   `mutationQueueLimit` cap concurrent in-flight + queued mutations per engine, with
   `MutationQueueOverflowError` for clean gateway shedding. `subscriptionLimit: { max,
-  key }` caps active subscriptions per tenant key with `SubscriptionLimitError`
+key }` caps active subscriptions per tenant key with `SubscriptionLimitError`
   thrown before any state allocation. Both surface counters via `engine.metrics()`
   for tier monitoring.
 

@@ -303,17 +303,19 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 		ws.onopen = () => {
 			attempt = 0;
 			connected = true;
-			ws.send(serializer.encodeClient({
-				type: 'subscribe',
-				id: SUBSCRIPTION_ID,
-				collection: options.collection,
-				params: options.params,
-				// 1.18.0: prefer the opaque cross-instance cursor when set;
-				// fall back to the numeric appliedVersion for pre-1.17 servers.
-				since:
-					appliedCursor ??
-					(appliedVersion > 0 ? appliedVersion : undefined)
-			}) as string);
+			ws.send(
+				serializer.encodeClient({
+					type: 'subscribe',
+					id: SUBSCRIPTION_ID,
+					collection: options.collection,
+					params: options.params,
+					// 1.18.0: prefer the opaque cross-instance cursor when set;
+					// fall back to the numeric appliedVersion for pre-1.17 servers.
+					since:
+						appliedCursor ??
+						(appliedVersion > 0 ? appliedVersion : undefined)
+				}) as string
+			);
 			// Retry mutations that failed/queued while offline.
 			for (const mutation of pending) {
 				if (!mutation.settled && !mutation.inFlight) {

@@ -40,9 +40,9 @@ const makeCapturingTracerProvider = (): {
 				typeof optionsOrFn === 'function'
 					? (optionsOrFn as (span: Span) => unknown)
 					: (maybeFn as (span: Span) => unknown);
-			const options = (typeof optionsOrFn === 'function'
-				? {}
-				: optionsOrFn ?? {}) as {
+			const options = (
+				typeof optionsOrFn === 'function' ? {} : (optionsOrFn ?? {})
+			) as {
 				attributes?: Record<string, unknown>;
 			};
 			const record: CapturedSpan = {

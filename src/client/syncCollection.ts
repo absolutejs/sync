@@ -437,12 +437,14 @@ export const createSyncCollection = <T>(
 
 	const sendMutate = (mutation: PendingMutation<T>) => {
 		if (connected) {
-			wsSend(serializer.encodeClient({
-				type: 'mutate',
-				mutationId: mutation.mutationId,
-				name: mutation.name,
-				args: mutation.args
-			}));
+			wsSend(
+				serializer.encodeClient({
+					type: 'mutate',
+					mutationId: mutation.mutationId,
+					name: mutation.name,
+					args: mutation.args
+				})
+			);
 		}
 	};
 
@@ -456,18 +458,20 @@ export const createSyncCollection = <T>(
 		ws.onopen = () => {
 			attempt = 0;
 			connected = true;
-			ws.send(serializer.encodeClient({
-				type: 'subscribe',
-				id: SUBSCRIPTION_ID,
-				collection: options.collection,
-				params: options.params,
-				// 1.18.0: prefer the opaque cross-instance cursor when we
-				// have one; fall back to the local-version number for pre-1.17
-				// servers (or before any cursor has arrived).
-				since:
-					appliedCursor ??
-					(appliedVersion > 0 ? appliedVersion : undefined)
-			}) as string);
+			ws.send(
+				serializer.encodeClient({
+					type: 'subscribe',
+					id: SUBSCRIPTION_ID,
+					collection: options.collection,
+					params: options.params,
+					// 1.18.0: prefer the opaque cross-instance cursor when we
+					// have one; fall back to the local-version number for pre-1.17
+					// servers (or before any cursor has arrived).
+					since:
+						appliedCursor ??
+						(appliedVersion > 0 ? appliedVersion : undefined)
+				}) as string
+			);
 			// Replay anything still pending across the (re)connect.
 			for (const mutation of pending) {
 				sendMutate(mutation);
@@ -610,10 +614,12 @@ export const createSyncCollection = <T>(
 				clearTimeout(reconnectTimer);
 			}
 			try {
-				wsSend(serializer.encodeClient({
-					type: 'unsubscribe',
-					id: SUBSCRIPTION_ID
-				}));
+				wsSend(
+					serializer.encodeClient({
+						type: 'unsubscribe',
+						id: SUBSCRIPTION_ID
+					})
+				);
 				socket?.close();
 			} catch {
 				// socket already closing/closed

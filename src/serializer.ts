@@ -53,7 +53,9 @@ export const jsonSerializer: FrameSerializer = {
 		}
 		if (raw instanceof ArrayBuffer) {
 			try {
-				return JSON.parse(new TextDecoder().decode(new Uint8Array(raw)));
+				return JSON.parse(
+					new TextDecoder().decode(new Uint8Array(raw))
+				);
 			} catch {
 				return null;
 			}

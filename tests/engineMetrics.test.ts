@@ -11,9 +11,17 @@ const makeEngine = (options: Parameters<typeof createSyncEngine>[0] = {}) => {
 	const engine = createSyncEngine(options);
 	engine.registerReader('tasks', { all: () => [...store.values()] });
 	engine.registerWriter<Task>('tasks', {
-		delete: (row) => { store.delete(row.id); },
-		insert: (data) => { store.set(data.id, data); return data; },
-		update: (data) => { store.set(data.id, data); return data; }
+		delete: (row) => {
+			store.delete(row.id);
+		},
+		insert: (data) => {
+			store.set(data.id, data);
+			return data;
+		},
+		update: (data) => {
+			store.set(data.id, data);
+			return data;
+		}
 	});
 	engine.register(
 		defineCollection<Task>({
@@ -115,9 +123,9 @@ describe('engine.metrics()', () => {
 				name: 'fail'
 			})
 		);
-		await expect(
-			engine.runMutation('fail', undefined, {})
-		).rejects.toThrow('nope');
+		await expect(engine.runMutation('fail', undefined, {})).rejects.toThrow(
+			'nope'
+		);
 		const snap = engine.metrics();
 		expect(snap.mutations.completed).toBe(0);
 		expect(snap.mutations.failed).toBe(1);
@@ -125,7 +133,9 @@ describe('engine.metrics()', () => {
 	});
 
 	test('reactiveCache + schedules surface their capacity', () => {
-		const { engine } = makeEngine({ reactiveCache: { max: 64, ttlMs: 5000 } });
+		const { engine } = makeEngine({
+			reactiveCache: { max: 64, ttlMs: 5000 }
+		});
 		const snap = engine.metrics();
 		expect(snap.reactiveCache.capacity).toBe(64);
 		expect(snap.reactiveCache.entries).toBe(0);

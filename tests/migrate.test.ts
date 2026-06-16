@@ -11,10 +11,7 @@ import { describe, expect, test } from 'bun:test';
 import { defineCollection } from '../src/engine/collection';
 import { defineMutation } from '../src/engine/mutation';
 import { createSyncEngine } from '../src/engine/syncEngine';
-import {
-	EngineFencedError,
-	type EngineSnapshot
-} from '../src/engine/migrate';
+import { EngineFencedError, type EngineSnapshot } from '../src/engine/migrate';
 
 type Task = { id: number; title: string; done?: boolean };
 

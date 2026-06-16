@@ -11,7 +11,10 @@ export type SyncDevtoolsOptions = {
 	snapshotMs?: number;
 };
 
-const dashboardHtml = (streamPath: string, replayPath: string) => `<!doctype html>
+const dashboardHtml = (
+	streamPath: string,
+	replayPath: string
+) => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>@absolutejs/sync devtools</title>

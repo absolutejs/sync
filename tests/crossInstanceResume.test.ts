@@ -10,9 +10,17 @@ const makeEngine = (instanceId: string) => {
 	const engine = createSyncEngine({ instanceId });
 	engine.registerReader('tasks', { all: () => [...store.values()] });
 	engine.registerWriter<Task>('tasks', {
-		delete: (row) => { store.delete(row.id); },
-		insert: (data) => { store.set(data.id, data); return data; },
-		update: (data) => { store.set(data.id, data); return data; }
+		delete: (row) => {
+			store.delete(row.id);
+		},
+		insert: (data) => {
+			store.set(data.id, data);
+			return data;
+		},
+		update: (data) => {
+			store.set(data.id, data);
+			return data;
+		}
 	});
 	engine.register(
 		defineCollection<Task>({
@@ -92,7 +100,10 @@ describe('cursor + resume (single instance) — 1.17.0', () => {
 		});
 		expect(resumed.catchup).toBeDefined();
 		expect(resumed.initial).toEqual([]);
-		expect(resumed.catchup!.changed).toContainEqual({ id: 2, title: 'while-offline' });
+		expect(resumed.catchup!.changed).toContainEqual({
+			id: 2,
+			title: 'while-offline'
+		});
 		resumed.unsubscribe();
 	});
 
@@ -162,7 +173,10 @@ describe('cross-instance resume (1.17.0) — the headline feature', () => {
 		});
 		// B serves the catch-up from its own log of peer-A changes.
 		expect(resumedOnB.catchup).toBeDefined();
-		expect(resumedOnB.catchup!.changed).toContainEqual({ id: 1, title: 'via-A' });
+		expect(resumedOnB.catchup!.changed).toContainEqual({
+			id: 1,
+			title: 'via-A'
+		});
 
 		resumedOnB.unsubscribe();
 		await offA();

@@ -1,5 +1,6 @@
 import {
 	Column,
+	getColumnTable,
 	getTableColumns,
 	getTableName,
 	is,
@@ -115,7 +116,7 @@ export const extractKeyFromWhere = (
 	if (column.name !== resolved.column) {
 		return undefined;
 	}
-	if (getTableName(column.table) !== getTableName(table)) {
+	if (getTableName(getColumnTable(column)) !== getTableName(table)) {
 		return undefined;
 	}
 

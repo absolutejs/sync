@@ -296,23 +296,27 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		const since: number | string | undefined =
 			entry.cursor ??
 			(entry.appliedVersion > 0 ? entry.appliedVersion : undefined);
-		wsSend(serializer.encodeClient({
-			type: 'subscribe',
-			id: entry.id,
-			collection: entry.collection,
-			params: entry.params,
-			since
-		}));
+		wsSend(
+			serializer.encodeClient({
+				type: 'subscribe',
+				id: entry.id,
+				collection: entry.collection,
+				params: entry.params,
+				since
+			})
+		);
 	};
 
 	const sendMutate = (mutation: PendingMutation) => {
 		if (connected) {
-			wsSend(serializer.encodeClient({
-				type: 'mutate',
-				mutationId: mutation.mutationId,
-				name: mutation.name,
-				args: mutation.args
-			}));
+			wsSend(
+				serializer.encodeClient({
+					type: 'mutate',
+					mutationId: mutation.mutationId,
+					name: mutation.name,
+					args: mutation.args
+				})
+			);
 		}
 	};
 
@@ -419,10 +423,12 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				entry.closed = true;
 				entries.delete(entryId);
 				if (connected) {
-					wsSend(serializer.encodeClient({
-						type: 'unsubscribe',
-						id: entryId
-					}));
+					wsSend(
+						serializer.encodeClient({
+							type: 'unsubscribe',
+							id: entryId
+						})
+					);
 				}
 			}
 		};

@@ -23,7 +23,7 @@ composable verbs that operators wire together.
 - **`engine.exportSnapshot({ tables?, ctx? })`** — walks every
   registered reader's `all(ctx)` and returns a portable
   `EngineSnapshot` `{ sourceInstanceId, version, exportedAt, tables
-  }`. Optionally narrowed to a subset of tables. Detached from
+}`. Optionally narrowed to a subset of tables. Detached from
   `ChangeLogSnapshot`: snapshots carry live state, not history.
 - **`engine.importSnapshot(snapshot, { tables?, onProgress?, ctx? })`**
   — on the target, bulk-loads via each table's registered writer.
@@ -35,13 +35,15 @@ composable verbs that operators wire together.
 ```ts
 const fence = source.fence({ reason: 'tenant-7 → us-east-2' });
 try {
-  const snapshot = await source.exportSnapshot();
-  await transport(snapshot); // S3, message bus, etc.
-  await target.importSnapshot(snapshot, {
-    onProgress: (table, done, total) =>
-      console.log(`${table}: ${done}/${total}`)
-  });
-} finally { fence.lift(); }
+	const snapshot = await source.exportSnapshot();
+	await transport(snapshot); // S3, message bus, etc.
+	await target.importSnapshot(snapshot, {
+		onProgress: (table, done, total) =>
+			console.log(`${table}: ${done}/${total}`)
+	});
+} finally {
+	fence.lift();
+}
 ```
 
 **Out of scope** (caller's responsibility): out-of-band writes
@@ -50,6 +52,7 @@ through `runMutation`; if you're driving the engine from CDC, halt
 the CDC pipe before fencing.
 
 12 new tests in `tests/migrate.test.ts`:
+
 - runMutation throws EngineFencedError while fenced
 - subscribe + hydrate continue while fenced
 - multiple fences compose; engine unfences only after every lift
@@ -84,10 +87,11 @@ state at a target timestamp without writing code.
   truncated-warning banner when `truncated: true`, and a per-table
   collapsible pane (row count + first N rows in formatted JSON).
 - **Composes with custom mount path.** `syncDevtools({ engine, path:
-  '/_admin/sync' })` exposes the replay endpoint at
+'/_admin/sync' })` exposes the replay endpoint at
   `/_admin/sync/replay` automatically.
 
 5 new tests in `tests/devtoolsReplay.test.ts`:
+
 - dashboard HTML serves at the configured path and references the
   replay/stream URLs
 - replay returns JSON with reconstructed rows at a timestamp
@@ -129,6 +133,7 @@ use cases (e.g. `changeLogRetainMs: 14 * 24 * 60 * 60 * 1000` for a
 14-day forensic window).
 
 11 new tests in `tests/replayTo.test.ts`:
+
 - empty log returns empty rows
 - insert sequence reconstructs both rows
 - update — later state wins
@@ -206,6 +211,7 @@ per-tenant cap at `engine.subscribe`:
 - AbortSignal-driven unsubscribe also releases the slot.
 
 7 new tests in `tests/subscriptionLimit.test.ts`:
+
 - per-tenant cap holds,
 - different keys count separately,
 - undefined key skips the cap,
@@ -239,6 +245,7 @@ entry point so the PaaS host can bound throughput per engine:
   surfaced for the host's per-tenant tier monitoring.
 
 Semaphore semantics:
+
 - A `runMutations` batch counts as **one** slot, regardless of how
   many mutations the batch contains.
 - Authorization failures don't burn a slot (the gate runs after
@@ -251,6 +258,7 @@ Semaphore semantics:
   capacity check.
 
 7 new tests in `tests/mutationConcurrency.test.ts`:
+
 - cap = 2 holds the line at 2 in-flight with 3 queued,
 - queueLimit overflow rejects immediately,
 - no-setting case is a no-op (back-compat),
@@ -267,7 +275,7 @@ Test count: 546 → 553.
 
 The PaaS host needs a way to keep cursor resumability across a shard
 restart. 1.17.0/1.18.0 made the engine cluster-aware but tied resume
-to *peers being online*; if the engine that minted a cursor went down
+to _peers being online_; if the engine that minted a cursor went down
 and a fresh process started in its place, the local-origin entries
 were gone and any cursor referencing them fell back to a fresh
 snapshot.
@@ -296,6 +304,7 @@ and restore it on the replacement process:
   exactly as if the entries had been logged live.
 
 7 new tests in `tests/changeLogSnapshot.test.ts`:
+
 - export shape + shallow-copy semantics,
 - boot-time restore preserves cursor resumability across reboot,
 - restored engine continues to serve cluster resumes (peer entries
@@ -320,15 +329,15 @@ Test count: 539 → 546 (+7).
   was minted) hit `oldestLocal === undefined` and bailed out to a
   fresh snapshot.
 
-  Fixed by relaxing the local-origin check: when there are no local
-  entries in the log, fall through to a log-wide watermark check (the
-  log's oldest version must not exceed `lastSeen + 1`). The peer-origin
-  walk still independently verifies that every peer's tail is present.
+    Fixed by relaxing the local-origin check: when there are no local
+    entries in the log, fall through to a log-wide watermark check (the
+    log's oldest version must not exceed `lastSeen + 1`). The peer-origin
+    walk still independently verifies that every peer's tail is present.
 
-  Surfaced by a mixed-inline+spill cross-instance resume test in
-  `@absolutejs/sync-bus-pg`'s integration suite — the second instance
-  had logged the peer's two changes but never written its own, and
-  the resume path snapshot'd instead of catching up.
+    Surfaced by a mixed-inline+spill cross-instance resume test in
+    `@absolutejs/sync-bus-pg`'s integration suite — the second instance
+    had logged the peer's two changes but never written its own, and
+    the resume path snapshot'd instead of catching up.
 
 ## [1.18.1] — 2026-05-29
 
@@ -352,7 +361,7 @@ the cursor, reconnects to engine B (different cluster shard), engine B
 serves catch-up via peer-broadcasted changes.
 
 - **`OnDiff` callback signature widened** — now receives `(diff, version,
-  cursor?)`. The cursor is the engine's current cross-instance resume
+cursor?)`. The cursor is the engine's current cross-instance resume
   cursor at the time of the batch. Pre-1.18 2-arg callbacks keep
   working — the 3rd arg is optional.
 - **`ServerFrame.cursor?: string`** — every `snapshot` / `diff` / `frame`
@@ -437,10 +446,10 @@ exactly the same diff the original engine would have produced.
   msgpack, cbor, or any binary layout. The default `jsonSerializer`
   preserves every existing call site's behavior.
 - **Threaded through every layer:**
-  - Server: `createSyncConnection({ serializer })` + `syncSocket({ serializer })`.
-  - Client: `createSyncClient({ serializer })`,
-    `createSyncCollection({ serializer })`, `syncStore({ serializer })`,
-    `createPresence({ serializer })`.
+    - Server: `createSyncConnection({ serializer })` + `syncSocket({ serializer })`.
+    - Client: `createSyncClient({ serializer })`,
+      `createSyncCollection({ serializer })`, `syncStore({ serializer })`,
+      `createPresence({ serializer })`.
 - Both ends MUST use the same serializer; opt into a binary one on BOTH
   ends to cut the bandwidth + parse CPU on large snapshots — the
   customer-app side wins observable bytes-egress + faster cold reads.
@@ -470,19 +479,19 @@ already has and plug it in.
 
 - **`SubscribeArgs.signal: AbortSignal`** — first-class cancellation on
   `engine.subscribe`. Two effects:
-  1. If the signal is already aborted when `subscribe` is called, the engine
-     throws `AbortError` immediately — no authorize, no hydrate, no
-     subscription is built.
-  2. If the signal fires AFTER the subscription is live, the engine
-     auto-calls `unsubscribe()`. The consumer never has to thread two
-     handles for the same lifetime.
+    1. If the signal is already aborted when `subscribe` is called, the engine
+       throws `AbortError` immediately — no authorize, no hydrate, no
+       subscription is built.
+    2. If the signal fires AFTER the subscription is live, the engine
+       auto-calls `unsubscribe()`. The consumer never has to thread two
+       handles for the same lifetime.
 - **`engine.hydrate(collection, params, ctx, options?)`** — new optional
   4th arg. `options.signal` cancels mid-flight; the engine re-checks the
   signal after each major await (authorize, hydrate body) and throws
   `AbortError` when fired.
 - **`AbortError` exported** — `name === 'AbortError'` to match the
   DOM-standard spelling so existing `catch (error) { if (error.name ===
-  'AbortError') ... }` patterns work unchanged.
+'AbortError') ... }` patterns work unchanged.
 
 ### Notes
 
@@ -533,9 +542,9 @@ to reboot).
 - **`engine.metrics()`** — operator-shaped point-in-time engine state.
   Distinct from `engine.inspect()` (which is devtools-shaped). Returns
   `{ at, uptimeMs, version, changeLog: { entries, capacity, retainMs,
-  oldestVersion, oldestAgeMs }, subscriptions: { total, byCollection },
-  reactiveCache: { entries, capacity }, mutations: { completed, failed,
-  retried, inFlight }, schedules: { registered } }`. Designed for PaaS
+oldestVersion, oldestAgeMs }, subscriptions: { total, byCollection },
+reactiveCache: { entries, capacity }, mutations: { completed, failed,
+retried, inFlight }, schedules: { registered } }`. Designed for PaaS
   hosts to scrape on an interval and attribute cost per engine via
   `@absolutejs/metering`.
 - **`changeLogRetainMs` option** — time-based change-log retention,
@@ -545,7 +554,7 @@ to reboot).
   rate — both bounds memory and bounds catch-up work on reconnect.
   Default `null` (no time-based eviction).
 - **Per-mutation counters** — `engine.metrics().mutations.{completed,
-  failed, retried, inFlight}` accumulate since engine start. The
+failed, retried, inFlight}` accumulate since engine start. The
   `inFlight` counter wraps every `runMutation` call in a try/finally
   so it decrements correctly on the exception path too. Retry attempts
   bump `retried` regardless of whether the eventual outcome is success
@@ -900,15 +909,15 @@ docs page called out, with no breaking changes to the v0.1 surface.
   args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
   postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
 
-            The previous 1.7.2/1.7.3 design used a shared "current actions" slot
-            with a router Reference installed on a reused context, plus a
-            promise queue to serialize calls into that slot. 1.7.4 throws all of
-            that out:
-            - Each mutation is compiled to a `Callable` once at registration.
-              Source becomes `function(args, ctx, __dispatch) { ... return
+              The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+              with a router Reference installed on a reused context, plus a
+              promise queue to serialize calls into that slot. 1.7.4 throws all of
+              that out:
+              - Each mutation is compiled to a `Callable` once at registration.
+                Source becomes `function(args, ctx, __dispatch) { ... return
 
     userFn(args, ctx, actions); }`where`actions`is an in-VM shim
-  over`\_\_dispatch`.
+over`\_\_dispatch`.
     - Per call: build a fresh dispatch `Reference`closed over this
       call's`actions`, invoke `callable.call([args, ctx, dispatch])`.
     - No shared slot → no serialization queue. Concurrent same-mutation
@@ -917,10 +926,10 @@ docs page called out, with no breaking changes to the v0.1 surface.
       is reused; per-call work doesn't create JSC metadata that needs
       GCing.
 
-              Behavioural notes: handler errors still propagate as `Error` objects
-              with `.message` and `.name`. Timeouts still terminate the isolate
-              on Worker; on FFI they throw `TimeoutError` and the isolate stays
-              alive (next call respawns the context). No public API changes.
+                Behavioural notes: handler errors still propagate as `Error` objects
+                with `.message` and `.name`. Timeouts still terminate the isolate
+                on Worker; on FFI they throw `TimeoutError` and the isolate stays
+                alive (next call respawns the context). No public API changes.
 
 ### Bumped
 
@@ -1088,14 +1097,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-                        ```ts
-                        import { syncCdc } from '@absolutejs/sync';
-                        new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-                        ```
+                            ```ts
+                            import { syncCdc } from '@absolutejs/sync';
+                            new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+                            ```
 
-                        New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-                        `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-                        `MissedChangesError`, `CdcConsumerSlowError`.
+                            New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+                            `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+                            `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 

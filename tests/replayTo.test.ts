@@ -42,7 +42,8 @@ const wireEngine = (options: { changeLogSize?: number } = {}) => {
 	return { engine, store };
 };
 
-const waitMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitMs = (ms: number) =>
+	new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('engine.replayTo — basic walk', () => {
 	test('returns empty rows when no changes have been logged', async () => {

@@ -87,7 +87,9 @@ export const createPresence = <S>(
 			// Presence sends are presence-* ClientFrames; the serializer
 			// validates structurally on encode.
 			socket?.send(
-				serializer.encodeClient(frame as Parameters<FrameSerializer['encodeClient']>[0]) as string
+				serializer.encodeClient(
+					frame as Parameters<FrameSerializer['encodeClient']>[0]
+				) as string
 			);
 		}
 	};
@@ -101,12 +103,14 @@ export const createPresence = <S>(
 		ws.onopen = () => {
 			attempt = 0;
 			connected = true;
-			ws.send(serializer.encodeClient({
-				type: 'presence-join',
-				room: options.room,
-				memberId: id,
-				state
-			}) as string);
+			ws.send(
+				serializer.encodeClient({
+					type: 'presence-join',
+					room: options.room,
+					memberId: id,
+					state
+				}) as string
+			);
 		};
 		ws.onmessage = (event) => {
 			let frame: {

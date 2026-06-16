@@ -11,9 +11,17 @@ const makeEngine = (instanceId: string) => {
 	const engine = createSyncEngine({ instanceId });
 	engine.registerReader('tasks', { all: () => [...store.values()] });
 	engine.registerWriter<Task>('tasks', {
-		delete: (row) => { store.delete(row.id); },
-		insert: (data) => { store.set(data.id, data); return data; },
-		update: (data) => { store.set(data.id, data); return data; }
+		delete: (row) => {
+			store.delete(row.id);
+		},
+		insert: (data) => {
+			store.set(data.id, data);
+			return data;
+		},
+		update: (data) => {
+			store.set(data.id, data);
+			return data;
+		}
 	});
 	engine.register(
 		defineCollection<Task>({
@@ -34,9 +42,15 @@ describe('connection forwards cursor on ServerFrame (1.18.0)', () => {
 		const connection = createSyncConnection({
 			ctx: {},
 			engine,
-			send: (frame) => { sent.push(frame); }
+			send: (frame) => {
+				sent.push(frame);
+			}
 		});
-		await connection.handle({ collection: 'tasks', id: 's1', type: 'subscribe' });
+		await connection.handle({
+			collection: 'tasks',
+			id: 's1',
+			type: 'subscribe'
+		});
 
 		const snapshot = sent.find((frame) => frame.type === 'snapshot');
 		expect(snapshot).toBeDefined();
@@ -54,15 +68,23 @@ describe('connection forwards cursor on ServerFrame (1.18.0)', () => {
 		const connection = createSyncConnection({
 			ctx: {},
 			engine,
-			send: (frame) => { sent.push(frame); }
+			send: (frame) => {
+				sent.push(frame);
+			}
 		});
-		await connection.handle({ collection: 'tasks', id: 's1', type: 'subscribe' });
+		await connection.handle({
+			collection: 'tasks',
+			id: 's1',
+			type: 'subscribe'
+		});
 		await engine.applyChange<Task>('tasks', {
 			op: 'insert',
 			row: { id: 1, title: 'new' }
 		});
 		// Microtask flush queues the diff; wait for it.
-		await new Promise((resolve) => queueMicrotask(() => resolve(undefined)));
+		await new Promise((resolve) =>
+			queueMicrotask(() => resolve(undefined))
+		);
 
 		const diff = sent.find((frame) => frame.type === 'diff');
 		expect(diff).toBeDefined();
@@ -77,11 +99,17 @@ describe('connection forwards cursor on ServerFrame (1.18.0)', () => {
 		const connection = createSyncConnection({
 			ctx: {},
 			engine,
-			send: (frame) => { sent.push(frame); }
+			send: (frame) => {
+				sent.push(frame);
+			}
 		});
 
 		// First subscribe — get a cursor from the snapshot.
-		await connection.handle({ collection: 'tasks', id: 's1', type: 'subscribe' });
+		await connection.handle({
+			collection: 'tasks',
+			id: 's1',
+			type: 'subscribe'
+		});
 		const snapshot = sent.find((frame) => frame.type === 'snapshot')!;
 		const cursor = (snapshot as { cursor: string }).cursor;
 		await connection.handle({ id: 's1', type: 'unsubscribe' });
@@ -117,7 +145,9 @@ describe('connection forwards cursor on ServerFrame (1.18.0)', () => {
 		const connection = createSyncConnection({
 			ctx: {},
 			engine,
-			send: (frame) => { sent.push(frame); }
+			send: (frame) => {
+				sent.push(frame);
+			}
 		});
 
 		// Legacy form: number.
@@ -170,7 +200,9 @@ describe('OnDiff fires with cursor argument', () => {
 			collection: 'tasks',
 			ctx: {},
 			// Legacy 2-arg callback shape — no cursor parameter.
-			onDiff: (_diff, version) => { versions.push(version); },
+			onDiff: (_diff, version) => {
+				versions.push(version);
+			},
 			params: undefined
 		});
 		await engine.applyChange<Task>('tasks', {
