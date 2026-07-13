@@ -3,6 +3,17 @@ export type {
 	WriteBehindCache,
 	WriteBehindCacheOptions
 } from './writeBehindCache';
+export {
+	ConnectionBrokerDrainedError,
+	createConnectionBroker,
+	LeaseTimeoutError
+} from './connectionBroker';
+export type {
+	ConnectionBroker,
+	ConnectionBrokerMetrics,
+	ConnectionBrokerOptions,
+	ConnectionLease
+} from './connectionBroker';
 export { createReactiveHub } from './reactiveHub';
 export type {
 	ReactiveEvent,

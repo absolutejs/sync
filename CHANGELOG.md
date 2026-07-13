@@ -4,6 +4,108 @@ All notable changes to `@absolutejs/sync` are recorded here. The format is loose
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org) from 1.0 onward.
 
+## [2.3.0] — 2026-07-13
+
+### Added — `createConnectionBroker` (BYO-Postgres connection multiplexing)
+
+One shard hosting 50 customers, each spawning its own PG pool,
+instantly exceeds a managed provider's connection limit. The new
+broker multiplexes ONE upstream connection budget across many tenant
+logical DBs — no pgbouncer sidecar. Generic over `Conn`: the broker
+never imports a DB driver, `create`/`destroy` are caller-supplied
+(postgres-js, `Bun.sql`, anything).
+
+- **`createConnectionBroker<Conn>(options)`** — new root export.
+  Options: `create` (required), `maxTotal` (required global in-use
+  cap, > 0), `maxPerTenant?`, `acquireTimeoutMs?`, `idleReleaseMs?`,
+  `validate?`, `destroy?`, `onError?(err, phase)`, `now?` (injectable
+  clock), `tracerProvider?`.
+- **`broker.lease(tenant)`** → `{ conn, release() }`. At cap, callers
+  queue FIFO and are handed a released connection immediately; idle
+  reuse is LIFO for cache warmth; `release()` is idempotent.
+- **`broker.withLease(tenant, fn)`** — lease, run, release in
+  `finally`.
+- **`broker.drain()`** — stop new leases (rejects with the new
+  `ConnectionBrokerDrainedError`), serve the existing queue through,
+  resolve when in-use hits zero. **`broker.dispose()`** — drain-if-
+  needed, reject queued waiters, destroy idle connections; leased
+  connections are destroyed on their eventual release.
+- **`broker.metrics()`** — operator-shaped like `engine.metrics()`:
+  `{ inUse, idle, queued, byTenant, cumulative: { leases, releases,
+timeouts, created, destroyed, validationFailures } }`.
+- **Idle harvesting** — pooled connections unused for `idleReleaseMs`
+  are destroyed, on an unref'd timer AND lazily on every lease (the
+  injected `now` makes this testable without timers).
+- **Health-checked reuse** — `validate` runs on every pooled reuse;
+  `false` (or a throw) destroys the connection and serves the lease
+  from a fresh create, so a server-side idle disconnect never reaches
+  a caller.
+- **Typed errors** — `LeaseTimeoutError` (`{ tenant, timeoutMs }`)
+  when `acquireTimeoutMs` elapses; `ConnectionBrokerDrainedError`
+  after drain/dispose. Both exported from the root.
+- **OTel** — with a `tracerProvider`, every lease is traced as a
+  `sync.broker_lease` span carrying `abs.tenant` and
+  `abs.broker.queue_wait_ms`. Noop (zero-cost) when unset.
+
+```ts
+const broker = createConnectionBroker({
+	create: () => postgres(DATABASE_URL, { max: 1 }),
+	destroy: (sql) => sql.end(),
+	maxPerTenant: 3,
+	maxTotal: 20
+});
+const rows = await broker.withLease(
+	tenantId,
+	(sql) => sql`select * from orders where tenant = ${tenantId}`
+);
+```
+
+13 new tests in `tests/connectionBroker.test.ts`, including a
+50-lease storm over `maxTotal: 5` asserting the cap never breaches
+and the whole storm rides 5 physical connections.
+
+## [2.2.2] — 2026-06 (backfilled 2026-07-13)
+
+- **Package manifest** — ships the `@absolutejs/manifest` contract v1:
+  a `./manifest` subpath with the settings schema (drift-checked
+  against the composite `SyncPluginOptions` / `SyncEngineOptions` /
+  `SyncSocketOptions` / `SyncDevtoolsOptions`), five wiring recipes
+  (SSE push, ORM live-query, sync engine, collaborative text,
+  cluster), runtime AI tools over `{ engine, hub }` (engine_overview,
+  engine_metrics, replay_at, run_schedule, publish_topic), and two
+  adapter contract ids with bundled defaults: `sync/crdt-adapter`
+  (rgaText) and `sync/cluster-bus` (createInMemoryClusterBus).
+  `absolute-manifest emit` writes `dist/manifest.json` at build.
+
+## [2.2.1] — 2026-06 (backfilled 2026-07-13)
+
+- npm support metadata (homepage / bugs) + pending local changes.
+  No functional change.
+
+## [2.2.0] — 2026-06 (backfilled 2026-07-13)
+
+- **Affects gate** — optional `CollectionDefinition.affects(change,
+  params, ctx)` for refetch-fallback collections (multi-table views,
+  or views where the change row isn't the collection's `T` so `match`
+  can't apply). The engine skips re-hydrating subscriptions a change
+  provably can't touch: fan-out drops from O(all subscribers) to
+  O(affected). Conservative — defaults to affected when unsure;
+  ignored when `match` is set.
+
+## [2.1.0] — 2026-06 (backfilled 2026-07-13)
+
+> **Note on the major bump:** there was no 2.0.0 release and no
+> breaking change. The version rolled 1.24.0 → 2.1.0 alongside the
+> first public npm publish (BSL 1.1 license + support metadata). The
+> public API is unchanged from 1.24.0.
+
+- **Change-source liveness** — `engine.metrics().source` reports
+  `{ connected, changesReceived, lastChangeAt, lastChangeAgeMs }`
+  aggregated across every `connectSource`, so a health check can
+  distinguish a wired-but-silent CDC feed (`connected` with
+  `changesReceived === 0`) from a healthy one, and external alerting
+  can catch a feed that has gone quiet.
+
 ## [1.24.0] — 2026-05-30
 
 ### Added — G7 tenant migration primitives (`fence` / `exportSnapshot` / `importSnapshot`)
@@ -909,27 +1011,26 @@ docs page called out, with no breaking changes to the v0.1 surface.
   args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
   postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
 
-              The previous 1.7.2/1.7.3 design used a shared "current actions" slot
-              with a router Reference installed on a reused context, plus a
-              promise queue to serialize calls into that slot. 1.7.4 throws all of
-              that out:
-              - Each mutation is compiled to a `Callable` once at registration.
-                Source becomes `function(args, ctx, __dispatch) { ... return
+                  The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+                  with a router Reference installed on a reused context, plus a
+                  promise queue to serialize calls into that slot. 1.7.4 throws all of
+                  that out:
+                  - Each mutation is compiled to a `Callable` once at registration.
+                    Source becomes `function(args, ctx, __dispatch) { ... return
 
-    userFn(args, ctx, actions); }`where`actions`is an in-VM shim
-over`\_\_dispatch`.
-    - Per call: build a fresh dispatch `Reference`closed over this
-      call's`actions`, invoke `callable.call([args, ctx, dispatch])`.
-    - No shared slot → no serialization queue. Concurrent same-mutation
-      calls are safe by construction (each has its own dispatch
-      Reference closed over its own `actions`). - No reused context recycling — the callable's underlying function
-      is reused; per-call work doesn't create JSC metadata that needs
-      GCing.
+        userFn(args, ctx, actions); }`where`actions`is an in-VM shim
 
-                Behavioural notes: handler errors still propagate as `Error` objects
-                with `.message` and `.name`. Timeouts still terminate the isolate
-                on Worker; on FFI they throw `TimeoutError` and the isolate stays
-                alive (next call respawns the context). No public API changes.
+    over`\_\_dispatch`. - Per call: build a fresh dispatch `Reference`closed over this
+    call's`actions`, invoke `callable.call([args, ctx, dispatch])`. - No shared slot → no serialization queue. Concurrent same-mutation
+    calls are safe by construction (each has its own dispatch
+    Reference closed over its own `actions`). - No reused context recycling — the callable's underlying function
+    is reused; per-call work doesn't create JSC metadata that needs
+    GCing.
+
+                    Behavioural notes: handler errors still propagate as `Error` objects
+                    with `.message` and `.name`. Timeouts still terminate the isolate
+                    on Worker; on FFI they throw `TimeoutError` and the isolate stays
+                    alive (next call respawns the context). No public API changes.
 
 ### Bumped
 
@@ -1097,14 +1198,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-                            ```ts
-                            import { syncCdc } from '@absolutejs/sync';
-                            new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-                            ```
+                                ```ts
+                                import { syncCdc } from '@absolutejs/sync';
+                                new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+                                ```
 
-                            New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-                            `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-                            `MissedChangesError`, `CdcConsumerSlowError`.
+                                New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+                                `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+                                `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 
