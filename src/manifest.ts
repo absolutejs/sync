@@ -34,7 +34,10 @@ const tool = toolFactory<SyncManifestRuntime>();
 
 const RECENT_CHANGES_LIMIT = 20;
 
-export const manifest = defineManifest<SyncManifestConfig, SyncManifestRuntime>()({
+export const manifest = defineManifest<
+	SyncManifestConfig,
+	SyncManifestRuntime
+>()({
 	contract: 1,
 	identity: {
 		accent: '#10b981',
@@ -53,9 +56,7 @@ export const manifest = defineManifest<SyncManifestConfig, SyncManifestRuntime>(
 			title: 'Built-in collaborative text (zero dependencies)',
 			wiring: {
 				code: 'rgaText',
-				imports: [
-					{ from: '@absolutejs/sync/crdt', names: ['rgaText'] }
-				]
+				imports: [{ from: '@absolutejs/sync/crdt', names: ['rgaText'] }]
 			}
 		}),
 		defineImplementation<never>()({
@@ -79,7 +80,8 @@ export const manifest = defineManifest<SyncManifestConfig, SyncManifestRuntime>(
 			/* Code-change step (v1 convention: no command): run the SQL from
 			 * postgresNotifyTrigger({ tables }) against your database, then
 			 * engine.connectSource(postgresChangeSource(...)). */
-			docsUrl: 'https://github.com/absolutejs/sync#live-collections--the-sync-engine-tier-3',
+			docsUrl:
+				'https://github.com/absolutejs/sync#live-collections--the-sync-engine-tier-3',
 			id: 'cdc-triggers',
 			idempotent: true,
 			kind: 'migration',
@@ -269,9 +271,8 @@ export const manifest = defineManifest<SyncManifestConfig, SyncManifestRuntime>(
 
 				return JSON.stringify({
 					...inspection,
-					recentChanges: inspection.recentChanges.slice(
-						-RECENT_CHANGES_LIMIT
-					)
+					recentChanges:
+						inspection.recentChanges.slice(-RECENT_CHANGES_LIMIT)
 				});
 			},
 			input: Type.Object({})
@@ -398,7 +399,7 @@ export const manifest = defineManifest<SyncManifestConfig, SyncManifestRuntime>(
 					'// Mount with .use(syncPush). Reads map to topics automatically',
 					"// (a list read of `orders` -> topic 'orders'; a primary-key lookup",
 					"// -> 'orders:<id>'). After a write, publish from the same filter:",
-					'//   publishWhere(hub, orders, eq(orders.id, id), { op: \'update\' });',
+					"//   publishWhere(hub, orders, eq(orders.id, id), { op: 'update' });",
 					"// (same function names on '@absolutejs/sync/prisma' for Prisma.)",
 					'const syncPush = sync({ heartbeatMs: ${settings.push.heartbeatMs}, hub, path: ${settings.push.path} });'
 				].join('\n'),

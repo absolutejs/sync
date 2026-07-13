@@ -238,7 +238,10 @@ describe('affects gate (refetch fallback)', () => {
 				// Multi-table → refetch fallback (no incremental match).
 				tables: ['orders', 'order_items'],
 				hydrate: (p) => {
-					hydrateCalls.set(p.userId, (hydrateCalls.get(p.userId) ?? 0) + 1);
+					hydrateCalls.set(
+						p.userId,
+						(hydrateCalls.get(p.userId) ?? 0) + 1
+					);
 
 					return orders.filter((o) => o.userId === p.userId);
 				},
