@@ -9,6 +9,7 @@ await rm(DIST, { force: true, recursive: true });
 const serverBuild = await Bun.build({
 	entrypoints: [
 		'src/index.ts',
+		'src/manifest.ts',
 		'src/writeBehindCache.ts',
 		'src/scheduled.ts',
 		'src/testing.ts',
@@ -68,3 +69,4 @@ if (!browserBuild.success) {
 }
 
 await $`tsc --emitDeclarationOnly --project tsconfig.build.json`;
+await $`absolute-manifest emit`;
