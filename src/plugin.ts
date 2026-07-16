@@ -16,7 +16,9 @@ export type SyncPluginOptions = {
 	 * `?topics=a,b,c` query param. Override to derive topics from the session,
 	 * params, or auth instead of trusting the client.
 	 */
-	resolveTopics?: (context: SyncRequestContext) => string[];
+	resolveTopics?: (
+		context: SyncRequestContext
+	) => Promise<string[]> | string[];
 	/**
 	 * Server→client heartbeat comment, so idle proxies don't drop the SSE stream.
 	 * Defaults to 25000ms.
@@ -45,8 +47,8 @@ export const sync = ({
 }: SyncPluginOptions) => {
 	const app = new Elysia({ name: '@absolutejs/sync' }).get(
 		path,
-		(context) => {
-			const topics = resolveTopics({
+		async (context) => {
+			const topics = await resolveTopics({
 				query: context.query as Record<string, string | undefined>,
 				request: context.request
 			});

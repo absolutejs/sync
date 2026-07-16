@@ -142,6 +142,23 @@ describe('sync plugin', () => {
 		expect(parseData(open).payload).toEqual({ topics: ['session:abc'] });
 	});
 
+	test('awaits database-backed topic authorization before opening', async () => {
+		const hub = createReactiveHub();
+		const app = new Elysia().use(
+			sync({
+				hub,
+				resolveTopics: async ({ query }) => {
+					await Promise.resolve();
+					return query.project === 'owned' ? ['project:owned'] : [];
+				}
+			})
+		);
+
+		const response = await connect(app, '/sync?project=owned');
+		const [open] = await readFrames(response, 1);
+		expect(parseData(open).payload).toEqual({ topics: ['project:owned'] });
+	});
+
 	test('a connection with no topics subscribes to nothing but still opens', async () => {
 		const hub = createReactiveHub();
 		const app = new Elysia().use(sync({ hub, heartbeatMs: 10_000 }));
