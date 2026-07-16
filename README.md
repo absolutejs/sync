@@ -4,6 +4,32 @@ Reactive data primitives for [Elysia](https://elysiajs.com) and the AbsoluteJS
 ecosystem — kill polling and keep a remote store off your hot path, **on your own
 database and ORM** (Drizzle _or_ Prisma, any DB they support).
 
+## Platform-managed runtime
+
+Platforms can supply bounded Sync lifecycle settings without inventing their
+own environment parser or plugin assembly. Declare one
+`ABSOLUTE_SYNC_RUNTIME` JSON value, then let the application register its own
+collections, permissions, writers, and authentication on the returned runtime:
+
+```ts
+import { Elysia } from 'elysia';
+import { createPlatformSyncRuntime } from '@absolutejs/sync/platform';
+
+const managedSync = createPlatformSyncRuntime({
+	resolveContext: (request) => authenticate(request)
+});
+
+managedSync.engine?.register(ordersCollection);
+new Elysia().use(managedSync.app).listen(3000);
+```
+
+The platform contract controls paths, reconnect history, mutation pressure,
+slow-client behavior, and stable instance identity. A fixed
+`/.well-known/absolute/sync` endpoint lets the runtime host fail readiness when
+an opted-in release forgot to mount the returned app. The platform never owns
+application schemas or authorization rules, so the project remains portable
+and can construct `@absolutejs/sync` explicitly outside managed hosting.
+
 - **`createReactiveHub` + `sync` plugin** — push-on-change over SSE. A view
   subscribes to the topics its data depends on; a mutation publishes those topics;
   subscribers refetch (or read the pushed payload) the instant data changes.

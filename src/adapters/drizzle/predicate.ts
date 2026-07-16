@@ -80,9 +80,11 @@ const classify = (chunks: unknown[]): Classified => {
 			);
 		} else {
 			const raw = (chunk as { value?: unknown }).value;
-			const text = (
-				Array.isArray(raw) ? raw.join('') : String(raw ?? '')
-			).trim();
+			const text = (Array.isArray(raw) ? raw.join('') : String(raw ?? ''))
+				.trim()
+				.replace(/^[()]+\s*/, '')
+				.replace(/\s*[()]+$/, '')
+				.trim();
 			if (text !== '' && text !== '(' && text !== ')') {
 				ops.push(text);
 			}

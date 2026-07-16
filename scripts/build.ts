@@ -10,6 +10,7 @@ const serverBuild = await Bun.build({
 	entrypoints: [
 		'src/index.ts',
 		'src/manifest.ts',
+		'src/platform.ts',
 		'src/writeBehindCache.ts',
 		'src/scheduled.ts',
 		'src/testing.ts',
@@ -25,6 +26,7 @@ const serverBuild = await Bun.build({
 	external: [
 		'elysia',
 		'@elysiajs/cron',
+		'@sinclair/typebox',
 		'drizzle-orm',
 		'@absolutejs/isolated-jsc',
 		'@modelcontextprotocol/sdk'
