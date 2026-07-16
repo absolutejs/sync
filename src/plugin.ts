@@ -3,6 +3,7 @@ import { SYNC_OPEN_TOPIC } from './reactiveHub';
 import type { ReactiveEvent, ReactiveHub } from './reactiveHub';
 
 export type SyncRequestContext = {
+	cookies: Record<string, unknown>;
 	query: Record<string, string | undefined>;
 	request: Request;
 };
@@ -48,7 +49,14 @@ export const sync = ({
 	const app = new Elysia({ name: '@absolutejs/sync' }).get(
 		path,
 		async (context) => {
+			const cookies = Object.fromEntries(
+				Object.entries(context.cookie).map(([name, cookie]) => [
+					name,
+					cookie.value
+				])
+			);
 			const topics = await resolveTopics({
+				cookies,
 				query: context.query as Record<string, string | undefined>,
 				request: context.request
 			});
