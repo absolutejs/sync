@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.0] — 2026-07-17
+
+- Connection brokers now support `affinity: 'tenant'` for BYO database
+  credentials. Idle connections are reused only by their owning tenant, the
+  tenant is passed to `create`, and `maxTotal` remains a hard ceiling across
+  active plus idle physical connections.
+
 ## [2.7.1] — 2026-07-16
 
 - Export `PlatformSyncHealthSchema` and its static type so hosts validate the

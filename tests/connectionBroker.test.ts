@@ -76,6 +76,38 @@ describe('createConnectionBroker', () => {
 		await broker.dispose();
 	});
 
+	test('tenant affinity never crosses credentials and caps physical connections', async () => {
+		let nextId = 0;
+		const destroyed: Array<{ id: number; tenant: string }> = [];
+		const broker = createConnectionBroker({
+			affinity: 'tenant',
+			create: (tenant) => ({ id: nextId++, tenant }),
+			destroy: (connection) => {
+				destroyed.push(connection);
+			},
+			maxTotal: 2
+		});
+		const acme = await broker.lease('acme');
+		expect(acme.conn.tenant).toBe('acme');
+		acme.release();
+		const globex = await broker.lease('globex');
+		expect(globex.conn.tenant).toBe('globex');
+		globex.release();
+		const initech = await broker.lease('initech');
+		expect(initech.conn.tenant).toBe('initech');
+		expect(destroyed).toEqual([{ id: 0, tenant: 'acme' }]);
+		initech.release();
+		const globexAgain = await broker.lease('globex');
+		expect(globexAgain.conn).toBe(globex.conn);
+		globexAgain.release();
+		expect(broker.metrics()).toMatchObject({
+			idle: 2,
+			inUse: 0,
+			cumulative: { created: 3, destroyed: 1 }
+		});
+		await broker.dispose();
+	});
+
 	test('caps per tenant independently of the global cap', async () => {
 		const factory = makeFactory();
 		const broker = createConnectionBroker({

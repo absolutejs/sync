@@ -42,11 +42,17 @@ export class ConnectionBrokerDrainedError extends Error {
 
 export type ConnectionBrokerOptions<Conn> = {
 	/**
+	 * Whether idle connections may be reused by every tenant or only by the
+	 * tenant that created them. Use `tenant` for BYO credentials or databases.
+	 * In tenant mode `maxTotal` caps physical active + idle connections.
+	 */
+	affinity?: 'shared' | 'tenant';
+	/**
 	 * Open one upstream connection. Called lazily — only when a lease needs
 	 * a connection and the idle pool is empty. The broker never imports a
 	 * DB driver; bring postgres-js, `Bun.sql`, or anything else.
 	 */
-	create: () => Promise<Conn> | Conn;
+	create: (tenant: string) => Promise<Conn> | Conn;
 	/**
 	 * Global in-use cap — the whole point of the broker. One shard hosting
 	 * many tenants shares this many upstream connections, total, no matter
@@ -164,6 +170,7 @@ export type ConnectionBroker<Conn> = {
 type IdleEntry<Conn> = {
 	conn: Conn;
 	idleSince: number;
+	tenant: string;
 };
 
 type Waiter<Conn> = {
@@ -202,6 +209,7 @@ export const createConnectionBroker = <Conn>(
 		);
 	}
 	const now = options.now ?? Date.now;
+	const affinity = options.affinity ?? 'shared';
 	const tracer = tracerOrNoop(options.tracerProvider, '@absolutejs/sync');
 
 	// LIFO stack (push/pop at the end) — the most-recently-released
@@ -283,8 +291,20 @@ export const createConnectionBroker = <Conn>(
 	// Pop idle connections (validating each when configured) until one
 	// passes, else open a fresh one. The caller has already reserved a
 	// slot, so a create here can never breach the caps.
-	const acquireConn = async (): Promise<Conn> => {
-		let entry = idle.pop();
+	const takeIdle = (tenant: string) => {
+		if (affinity === 'shared') return idle.pop();
+		for (let index = idle.length - 1; index >= 0; index -= 1) {
+			const entry = idle[index];
+			if (entry?.tenant !== tenant) continue;
+			idle.splice(index, 1);
+
+			return entry;
+		}
+
+		return undefined;
+	};
+	const acquireConn = async (tenant: string): Promise<Conn> => {
+		let entry = takeIdle(tenant);
 		while (entry !== undefined) {
 			if (options.validate === undefined) return entry.conn;
 			let healthy = false;
@@ -296,10 +316,16 @@ export const createConnectionBroker = <Conn>(
 			if (healthy) return entry.conn;
 			cumulative.validationFailures += 1;
 			await destroyConn(entry.conn);
-			entry = idle.pop();
+			entry = takeIdle(tenant);
 		}
+		if (affinity === 'tenant')
+			while (inUse + idle.length > options.maxTotal) {
+				const displaced = idle.shift();
+				if (displaced === undefined) break;
+				await destroyConn(displaced.conn);
+			}
 		try {
-			const conn = await options.create();
+			const conn = await options.create(tenant);
 			cumulative.created += 1;
 			return conn;
 		} catch (error) {
@@ -333,7 +359,7 @@ export const createConnectionBroker = <Conn>(
 				if (disposed) {
 					void destroyConn(conn);
 				} else {
-					idle.push({ conn, idleSince: now() });
+					idle.push({ conn, idleSince: now(), tenant });
 				}
 				unreserve(tenant);
 				pump();
@@ -344,7 +370,7 @@ export const createConnectionBroker = <Conn>(
 	// Deliver a connection to a waiter whose slot is already reserved.
 	const grantTo = async (waiter: Waiter<Conn>) => {
 		try {
-			const conn = await acquireConn();
+			const conn = await acquireConn(waiter.tenant);
 			waiter.span.setAttribute(
 				QUEUE_WAIT_ATTR,
 				now() - waiter.enqueuedAt
@@ -399,7 +425,7 @@ export const createConnectionBroker = <Conn>(
 		if (canGrant(tenant)) {
 			reserve(tenant);
 			try {
-				const conn = await acquireConn();
+				const conn = await acquireConn(tenant);
 				span.setAttribute(QUEUE_WAIT_ATTR, now() - startedAt);
 				span.end();
 				return makeLease(tenant, conn);
