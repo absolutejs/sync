@@ -59,6 +59,37 @@ export type PlatformSyncConfiguration = Static<
 	typeof PlatformSyncConfigurationSchema
 >;
 
+export const PlatformSyncHealthSchema = Type.Object(
+	{
+		cluster: Type.Object(
+			{
+				configured: Type.Boolean(),
+				connected: Type.Boolean(),
+				error: Type.Optional(Type.String())
+			},
+			{ additionalProperties: false }
+		),
+		contract: Type.Literal(1),
+		instanceId: PlatformSyncConfigurationSchema.properties.instanceId,
+		packs: Type.Array(
+			Type.Object(
+				{
+					name: Type.String(),
+					ownsTables: Type.Array(Type.String()),
+					readsTables: Type.Array(Type.String()),
+					version: Type.String()
+				},
+				{ additionalProperties: false }
+			)
+		),
+		ready: Type.Boolean(),
+		tier: PlatformSyncConfigurationSchema.properties.tier
+	},
+	{ additionalProperties: false }
+);
+
+export type PlatformSyncHealth = Static<typeof PlatformSyncHealthSchema>;
+
 export class PlatformSyncConfigurationError extends Error {}
 
 export const readPlatformSyncConfiguration = (

@@ -4,9 +4,11 @@ import {
 	PLATFORM_SYNC_ENVIRONMENT_KEY,
 	PLATFORM_SYNC_HEALTH_PATH,
 	PlatformSyncConfigurationError,
+	PlatformSyncHealthSchema,
 	readPlatformSyncConfiguration,
 	type PlatformSyncConfiguration
 } from '../src/platform';
+import { Value } from '@sinclair/typebox/value';
 import type { ClusterBus } from '../src/engine/cluster';
 import { defineSyncPack } from '../src/engine/pack';
 
@@ -50,7 +52,9 @@ describe('platform Sync runtime', () => {
 			new Request(`http://localhost${PLATFORM_SYNC_HEALTH_PATH}`)
 		);
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({
+		const health = await response.json();
+		expect(Value.Check(PlatformSyncHealthSchema, health)).toBe(true);
+		expect(health).toEqual({
 			cluster: { configured: false, connected: false },
 			contract: 1,
 			instanceId: 'release-1',
