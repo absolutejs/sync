@@ -14,19 +14,29 @@ collections, permissions, writers, and authentication on the returned runtime:
 ```ts
 import { Elysia } from 'elysia';
 import { createPlatformSyncRuntime } from '@absolutejs/sync/platform';
+import { createCommentsPack } from '@absolutejs/sync-pack-comments';
+import { createPostgresClusterBus } from '@absolutejs/sync-bus-pg';
 
 const managedSync = createPlatformSyncRuntime({
+	clusterBus: createPostgresClusterBus({ sql }),
+	packs: [createCommentsPack({ store: commentsStore })],
 	resolveContext: (request) => authenticate(request)
 });
 
-managedSync.engine?.register(ordersCollection);
+await managedSync.ready;
 new Elysia().use(managedSync.app).listen(3000);
+
+// During graceful shutdown:
+await managedSync.dispose();
 ```
 
 The platform contract controls paths, reconnect history, mutation pressure,
 slow-client behavior, and stable instance identity. A fixed
 `/.well-known/absolute/sync` endpoint lets the runtime host fail readiness when
-an opted-in release forgot to mount the returned app. The platform never owns
+an opted-in release forgot to mount the returned app, or while its declared
+cluster bus is disconnected. Its response reports the connected cluster posture
+and registered packs, so operators can verify the application assembled the
+capabilities it declared. The platform never owns
 application schemas or authorization rules, so the project remains portable
 and can construct `@absolutejs/sync` explicitly outside managed hosting.
 

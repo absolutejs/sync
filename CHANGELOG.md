@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.7.0] — 2026-07-16
+
+- The platform-managed runtime now owns first-class Sync pack registration and
+  cluster-bus connection lifecycle through `packs` and `clusterBus`.
+- Runtime readiness stays closed until the cluster subscription connects and
+  reports the connected cluster posture plus registered packs for operators.
+- `runtime.ready` and idempotent `runtime.dispose()` remove manual startup and
+  shutdown wiring from hosted applications.
+
 ## [2.6.0] — 2026-07-16
 
 - Topic authorization receives Elysia-decoded cookie values, so signed session
@@ -1023,14 +1032,14 @@ docs page called out, with no breaking changes to the v0.1 surface.
   args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
   postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
 
-                        The previous 1.7.2/1.7.3 design used a shared "current actions" slot
-                        with a router Reference installed on a reused context, plus a
-                        promise queue to serialize calls into that slot. 1.7.4 throws all of
-                        that out:
-                        - Each mutation is compiled to a `Callable` once at registration.
-                          Source becomes `function(args, ctx, __dispatch) { ... return
+                          The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+                          with a router Reference installed on a reused context, plus a
+                          promise queue to serialize calls into that slot. 1.7.4 throws all of
+                          that out:
+                          - Each mutation is compiled to a `Callable` once at registration.
+                            Source becomes `function(args, ctx, __dispatch) { ... return
 
-              userFn(args, ctx, actions); }`where`actions`is an in-VM shim
+                userFn(args, ctx, actions); }`where`actions`is an in-VM shim
 
     over`\_\_dispatch`. - Per call: build a fresh dispatch `Reference`closed over this
     call's`actions`, invoke `callable.call([args, ctx, dispatch])`. - No shared slot → no serialization queue. Concurrent same-mutation
@@ -1039,10 +1048,10 @@ docs page called out, with no breaking changes to the v0.1 surface.
     is reused; per-call work doesn't create JSC metadata that needs
     GCing.
 
-                          Behavioural notes: handler errors still propagate as `Error` objects
-                          with `.message` and `.name`. Timeouts still terminate the isolate
-                          on Worker; on FFI they throw `TimeoutError` and the isolate stays
-                          alive (next call respawns the context). No public API changes.
+                            Behavioural notes: handler errors still propagate as `Error` objects
+                            with `.message` and `.name`. Timeouts still terminate the isolate
+                            on Worker; on FFI they throw `TimeoutError` and the isolate stays
+                            alive (next call respawns the context). No public API changes.
 
 ### Bumped
 
@@ -1210,14 +1219,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-                                            ```ts
-                                            import { syncCdc } from '@absolutejs/sync';
-                                            new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-                                            ```
+                                                ```ts
+                                                import { syncCdc } from '@absolutejs/sync';
+                                                new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+                                                ```
 
-                                            New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-                                            `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-                                            `MissedChangesError`, `CdcConsumerSlowError`.
+                                                New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+                                                `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+                                                `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 

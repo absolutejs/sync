@@ -6,6 +6,8 @@ import {
 	type SyncEngine,
 	type SyncEngineOptions
 } from './engine/syncEngine';
+import type { ClusterBus } from './engine/cluster';
+import type { SyncPack } from './engine/pack';
 import { syncSocket, type SyncSocketOptions } from './engine/socket';
 import { sync, type SyncPluginOptions } from './plugin';
 import { createReactiveHub, type ReactiveHub } from './reactiveHub';
@@ -81,10 +83,12 @@ export const readPlatformSyncConfiguration = (
 };
 
 export type PlatformSyncRuntimeOptions = {
+	clusterBus?: ClusterBus;
 	configuration?: PlatformSyncConfiguration;
 	engineOptions?: SyncEngineOptions;
 	hub?: ReactiveHub;
 	onSlow?: SyncSocketOptions['onSlow'];
+	packs?: SyncPack[];
 	resolveContext?: SyncSocketOptions['resolveContext'];
 	resolveTopics?: SyncPluginOptions['resolveTopics'];
 };
@@ -111,6 +115,40 @@ export const createPlatformSyncRuntime = (
 				mutationQueueLimit: configuration.mutationQueueLimit
 			})
 		: undefined;
+	if (!engine && (options.clusterBus || options.packs?.length))
+		throw new PlatformSyncConfigurationError(
+			'Platform Sync packs and cluster buses require the engine or both tier'
+		);
+	for (const pack of options.packs ?? []) engine?.registerPack(pack);
+	let clusterState: 'disabled' | 'connecting' | 'connected' | 'error' =
+		options.clusterBus ? 'connecting' : 'disabled';
+	let clusterError: unknown;
+	let disconnectCluster: (() => Promise<void>) | undefined;
+	const ready = options.clusterBus
+		? engine!
+				.connectCluster(options.clusterBus)
+				.then((disconnect) => {
+					disconnectCluster = disconnect;
+					clusterState = 'connected';
+				})
+				.catch((error: unknown) => {
+					clusterError = error;
+					clusterState = 'error';
+					throw error;
+				})
+		: Promise.resolve();
+	void ready.catch(() => undefined);
+	let disposed = false;
+	const dispose = async () => {
+		if (disposed) return;
+		disposed = true;
+		try {
+			await ready;
+		} finally {
+			await disconnectCluster?.();
+			disconnectCluster = undefined;
+		}
+	};
 	const app = new Elysia({ name: '@absolutejs/sync/platform' })
 		.use(
 			hub
@@ -138,18 +176,33 @@ export const createPlatformSyncRuntime = (
 					})
 				: new Elysia({ name: '@absolutejs/sync/platform/no-engine' })
 		)
-		.get(PLATFORM_SYNC_HEALTH_PATH, () => ({
-			contract: 1 as const,
-			instanceId: configuration.instanceId,
-			ready: true as const,
-			tier: configuration.tier
-		}));
+		.get(PLATFORM_SYNC_HEALTH_PATH, ({ set }) => {
+			const isReady =
+				clusterState !== 'connecting' && clusterState !== 'error';
+			if (!isReady) set.status = 503;
+			return {
+				cluster: {
+					configured: clusterState !== 'disabled',
+					connected: clusterState === 'connected',
+					...(clusterError instanceof Error
+						? { error: clusterError.message }
+						: {})
+				},
+				contract: 1 as const,
+				instanceId: configuration.instanceId,
+				packs: engine?.inspect().packs ?? [],
+				ready: isReady,
+				tier: configuration.tier
+			};
+		});
 
 	return {
 		app,
 		configuration,
+		dispose,
 		engine,
 		hub,
-		metrics: () => engine?.metrics() ?? null
+		metrics: () => engine?.metrics() ?? null,
+		ready
 	};
 };
