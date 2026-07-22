@@ -64,6 +64,8 @@ keep granularity deliberately coarse (table/row topics, refetch on change); the 
 queries are matched incrementally; joins (inner and left), aggregations, and
 top-N ordering are maintained incrementally through a composable operator graph
 (`query(...).filter().join().leftJoin().groupBy().orderBy()`).
+`orderBy({ limit, offset })` accepts either fixed numbers or functions of the
+subscription params/context, so each subscriber can hold a different live page.
 
 > Status: **1.0** — public API frozen across all subpaths. See
 > [`CHANGELOG.md`](./CHANGELOG.md). Tier 1 (hub, SSE plugin, browser subscriber,

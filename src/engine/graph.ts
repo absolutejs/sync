@@ -50,15 +50,17 @@ export type GroupByOptions<Row> = {
 	value?: (row: Row) => number;
 };
 
-export type OrderByQueryOptions<Row> = {
+type PageBound<P, Ctx> = number | ((params: P, ctx: Ctx) => number);
+
+export type OrderByQueryOptions<Row, P = void, Ctx = CollectionContext> = {
 	/** Row identity. */
 	key: (row: Row) => RowKey;
 	/** Sort comparator (ascending). */
 	compare: (a: Row, b: Row) => number;
 	/** Keep at most this many rows (top-N). */
-	limit?: number;
+	limit?: PageBound<P, Ctx>;
 	/** Skip this many from the front (pagination). */
-	offset?: number;
+	offset?: PageBound<P, Ctx>;
 };
 
 /** A live, instantiated graph for one subscription. */
@@ -85,7 +87,7 @@ type AnyStep =
 	// plan with no steps, so a join can combine two derived streams.
 	| ({ kind: 'join'; rightPlan: Plan } & JoinOptions<any, any, any>)
 	| ({ kind: 'aggregate' } & GroupByOptions<any>)
-	| ({ kind: 'orderBy' } & OrderByQueryOptions<any>);
+	| ({ kind: 'orderBy' } & OrderByQueryOptions<any, any, any>);
 
 /** Plan behind each Query, so a Query can be passed as a join's right input. */
 const PLANS = new WeakMap<object, Plan>();
@@ -123,7 +125,7 @@ export type Query<Row, P = void, Ctx = CollectionContext> = {
 		}
 	) => Query<Out, P, Ctx>;
 	groupBy: (options: GroupByOptions<Row>) => Query<AggregateGroup, P, Ctx>;
-	orderBy: (options: OrderByQueryOptions<Row>) => Query<Row, P, Ctx>;
+	orderBy: (options: OrderByQueryOptions<Row, P, Ctx>) => Query<Row, P, Ctx>;
 	/** Source tables this query reads. */
 	tables: () => string[];
 	/** Instantiate the graph for one subscription's params/ctx. */
@@ -203,13 +205,17 @@ const instantiateStream = (
 			});
 			currentKey = (group: AggregateGroup) => group.group;
 		} else {
+			const resolveBound = (
+				bound: PageBound<any, any> | undefined
+			): number | undefined =>
+				typeof bound === 'function' ? bound(params, ctx) : bound;
 			stages.push({
 				kind: 'op',
 				op: orderByOp({
 					key: step.key,
 					compare: step.compare,
-					limit: step.limit,
-					offset: step.offset
+					limit: resolveBound(step.limit),
+					offset: resolveBound(step.offset)
 				})
 			});
 			// orderBy preserves rows (and their identity), just windows them.

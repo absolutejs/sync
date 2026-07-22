@@ -88,6 +88,42 @@ describe('orderByOp (top-N window)', () => {
 });
 
 describe('orderBy in a graph collection (live top-N)', () => {
+	test('derives each live page from subscription params', async () => {
+		const scores: Score[] = [
+			{ id: 1, points: 10 },
+			{ id: 2, points: 30 },
+			{ id: 3, points: 20 }
+		];
+		const engine = createSyncEngine();
+		engine.registerGraph(
+			defineGraphCollection<Score, { limit: number; offset: number }>({
+				name: 'scorePage',
+				key: (score) => score.id,
+				query: query<Score, { limit: number; offset: number }>({
+					table: 'scores',
+					hydrate: () => scores,
+					key: (score) => score.id
+				}).orderBy({
+					compare: byPoints,
+					key: (score) => score.id,
+					limit: (params) => params.limit,
+					offset: (params) => params.offset
+				})
+			})
+		);
+
+		const sub = await engine.subscribe<
+			Score,
+			{ limit: number; offset: number }
+		>({
+			collection: 'scorePage',
+			ctx: {},
+			onDiff: () => undefined,
+			params: { limit: 1, offset: 1 }
+		});
+		expect(sub.initial.map((score) => score.id)).toEqual([3]);
+	});
+
 	test('maintains a top-2 leaderboard incrementally', async () => {
 		const scores: Score[] = [
 			{ id: 1, points: 10 },
