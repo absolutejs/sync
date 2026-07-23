@@ -38,7 +38,7 @@ export const manifest = defineManifest<
 	SyncManifestConfig,
 	SyncManifestRuntime
 >()({
-	contract: 1,
+	contract: 2,
 	identity: {
 		accent: '#10b981',
 		category: 'sync',
@@ -251,6 +251,12 @@ export const manifest = defineManifest<
 	tools: {
 		engine_metrics: tool.runtime({
 			annotations: { readOnlyHint: true },
+			authorization: {
+				approval: 'never',
+				audience: 'admin',
+				effects: ['read'],
+				requiredScopes: ['sync:read']
+			},
 			description:
 				'Operator-shaped engine health: uptime, subscription/mutation/change counters, memory estimates, and throughput since start.',
 			handler: (_input, runtime) =>
@@ -261,6 +267,12 @@ export const manifest = defineManifest<
 		}),
 		engine_overview: tool.runtime({
 			annotations: { readOnlyHint: true },
+			authorization: {
+				approval: 'never',
+				audience: 'admin',
+				effects: ['read'],
+				requiredScopes: ['sync:read']
+			},
 			description:
 				'What this sync engine serves: registered collections with live subscription counts, mutations, schedules, readers/writers, installed packs, and the most recent changes.',
 			handler: (_input, runtime) => {
@@ -278,6 +290,16 @@ export const manifest = defineManifest<
 			input: Type.Object({})
 		}),
 		publish_topic: tool.runtime({
+			annotations: { idempotentHint: true },
+			authorization: {
+				approval: 'policy',
+				audience: 'admin',
+				effects: ['write'],
+				idempotency: { mode: 'host' },
+				requiredScopes: ['sync:publish'],
+				resource: { idField: 'topic', type: 'sync-topic' },
+				reversible: false
+			},
 			description:
 				'Publish a reactive topic on the hub so every subscribed view refetches now. Useful after out-of-band data changes. Reports how many subscribers were listening.',
 			handler: ({ topic }, runtime) => {
@@ -292,6 +314,12 @@ export const manifest = defineManifest<
 		}),
 		replay_at: tool.runtime({
 			annotations: { readOnlyHint: true },
+			authorization: {
+				approval: 'never',
+				audience: 'admin',
+				effects: ['read'],
+				requiredScopes: ['sync:replay']
+			},
 			description:
 				'Point-in-time replay: reconstruct table state as of a past timestamp from the change log. Returns per-table row counts plus asOfVersion/asOfAt; truncated=true means the log doesn’t reach back that far (widen changeLogRetainMs for forensics).',
 			handler: async ({ atMs, tables }, runtime) => {
@@ -322,6 +350,17 @@ export const manifest = defineManifest<
 			})
 		}),
 		run_schedule: tool.runtime({
+			annotations: { idempotentHint: true, openWorldHint: true },
+			authorization: {
+				approval: 'always',
+				audience: 'admin',
+				destinations: ['configured-schedule-handler'],
+				effects: ['write', 'external-network', 'arbitrary-code'],
+				idempotency: { mode: 'host' },
+				requiredScopes: ['sync:schedules:run'],
+				resource: { idField: 'name', type: 'sync-schedule' },
+				reversible: false
+			},
 			description:
 				'Fire one registered scheduled function now instead of waiting for its cron pattern. Whatever it writes goes live through the change feed.',
 			handler: async ({ name }, runtime) => {
