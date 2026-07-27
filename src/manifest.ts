@@ -48,6 +48,84 @@ export const manifest = defineManifest<
 		name: '@absolutejs/sync',
 		tagline: 'Live data everywhere — changes appear instantly, no refresh.'
 	},
+	product: {
+		blocks: [
+			{
+				category: 'data',
+				componentExport: 'syncCollection',
+				description:
+					'Render a live collection with generated loading, empty, error and optimistic mutation states.',
+				frameworks: ['react', 'svelte', 'vue', 'angular', 'client'],
+				id: 'live_collection',
+				props: Type.Object({
+					collection: Type.String({ minLength: 1 }),
+					emptyMessage: Type.Optional(Type.String()),
+					optimistic: Type.Optional(Type.Boolean({ default: true }))
+				}),
+				title: 'Live collection'
+			}
+		],
+		dataSources: [
+			{
+				description:
+					'A registered Sync collection backed by the application database and row policy.',
+				id: 'live_collection',
+				operations: ['list', 'detail', 'create', 'update', 'delete'],
+				schema: Type.Object({
+					collection: Type.String({ minLength: 1 }),
+					record: Type.Record(Type.String(), Type.Unknown())
+				}),
+				title: 'Live collection'
+			}
+		],
+		events: [
+			{
+				description:
+					'Emitted after a collection record changes and Sync publishes the new version.',
+				id: 'collection_changed',
+				schema: Type.Object({
+					collection: Type.String({ minLength: 1 }),
+					id: Type.String({ minLength: 1 }),
+					operation: Type.Union([
+						Type.Literal('create'),
+						Type.Literal('update'),
+						Type.Literal('delete')
+					]),
+					version: Type.Integer({ minimum: 0 })
+				}),
+				source: 'data',
+				title: 'Collection changed'
+			}
+		],
+		healthChecks: [
+			{
+				description:
+					'Inspect registered collections, subscriptions, mutations and recent changes.',
+				id: 'engine_overview',
+				title: 'Sync engine is available',
+				tool: 'engine_overview'
+			}
+		],
+		releaseChecks: [
+			{
+				description:
+					'The Sync engine must expose its registered collection posture before promotion.',
+				healthCheckIds: ['engine_overview'],
+				id: 'sync_engine_ready',
+				severity: 'blocking',
+				title: 'Sync engine is ready'
+			}
+		],
+		workflowActions: [
+			{
+				description:
+					'Publish a typed reactive topic after an out-of-band data change.',
+				id: 'publish_topic',
+				title: 'Publish Sync topic',
+				tool: 'publish_topic'
+			}
+		]
+	},
 	implements: [
 		defineImplementation<never>()({
 			contract: 'sync/crdt-adapter',
