@@ -16,6 +16,8 @@ export type CollaborativeTextOptions<State = TextState> = {
 	url: string;
 	/** Collection (and table) name holding the document rows. */
 	collection: string;
+	/** Query params forwarded to the collection hydrate/authorize functions. */
+	params?: unknown;
 	/** Which row to edit (its key value). */
 	id: RowKey;
 	/** The row field holding the CRDT state. */
@@ -39,6 +41,12 @@ export type CollaborativeTextState = {
 	text: string;
 	/** The underlying collection's connection status. */
 	status: SyncCollectionStatus;
+	/**
+	 * Whether the authoritative document row has hydrated at least once. Clients
+	 * can keep an editor read-only until this becomes true. Edits submitted
+	 * before hydration are buffered and reconciled after the first snapshot.
+	 */
+	ready: boolean;
 };
 
 export type CollaborativeText = {
@@ -70,7 +78,12 @@ export const createCollaborativeText = <State = TextState>(
 		((id: string) => createTextCrdt(id) as unknown as CrdtText<State>);
 	const crdt = make(replica);
 
-	let current: CollaborativeTextState = { status: 'connecting', text: '' };
+	let current: CollaborativeTextState = {
+		ready: false,
+		status: 'connecting',
+		text: ''
+	};
+	let pendingText: string | null = null;
 	const subscribers = new Set<(state: CollaborativeTextState) => void>();
 	const emit = () => {
 		for (const run of subscribers) {
@@ -81,8 +94,23 @@ export const createCollaborativeText = <State = TextState>(
 	const collection = createSyncCollection<Record<string, unknown>>({
 		collection: options.collection,
 		key: (row) => row[keyField] as RowKey,
+		params: options.params,
 		url: options.url
 	});
+
+	const broadcast = (next: string) => {
+		crdt.setText(next);
+		current = { ...current, text: next };
+		emit();
+		// Upload only this edit's ops when the backend supports delta-state
+		// (O(edit)); otherwise the full state. The server merges either the
+		// same way (union) and keeps full state for late-joiner hydration.
+		const payload = crdt.takeDelta ? crdt.takeDelta() : crdt.state();
+		void collection.mutate({
+			args: { [keyField]: options.id, [options.field]: payload },
+			name: mutation
+		});
+	};
 
 	const apply = (state: {
 		data: Record<string, unknown>[];
@@ -98,8 +126,14 @@ export const createCollaborativeText = <State = TextState>(
 			crdt.merge(fieldState as State);
 			text = crdt.text();
 		}
-		current = { status: state.status, text };
+		const ready = current.ready || fieldState !== undefined;
+		current = { ready, status: state.status, text };
 		emit();
+		if (ready && pendingText !== null) {
+			const buffered = pendingText;
+			pendingText = null;
+			broadcast(buffered);
+		}
 	};
 	apply(collection.get());
 	const unsubscribe = collection.subscribe(apply);
@@ -115,17 +149,13 @@ export const createCollaborativeText = <State = TextState>(
 			};
 		},
 		setText(next) {
-			crdt.setText(next);
-			current = { status: current.status, text: next };
-			emit();
-			// Upload only this edit's ops when the backend supports delta-state
-			// (O(edit)); otherwise the full state. The server merges either the
-			// same way (union) and keeps full state for late-joiner hydration.
-			const payload = crdt.takeDelta ? crdt.takeDelta() : crdt.state();
-			void collection.mutate({
-				args: { [keyField]: options.id, [options.field]: payload },
-				name: mutation
-			});
+			if (!current.ready) {
+				pendingText = next;
+				current = { ...current, text: next };
+				emit();
+				return;
+			}
+			broadcast(next);
 		},
 		anchorAt: (index) => crdt.anchorAt?.(index) ?? null,
 		indexOfAnchor: (anchor) => crdt.indexOfAnchor?.(anchor) ?? 0,

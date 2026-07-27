@@ -76,6 +76,7 @@ export class SyncCollectionService implements OnDestroy {
 	) {
 		const text = signal('');
 		const status = signal<SyncCollectionStatus>('connecting');
+		const ready = signal(false);
 
 		let controller: CollaborativeText | null = null;
 
@@ -85,6 +86,7 @@ export class SyncCollectionService implements OnDestroy {
 			controller.subscribe((state) => {
 				text.set(state.text);
 				status.set(state.status);
+				ready.set(state.ready);
 			});
 		}
 
@@ -96,6 +98,7 @@ export class SyncCollectionService implements OnDestroy {
 		return {
 			anchorAt,
 			indexOfAnchor,
+			ready: computed(() => ready()),
 			setText,
 			status: computed(() => status()),
 			text: computed(() => text())

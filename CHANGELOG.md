@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.13.0] — 2026-07-27
+
+- Collaborative text subscriptions now accept collection `params`, allowing
+  document-scoped hydration and authorization instead of loading an entire
+  document table for every editor.
+- Collaborative text state exposes `ready` after the authoritative row
+  hydrates. Edits made during connection setup are buffered and reconciled
+  after hydration, preventing a fast typist from forking an empty replica.
+- React, Vue, Svelte, and Angular bindings surface the same readiness contract.
+
 ## [2.8.0] — 2026-07-17
 
 - Connection brokers now support `affinity: 'tenant'` for BYO database

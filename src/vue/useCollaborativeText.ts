@@ -21,6 +21,7 @@ export const useCollaborativeText = <State = TextState>(
 ) => {
 	const text = ref('');
 	const status = ref<SyncCollectionStatus>('connecting');
+	const ready = ref(false);
 
 	let controller: CollaborativeText | null = null;
 	let unsubscribe: (() => void) | null = null;
@@ -30,6 +31,7 @@ export const useCollaborativeText = <State = TextState>(
 		unsubscribe = controller.subscribe((state) => {
 			text.value = state.text;
 			status.value = state.status;
+			ready.value = state.ready;
 		});
 	});
 
@@ -47,5 +49,5 @@ export const useCollaborativeText = <State = TextState>(
 	const indexOfAnchor = (anchor: string | null) =>
 		controller?.indexOfAnchor(anchor) ?? 0;
 
-	return { anchorAt, destroy, indexOfAnchor, setText, status, text };
+	return { anchorAt, destroy, indexOfAnchor, ready, setText, status, text };
 };

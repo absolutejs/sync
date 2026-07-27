@@ -21,6 +21,7 @@ export const useCollaborativeText = <State = TextState>(
 	options: CollaborativeTextOptions<State>
 ) => {
 	const [state, setState] = useState<CollaborativeTextState>({
+		ready: false,
 		status: 'connecting',
 		text: ''
 	});
@@ -38,7 +39,13 @@ export const useCollaborativeText = <State = TextState>(
 		};
 		// Re-open only when the subscription identity changes.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [options.url, options.collection, options.id, options.field]);
+	}, [
+		options.url,
+		options.collection,
+		options.id,
+		options.field,
+		options.params
+	]);
 
 	const setText = useCallback(
 		(next: string) => controllerRef.current?.setText(next),
@@ -57,6 +64,7 @@ export const useCollaborativeText = <State = TextState>(
 	return {
 		anchorAt,
 		indexOfAnchor,
+		ready: state.ready,
 		setText,
 		status: state.status,
 		text: state.text

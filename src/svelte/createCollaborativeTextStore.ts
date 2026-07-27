@@ -18,7 +18,11 @@ export const createCollaborativeTextStore = <State = TextState>(
 	options: CollaborativeTextOptions<State>
 ) => {
 	let controller: CollaborativeText | null = null;
-	let current: CollaborativeTextState = { status: 'connecting', text: '' };
+	let current: CollaborativeTextState = {
+		ready: false,
+		status: 'connecting',
+		text: ''
+	};
 	const subscribers = new Set<(state: CollaborativeTextState) => void>();
 
 	const ensureConnected = () => {
