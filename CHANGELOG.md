@@ -1,5 +1,9 @@
 # Changelog
 
+## [2.13.1] — 2026-08-07
+
+- Accepts the shared `@absolutejs/telemetry` 0.3 runtime line.
+
 ## [2.13.0] — 2026-07-27
 
 - Collaborative text subscriptions now accept collection `params`, allowing
