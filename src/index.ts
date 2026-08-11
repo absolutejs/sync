@@ -22,8 +22,13 @@ export type {
 } from './reactiveHub';
 export { sync } from './plugin';
 export type { SyncPluginOptions, SyncRequestContext } from './plugin';
-export { syncSocket } from './engine/socket';
-export type { SlowConnectionEvent, SyncSocketOptions } from './engine/socket';
+export { createSyncSocketController, syncSocket } from './engine/socket';
+export type {
+	SlowConnectionEvent,
+	SyncSocketController,
+	SyncSocketDrainOptions,
+	SyncSocketOptions
+} from './engine/socket';
 export { jsonSerializer } from './serializer';
 export type { FrameSerializer } from './serializer';
 export { syncCdc } from './engine/cdc';

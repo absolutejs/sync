@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { Elysia } from 'elysia';
 import { defineCollection } from '../src/engine/collection';
 import { createSyncEngine } from '../src/engine/syncEngine';
-import { syncSocket } from '../src/engine/socket';
+import { createSyncSocketController, syncSocket } from '../src/engine/socket';
 
 type Order = { id: number; userId: number; status: 'open' | 'closed' };
 type Params = { userId: number };
@@ -23,6 +23,14 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 1000) => {
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
 };
+
+const eventWithin = <T>(promise: Promise<T>, label: string) =>
+	Promise.race([
+		promise,
+		new Promise<never>((_, reject) =>
+			setTimeout(() => reject(new Error(`${label}: timed out`)), 1000)
+		)
+	]);
 
 type AnyFrame = { type: string; [key: string]: unknown };
 
@@ -126,5 +134,51 @@ describe('syncSocket (Elysia WebSocket)', () => {
 
 		ws.close();
 		await app.stop(true);
+	});
+
+	test('drains current and late sockets with a service-restart close', async () => {
+		const engine = createSyncEngine();
+		const controller = createSyncSocketController();
+		const app = new Elysia()
+			.use(syncSocket({ controller, engine }))
+			.listen(0);
+		const port = app.server?.port ?? 0;
+
+		const first = connect(port, []);
+		await new Promise<void>((resolve, reject) => {
+			first.addEventListener('open', () => resolve());
+			first.addEventListener('error', () =>
+				reject(new Error('ws error'))
+			);
+		});
+		await waitFor(() => controller.connectionCount() === 1);
+
+		const firstClose = new Promise<CloseEvent>((resolve) => {
+			first.addEventListener('close', (event) => resolve(event));
+		});
+		expect(controller.drain()).toBe(1);
+		expect(controller.draining).toBe(true);
+		const firstEvent = await eventWithin(firstClose, 'first close');
+		expect(firstEvent.code).toBe(1012);
+		expect(firstEvent.reason).toBe('Service Restart');
+		await waitFor(() => controller.connectionCount() === 0);
+
+		const late = connect(port, []);
+		const lateClose = await eventWithin(
+			new Promise<CloseEvent>((resolve) => {
+				late.addEventListener('close', (event) => resolve(event));
+			}),
+			'late close'
+		);
+		expect(lateClose.code).toBe(1012);
+		expect(lateClose.reason).toBe('Service Restart');
+		expect(controller.connectionCount()).toBe(0);
+
+		first.close();
+		late.close();
+		// Bun has already completed both close handshakes here, but awaiting a
+		// second graceful server stop can hang on the just-rejected upgrade.
+		// Initiate forced cleanup without making that runtime quirk the assertion.
+		void app.stop(false);
 	});
 });

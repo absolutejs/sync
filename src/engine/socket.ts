@@ -22,9 +22,75 @@ export type SlowConnectionEvent = {
 	reason: 'buffer-threshold' | 'send-backpressure';
 };
 
+export type SyncSocketDrainOptions = {
+	/** WebSocket close code. Defaults to 1012 (Service Restart). */
+	code?: number;
+	/** Human-readable close reason. Defaults to `Service Restart`. */
+	reason?: string;
+};
+
+/**
+ * Host-owned control plane for a {@link syncSocket}. Calling `drain()` closes
+ * every current connection with a protocol-level restart frame and rejects
+ * later connections the same way. Clients can reconnect through a switched
+ * load balancer without seeing an unclean 1006 transport failure.
+ */
+export type SyncSocketController = {
+	/** Whether this socket endpoint has permanently entered drain mode. */
+	readonly draining: boolean;
+	/** Number of currently tracked WebSocket connections. */
+	connectionCount: () => number;
+	/** Enter drain mode and return the number of connections asked to close. */
+	drain: (options?: SyncSocketDrainOptions) => number;
+};
+
+type DrainableSocket = {
+	close?: (code?: number, reason?: string) => void;
+};
+
+type SyncSocketControllerState = {
+	draining: boolean;
+	sockets: Map<string, DrainableSocket>;
+};
+
+const controllerStates = new WeakMap<
+	SyncSocketController,
+	SyncSocketControllerState
+>();
+
+export const createSyncSocketController = (): SyncSocketController => {
+	const state: SyncSocketControllerState = {
+		draining: false,
+		sockets: new Map()
+	};
+	const controller: SyncSocketController = {
+		get draining() {
+			return state.draining;
+		},
+		connectionCount: () => state.sockets.size,
+		drain: ({ code = 1012, reason = 'Service Restart' } = {}) => {
+			state.draining = true;
+			const sockets = [...state.sockets.values()];
+			for (const socket of sockets) {
+				try {
+					socket.close?.(code, reason);
+				} catch {
+					// The runtime may have closed the socket between the snapshot and
+					// this call. Its close callback removes it from the controller.
+				}
+			}
+			return sockets.length;
+		}
+	};
+	controllerStates.set(controller, state);
+	return controller;
+};
+
 export type SyncSocketOptions = {
 	/** The sync engine whose collections this socket serves. */
 	engine: SyncEngine;
+	/** Optional host control plane for graceful blue-green deployment drains. */
+	controller?: SyncSocketController;
 	/** WebSocket route. Defaults to `/sync/ws`. */
 	path?: string;
 	/** Optional presence hub; enables `presence-*` frames on this socket. */
@@ -100,6 +166,7 @@ type TrackedConnection = {
  */
 export const syncSocket = ({
 	engine,
+	controller,
 	path = '/sync/ws',
 	resolveContext,
 	presence,
@@ -109,6 +176,14 @@ export const syncSocket = ({
 	serializer = jsonSerializer
 }: SyncSocketOptions) => {
 	const connections = new Map<string, TrackedConnection>();
+	const controllerState = controller
+		? controllerStates.get(controller)
+		: undefined;
+	if (controller && !controllerState) {
+		throw new Error(
+			'syncSocket controller must be created with createSyncSocketController()'
+		);
+	}
 	const threshold = maxBufferedBytes ?? Infinity;
 
 	const fireSlow = (event: SlowConnectionEvent) => {
@@ -135,8 +210,12 @@ export const syncSocket = ({
 				id: string;
 				send: (data: string | Uint8Array | ArrayBuffer) => number;
 				getBufferedAmount?: () => number;
-				close?: () => void;
+				close?: (code?: number, reason?: string) => void;
 			};
+			if (controllerState?.draining) {
+				bunWs.close?.(1012, 'Service Restart');
+				return;
+			}
 
 			// Register synchronously BEFORE awaiting `resolveContext`, so frames
 			// that arrive during the (possibly slow) auth resolve are buffered in
@@ -148,11 +227,11 @@ export const syncSocket = ({
 				slowSignaled: false
 			};
 			connections.set(bunWs.id, tracked);
+			controllerState?.sockets.set(bunWs.id, bunWs);
 
 			const ctx = resolveContext
 				? await resolveContext(ws.data as Record<string, unknown>)
 				: {};
-
 			const connection = createSyncConnection({
 				engine,
 				ctx,
@@ -218,6 +297,7 @@ export const syncSocket = ({
 			if (tracked) {
 				tracked.connection?.close();
 				connections.delete(ws.id);
+				controllerState?.sockets.delete(ws.id);
 			}
 		}
 	});

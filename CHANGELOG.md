@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.13.2] — 2026-08-10
+
+- Add `createSyncSocketController()` so blue-green hosts can permanently drain
+  an old Sync endpoint with WebSocket code 1012, close current connections
+  cleanly, and reject late connections while clients reconnect to the new slot.
+
 ## [2.13.0] — 2026-07-27
 
 - Collaborative text subscriptions now accept collection `params`, allowing

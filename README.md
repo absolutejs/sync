@@ -193,7 +193,7 @@ matcher), expose it over `syncSocket`, and drive changes from mutations.
 ```ts
 // server
 import { Elysia } from 'elysia';
-import { syncSocket } from '@absolutejs/sync';
+import { createSyncSocketController, syncSocket } from '@absolutejs/sync';
 import { createSyncEngine, defineMutation } from '@absolutejs/sync/engine';
 import { prismaCollection } from '@absolutejs/sync/prisma';
 
@@ -231,14 +231,21 @@ engine.registerMutation(
 	})
 );
 
+const socketController = createSyncSocketController();
+
 new Elysia()
 	.use(
 		syncSocket({
+			controller: socketController,
 			engine,
 			resolveContext: (data) => ({ userId: data.userId })
 		})
 	)
 	.listen(3000);
+
+// After a blue-green load-balancer switch, permanently drain the old slot.
+// Current and late sockets receive RFC 6455 code 1012 and reconnect cleanly.
+socketController.drain();
 ```
 
 ```ts
@@ -464,6 +471,7 @@ tenant to a shard adds zero standing connections.
 | `createReactiveHub()`                                                                                                                                  | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`).                                                                                                                                                                                                                                                                                         |
 | `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                                                                                   | Elysia plugin: SSE stream of hub events.                                                                                                                                                                                                                                                                                                                     |
 | `syncSocket({ engine, path?, resolveContext? })`                                                                                                       | Elysia WebSocket plugin for the sync engine.                                                                                                                                                                                                                                                                                                                 |
+| `createSyncSocketController()`                                                                                                                         | Host control plane for blue-green drains. Pass it as `syncSocket({ controller, engine })`, then call `controller.drain()` on the old slot to close current and late sockets with code 1012 while clients reconnect through the switched load balancer.                                                                                                       |
 | `scheduled({ engine, prefix?, onError? })` _(`/scheduled` subpath)_                                                                                    | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). Kept off the main entry so `syncSocket` needs no cron dep.                                                                                                                                                                                             |
 | `syncDevtools({ engine, path?, snapshotMs? })`                                                                                                         | Elysia plugin: a live devtools dashboard (collections, subscription counts, mutations, schedules, change feed) over SSE. Backed by `engine.inspect()` + `engine.onActivity()`. **1.23** also exposes a Point-in-time replay panel (datetime picker + tables filter) and a `GET <path>/replay?at=<ms>&tables=<csv>` JSON endpoint wrapping `engine.replayTo`. |
 | `createWriteBehindCache({ load, persist, remove?, debounceMs?, evict?, onPersistError? })`                                                             | In-memory cache + write-behind persistence.                                                                                                                                                                                                                                                                                                                  |
