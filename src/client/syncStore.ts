@@ -2,6 +2,12 @@ import type { ServerFrame } from '../engine/connection';
 import type { RowKey } from '../engine/types';
 import type { MutationStorage, PendingMutationRecord } from './syncCollection';
 import { jsonSerializer, type FrameSerializer } from '../serializer';
+import {
+	createReconnectBackoff,
+	hasReconnectHealthyFrameType
+} from './reconnectBackoff';
+
+const serverFrameTypes = ['snapshot', 'diff', 'error'] as const;
 
 export type SyncStoreStatus = 'connecting' | 'ready' | 'closed';
 
@@ -202,7 +208,10 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 	let socket: WebSocket | undefined;
 	let connected = false;
 	let closed = false;
-	let attempt = 0;
+	const reconnectBackoff = createReconnectBackoff(
+		reconnectMs,
+		maxReconnectMs
+	);
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	// Highest change-feed version applied; sent as `since` to resume on reconnect.
 	let appliedVersion = 0;
@@ -301,7 +310,6 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 		const ws = new Impl(options.url);
 		socket = ws;
 		ws.onopen = () => {
-			attempt = 0;
 			connected = true;
 			ws.send(
 				serializer.encodeClient({
@@ -328,6 +336,11 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 				const decoded = serializer.decode(event.data);
 				if (decoded !== null && typeof decoded === 'object') {
 					applyFrame(decoded as ServerFrame<Row>);
+					if (
+						hasReconnectHealthyFrameType(decoded, serverFrameTypes)
+					) {
+						reconnectBackoff.markHealthy();
+					}
 				}
 			} catch {
 				// ignore unparseable frames
@@ -338,8 +351,7 @@ export const syncStore = <Row, M extends MutationMap = MutationMap>(
 			if (closed || reconnectMs <= 0) {
 				return;
 			}
-			const delay = Math.min(reconnectMs * 2 ** attempt, maxReconnectMs);
-			attempt += 1;
+			const delay = reconnectBackoff.nextDelay();
 			reconnectTimer = setTimeout(connect, delay);
 		};
 	};

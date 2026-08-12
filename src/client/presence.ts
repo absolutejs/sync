@@ -1,5 +1,6 @@
 import type { PresenceMember } from '../engine/presence';
 import { jsonSerializer, type FrameSerializer } from '../serializer';
+import { createReconnectBackoff } from './reconnectBackoff';
 
 export type { PresenceMember } from '../engine/presence';
 
@@ -79,7 +80,10 @@ export const createPresence = <S>(
 	let socket: WebSocket | undefined;
 	let connected = false;
 	let closed = false;
-	let attempt = 0;
+	const reconnectBackoff = createReconnectBackoff(
+		reconnectMs,
+		maxReconnectMs
+	);
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const send = (frame: unknown) => {
@@ -101,7 +105,6 @@ export const createPresence = <S>(
 		const ws = new Impl(options.url);
 		socket = ws;
 		ws.onopen = () => {
-			attempt = 0;
 			connected = true;
 			ws.send(
 				serializer.encodeClient({
@@ -128,6 +131,7 @@ export const createPresence = <S>(
 			if (frame.type !== 'presence' || frame.room !== options.room) {
 				return;
 			}
+			reconnectBackoff.markHealthy();
 			for (const member of frame.joined ?? []) {
 				members.set(member.id, member.state);
 			}
@@ -144,8 +148,7 @@ export const createPresence = <S>(
 			if (closed || reconnectMs <= 0) {
 				return;
 			}
-			const delay = Math.min(reconnectMs * 2 ** attempt, maxReconnectMs);
-			attempt += 1;
+			const delay = reconnectBackoff.nextDelay();
 			reconnectTimer = setTimeout(connect, delay);
 		};
 	};

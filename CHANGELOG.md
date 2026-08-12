@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.13.3] — 2026-08-12
+
+- Preserve exponential reconnect backoff across sockets that open but never
+  receive a valid Sync frame. A healthy server frame still resets the delay,
+  while graceful-drain reconnect behavior remains unchanged.
+
 ## [2.13.2] — 2026-08-10
 
 - Add `createSyncSocketController()` so blue-green hosts can permanently drain

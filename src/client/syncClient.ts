@@ -7,6 +7,19 @@ import type {
 	SyncCollectionStatus
 } from './syncCollection';
 import { jsonSerializer, type FrameSerializer } from '../serializer';
+import {
+	createReconnectBackoff,
+	hasReconnectHealthyFrameType
+} from './reconnectBackoff';
+
+const serverFrameTypes = [
+	'snapshot',
+	'diff',
+	'frame',
+	'error',
+	'ack',
+	'reject'
+] as const;
 
 export type SyncClientOptions = {
 	/** WebSocket URL of the {@link syncSocket} endpoint (e.g. `ws://host/sync/ws`). */
@@ -133,7 +146,10 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	let socket: WebSocket | undefined;
 	let connected = false;
 	let closed = false;
-	let attempt = 0;
+	const reconnectBackoff = createReconnectBackoff(
+		reconnectMs,
+		maxReconnectMs
+	);
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const notify = (entry: Entry) => {
@@ -327,7 +343,6 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		const ws = new Impl(options.url);
 		socket = ws;
 		ws.onopen = () => {
-			attempt = 0;
 			connected = true;
 			for (const entry of entries.values()) {
 				sendSubscribe(entry);
@@ -343,6 +358,11 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				const decoded = serializer.decode(event.data);
 				if (decoded !== null && typeof decoded === 'object') {
 					applyFrame(decoded as ServerFrame);
+					if (
+						hasReconnectHealthyFrameType(decoded, serverFrameTypes)
+					) {
+						reconnectBackoff.markHealthy();
+					}
 				}
 			} catch {
 				// ignore unparseable frames
@@ -353,8 +373,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			if (closed || reconnectMs <= 0) {
 				return;
 			}
-			const delay = Math.min(reconnectMs * 2 ** attempt, maxReconnectMs);
-			attempt += 1;
+			const delay = reconnectBackoff.nextDelay();
 			reconnectTimer = setTimeout(connect, delay);
 		};
 	};

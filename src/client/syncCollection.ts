@@ -1,6 +1,18 @@
 import type { ServerFrame } from '../engine/connection';
 import type { RowKey } from '../engine/types';
 import { jsonSerializer, type FrameSerializer } from '../serializer';
+import {
+	createReconnectBackoff,
+	hasReconnectHealthyFrameType
+} from './reconnectBackoff';
+
+const serverFrameTypes = [
+	'snapshot',
+	'diff',
+	'error',
+	'ack',
+	'reject'
+] as const;
 
 export type { ServerFrame } from '../engine/connection';
 
@@ -325,7 +337,10 @@ export const createSyncCollection = <T>(
 	let socket: WebSocket | undefined;
 	let connected = false;
 	let closed = false;
-	let attempt = 0;
+	const reconnectBackoff = createReconnectBackoff(
+		reconnectMs,
+		maxReconnectMs
+	);
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	// Highest change-feed version applied; sent as `since` to resume on reconnect.
 	let appliedVersion = 0;
@@ -456,7 +471,6 @@ export const createSyncCollection = <T>(
 		const ws = new Impl(options.url);
 		socket = ws;
 		ws.onopen = () => {
-			attempt = 0;
 			connected = true;
 			ws.send(
 				serializer.encodeClient({
@@ -482,6 +496,11 @@ export const createSyncCollection = <T>(
 				const decoded = serializer.decode(event.data);
 				if (decoded !== null && typeof decoded === 'object') {
 					applyFrame(decoded as ServerFrame<T>);
+					if (
+						hasReconnectHealthyFrameType(decoded, serverFrameTypes)
+					) {
+						reconnectBackoff.markHealthy();
+					}
 				}
 			} catch {
 				// ignore non-JSON frames
@@ -492,8 +511,7 @@ export const createSyncCollection = <T>(
 			if (closed || reconnectMs <= 0) {
 				return;
 			}
-			const delay = Math.min(reconnectMs * 2 ** attempt, maxReconnectMs);
-			attempt += 1;
+			const delay = reconnectBackoff.nextDelay();
 			reconnectTimer = setTimeout(connect, delay);
 		};
 	};

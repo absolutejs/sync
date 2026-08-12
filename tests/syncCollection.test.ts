@@ -36,6 +36,9 @@ class FakeWebSocket {
 	emit(frame: ServerFrame<Order>) {
 		this.onmessage?.({ data: JSON.stringify(frame) });
 	}
+	emitUnknown(frame: unknown) {
+		this.onmessage?.({ data: JSON.stringify(frame) });
+	}
 	fireClose() {
 		this.onclose?.({});
 	}
@@ -211,6 +214,34 @@ describe('createSyncCollection', () => {
 			collection: 'orders',
 			params: { userId: 5 }
 		});
+		store.close();
+	});
+
+	test('backs off repeated open-before-snapshot failures and resets after progress', async () => {
+		const store = make({ reconnectMs: 20, maxReconnectMs: 40 });
+		const first = lastSocket();
+		first.open();
+		first.fireClose();
+		await new Promise((resolve) => setTimeout(resolve, 25));
+
+		const second = lastSocket();
+		expect(second).not.toBe(first);
+		second.open();
+		second.emitUnknown({ type: 'not-a-sync-frame' });
+		second.fireClose();
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		// Merely opening did not reset the attempt: retry two waits 40ms.
+		expect(FakeWebSocket.instances).toHaveLength(2);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+
+		const third = lastSocket();
+		expect(third).not.toBe(second);
+		third.open();
+		third.emit({ type: 'snapshot', id: 's', rows: [] });
+		third.fireClose();
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		// A valid server frame proves useful progress and resets to 20ms.
+		expect(FakeWebSocket.instances).toHaveLength(4);
 		store.close();
 	});
 
