@@ -6,7 +6,7 @@ import type { RetryPolicy } from './retry';
  * Scheduled functions — server-triggered work whose effects flow through the
  * change feed, so what a schedule writes goes live to subscribers with no extra
  * wiring. The engine owns running them (and making them reactive); the trigger
- * is `@elysiajs/cron` via the `scheduled` plugin — cron decides *when*, the
+ * is `@elysia/cron` via the `scheduled` plugin — cron decides *when*, the
  * engine makes the effect *live*. For durable, retryable work, a schedule can
  * call into `@absolutejs/queue` (cron enqueues; the queue guarantees it runs).
  */
@@ -27,7 +27,7 @@ export type ScheduleDefinition = {
 	/** Schedule name — its identity (the cron job is registered under it). */
 	name: string;
 	/**
-	 * Cron pattern (`@elysiajs/cron` / croner syntax; the optional 6th leading
+	 * Cron pattern (`@elysia/cron` / croner syntax; the optional 6th leading
 	 * field is seconds), e.g. `'0 8 * * 1'` (Mondays 08:00) or `'*\/5 * * * * *'`
 	 * (every 5 seconds).
 	 */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { treaty } from '@elysiajs/eden';
+import { treaty } from '@elysia/eden';
 import { Elysia, t } from 'elysia';
 import { defineCollection } from '../src/engine/collection';
 import { defineMutation } from '../src/engine/mutation';
@@ -51,13 +51,13 @@ const makeApp = ({
 	new Elysia()
 		.get(
 			'/sync/orders',
-			hydrateRoute(engine, ordersCollection, () => ({ userId: 5 })),
-			{ query: t.Object({ userId: t.Numeric() }) }
+			{ query: t.Object({ userId: t.Numeric() }) },
+			hydrateRoute(engine, ordersCollection, () => ({ userId: 5 }))
 		)
 		.post(
 			'/sync/createOrder',
-			mutateRoute(engine, createOrder, () => ({ userId: 5 })),
-			{ body: t.Object({ total: t.Number() }) }
+			{ body: t.Object({ total: t.Number() }) },
+			mutateRoute(engine, createOrder, () => ({ userId: 5 }))
 		);
 
 describe('engine.hydrate', () => {

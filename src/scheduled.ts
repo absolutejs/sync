@@ -1,5 +1,5 @@
 import { Elysia } from 'elysia';
-import { cron } from '@elysiajs/cron';
+import { cron } from '@elysia/cron';
 import type { SyncEngine } from './engine/syncEngine';
 
 export type ScheduledOptions = {
@@ -13,7 +13,7 @@ export type ScheduledOptions = {
 
 /**
  * Elysia plugin that fires the engine's registered scheduled functions on their
- * cron patterns, via `@elysiajs/cron`. Cron decides *when*; the engine runs the
+ * cron patterns, via `@elysia/cron`. Cron decides *when*; the engine runs the
  * schedule and makes its writes go live through the change feed (and a schedule
  * can `enqueue` into `@absolutejs/queue` for durable, retryable work).
  *

@@ -1,4 +1,5 @@
 import { Elysia } from 'elysia';
+import { websocket } from 'elysia/websocket';
 import { createSyncConnection } from './connection';
 import type { SyncConnection, SyncConnectionStats } from './connection';
 import type { PresenceHub } from './presence';
@@ -200,105 +201,121 @@ export const syncSocket = ({
 		}
 	};
 
-	return new Elysia({ name: '@absolutejs/sync/socket' }).ws(path, {
-		async open(ws) {
-			// Permissive shape: we read `getBufferedAmount` + `close` if the
-			// runtime supports them (Bun's ServerWebSocket does) — fall back
-			// silently for test fakes. Accepts both string and Uint8Array
-			// payloads (binary serializers via 1.16.0).
-			const bunWs = ws as unknown as {
-				id: string;
-				send: (data: string | Uint8Array | ArrayBuffer) => number;
-				getBufferedAmount?: () => number;
-				close?: (code?: number, reason?: string) => void;
-			};
-			if (controllerState?.draining) {
-				bunWs.close?.(1012, 'Service Restart');
-				return;
-			}
-
-			// Register synchronously BEFORE awaiting `resolveContext`, so frames
-			// that arrive during the (possibly slow) auth resolve are buffered in
-			// `pending` rather than dropped (the `message` handler queues them
-			// when `connection` is still null).
-			const tracked: TrackedConnection = {
-				connection: null,
-				pending: [],
-				slowSignaled: false
-			};
-			connections.set(bunWs.id, tracked);
-			controllerState?.sockets.set(bunWs.id, bunWs);
-
-			const ctx = resolveContext
-				? await resolveContext(ws.data as Record<string, unknown>)
-				: {};
-			const connection = createSyncConnection({
-				engine,
-				ctx,
-				presence,
-				serializer,
-				send: (frame) => {
-					const payload = serializer.encodeServer(frame);
-					const ret = bunWs.send(
-						typeof payload === 'string'
-							? payload
-							: (payload as Uint8Array)
-					);
-					const buffered = bunWs.getBufferedAmount?.() ?? 0;
-
-					const overBuffer = buffered > threshold;
-					const backpressure = ret === -1;
-					if ((overBuffer || backpressure) && !tracked.slowSignaled) {
-						tracked.slowSignaled = true;
-						fireSlow({
-							bufferedAmount: buffered,
-							reason: backpressure
-								? 'send-backpressure'
-								: 'buffer-threshold',
-							stats: connection.stats(),
-							wsId: bunWs.id
-						});
-						if (closeOnSlow) bunWs.close?.();
+	return (
+		new Elysia({ name: '@absolutejs/sync/socket' })
+			// Elysia 2 no longer bundles WebSocket support; without this the
+			// route below is silently never served.
+			.use(websocket())
+			.ws(path, {
+				async open(ws) {
+					// Permissive shape: we read `getBufferedAmount` + `close` if the
+					// runtime supports them (Bun's ServerWebSocket does) — fall back
+					// silently for test fakes. Accepts both string and Uint8Array
+					// payloads (binary serializers via 1.16.0).
+					const bunWs = ws as unknown as {
+						id: string;
+						send: (
+							data: string | Uint8Array | ArrayBuffer
+						) => number;
+						getBufferedAmount?: () => number;
+						close?: (code?: number, reason?: string) => void;
+					};
+					if (controllerState?.draining) {
+						bunWs.close?.(1012, 'Service Restart');
+						return;
 					}
-					return ret;
-				}
-			});
 
-			// The socket may have closed while we were awaiting auth.
-			if (!connections.has(bunWs.id)) {
-				connection.close();
-				return;
-			}
-			tracked.connection = connection;
-			// Replay anything that arrived before auth resolved, in order.
-			const buffered = tracked.pending;
-			tracked.pending = [];
-			for (const frame of buffered) {
-				await connection.handle(frame);
-			}
-		},
-		async message(ws, message) {
-			const tracked = connections.get(ws.id);
-			if (!tracked) return;
-			if (tracked.connection) {
-				await tracked.connection.handle(message);
-			} else {
-				tracked.pending.push(message);
-			}
-		},
-		drain(ws) {
-			// WS buffer cleared — re-arm slow-client detection so the next
-			// over-threshold event fires onSlow again.
-			const tracked = connections.get(ws.id);
-			if (tracked) tracked.slowSignaled = false;
-		},
-		close(ws) {
-			const tracked = connections.get(ws.id);
-			if (tracked) {
-				tracked.connection?.close();
-				connections.delete(ws.id);
-				controllerState?.sockets.delete(ws.id);
-			}
-		}
-	});
+					// Register synchronously BEFORE awaiting `resolveContext`, so frames
+					// that arrive during the (possibly slow) auth resolve are buffered in
+					// `pending` rather than dropped (the `message` handler queues them
+					// when `connection` is still null).
+					const tracked: TrackedConnection = {
+						connection: null,
+						pending: [],
+						slowSignaled: false
+					};
+					connections.set(bunWs.id, tracked);
+					controllerState?.sockets.set(bunWs.id, bunWs);
+
+					const ctx = resolveContext
+						? // Elysia 2 hands the route context straight to the handler; the
+							// upgrade data that used to sit under `ws.data` is now spread on
+							// it, and `data` itself holds internal connection state instead.
+							await resolveContext(
+								ws as unknown as Record<string, unknown>
+							)
+						: {};
+					const connection = createSyncConnection({
+						engine,
+						ctx,
+						presence,
+						serializer,
+						send: (frame) => {
+							const payload = serializer.encodeServer(frame);
+							const ret = bunWs.send(
+								typeof payload === 'string'
+									? payload
+									: (payload as Uint8Array)
+							);
+							const buffered = bunWs.getBufferedAmount?.() ?? 0;
+
+							const overBuffer = buffered > threshold;
+							const backpressure = ret === -1;
+							if (
+								(overBuffer || backpressure) &&
+								!tracked.slowSignaled
+							) {
+								tracked.slowSignaled = true;
+								fireSlow({
+									bufferedAmount: buffered,
+									reason: backpressure
+										? 'send-backpressure'
+										: 'buffer-threshold',
+									stats: connection.stats(),
+									wsId: bunWs.id
+								});
+								if (closeOnSlow) bunWs.close?.();
+							}
+							return ret;
+						}
+					});
+
+					// The socket may have closed while we were awaiting auth.
+					if (!connections.has(bunWs.id)) {
+						connection.close();
+						return;
+					}
+					tracked.connection = connection;
+					// Replay anything that arrived before auth resolved, in order.
+					const buffered = tracked.pending;
+					tracked.pending = [];
+					for (const frame of buffered) {
+						await connection.handle(frame);
+					}
+				},
+				async message(ws, message) {
+					const tracked = connections.get(ws.id);
+					if (!tracked) return;
+					if (tracked.connection) {
+						await tracked.connection.handle(message);
+					} else {
+						tracked.pending.push(message);
+					}
+				},
+				drain(ws) {
+					// WS buffer cleared — re-arm slow-client detection so the next
+					// over-threshold event fires onSlow again.
+					const tracked = connections.get(ws.id);
+					if (tracked) tracked.slowSignaled = false;
+				},
+				close(ws) {
+					const tracked = connections.get(ws.id);
+					if (tracked) {
+						tracked.connection?.close();
+						connections.delete(ws.id);
+						controllerState?.sockets.delete(ws.id);
+					}
+				}
+			})
+	);
 };
