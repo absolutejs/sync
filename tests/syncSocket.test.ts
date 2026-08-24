@@ -43,6 +43,111 @@ const connect = (port: number, frames: AnyFrame[]) => {
 };
 
 describe('syncSocket (Elysia WebSocket)', () => {
+	test('authenticates from a single-use first-frame ticket', async () => {
+		const engine = createSyncEngine();
+		engine.register(
+			defineCollection<Order, Params, Ctx>({
+				authorize: (params, ctx) => params.userId === ctx.userId,
+				hydrate: () => [open(1, 5)],
+				match: (row, params) => row.userId === params.userId,
+				name: 'orders'
+			})
+		);
+		const tickets = new Set(['once']);
+		const app = new Elysia()
+			.use(
+				syncSocket({
+					authenticate: (ticket) => {
+						if (!tickets.delete(ticket))
+							throw new Error('invalid ticket');
+						return { userId: 5 };
+					},
+					engine
+				})
+			)
+			.listen(0);
+		const port = app.server?.port ?? 0;
+		const frames: AnyFrame[] = [];
+		const ws = connect(port, frames);
+		await new Promise<void>((resolve, reject) => {
+			ws.addEventListener('open', () => resolve());
+			ws.addEventListener('error', () => reject(new Error('ws error')));
+		});
+		ws.send(JSON.stringify({ ticket: 'once', type: 'authenticate' }));
+		ws.send(
+			JSON.stringify({
+				collection: 'orders',
+				id: 's1',
+				params: { userId: 5 },
+				type: 'subscribe'
+			})
+		);
+		await waitFor(() => frames.some((frame) => frame.type === 'snapshot'));
+		expect(frames.find((frame) => frame.type === 'snapshot')?.rows).toEqual(
+			[open(1, 5)]
+		);
+
+		const replay = connect(port, []);
+		const replayClose = new Promise<CloseEvent>((resolve) =>
+			replay.addEventListener('close', resolve)
+		);
+		await new Promise<void>((resolve) =>
+			replay.addEventListener('open', () => resolve())
+		);
+		replay.send(JSON.stringify({ ticket: 'once', type: 'authenticate' }));
+		expect((await eventWithin(replayClose, 'replay close')).code).toBe(
+			4401
+		);
+
+		ws.close();
+		replay.close();
+		void app.stop(false);
+	});
+
+	test('rejects a non-authentication first frame when tickets are required', async () => {
+		const engine = createSyncEngine();
+		const app = new Elysia()
+			.use(syncSocket({ authenticate: () => ({}), engine }))
+			.listen(0);
+		const port = app.server?.port ?? 0;
+		const ws = connect(port, []);
+		const closed = new Promise<CloseEvent>((resolve) =>
+			ws.addEventListener('close', resolve)
+		);
+		await new Promise<void>((resolve) =>
+			ws.addEventListener('open', () => resolve())
+		);
+		ws.send(JSON.stringify({ type: 'subscribe' }));
+		const event = await eventWithin(closed, 'missing auth close');
+		expect(event.code).toBe(4401);
+		expect(event.reason).toBe('Authentication Required');
+		ws.close();
+		void app.stop(false);
+	});
+
+	test('times out sockets that never provide an authentication frame', async () => {
+		const engine = createSyncEngine();
+		const app = new Elysia()
+			.use(
+				syncSocket({
+					authenticate: () => ({}),
+					authenticationTimeoutMs: 20,
+					engine
+				})
+			)
+			.listen(0);
+		const port = app.server?.port ?? 0;
+		const ws = connect(port, []);
+		const closed = new Promise<CloseEvent>((resolve) =>
+			ws.addEventListener('close', resolve)
+		);
+		const event = await eventWithin(closed, 'authentication timeout');
+		expect(event.code).toBe(4401);
+		expect(event.reason).toBe('Authentication Timeout');
+		ws.close();
+		void app.stop(false);
+	});
+
 	test('streams a snapshot then diffs over a real socket', async () => {
 		const table = [open(1, 5)];
 		const engine = createSyncEngine();

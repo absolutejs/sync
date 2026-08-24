@@ -141,6 +141,42 @@ class FakeWebSocket {
 }
 
 describe('createSyncClient consistent frame', () => {
+	test('sends a fresh socket ticket as the first frame on every connection', async () => {
+		let calls = 0;
+		const client = createSyncClient({
+			reconnectMs: 1,
+			socketTicket: async () => `ticket-${++calls}`,
+			url: 'ws://test/sync/ws',
+			webSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+		});
+		client.collection<Row>({ collection: 'orders' });
+		const first = FakeWebSocket.last!;
+		first.open();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(first.sent.map((frame) => JSON.parse(frame))).toEqual([
+			{ ticket: 'ticket-1', type: 'authenticate' },
+			{
+				collection: 'orders',
+				id: 'c0',
+				type: 'subscribe'
+			}
+		]);
+		expect(first.url).toBe('ws://test/sync/ws');
+
+		client.disconnect();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		const second = FakeWebSocket.last!;
+		expect(second).not.toBe(first);
+		second.open();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(JSON.parse(second.sent[0] ?? '')).toEqual({
+			ticket: 'ticket-2',
+			type: 'authenticate'
+		});
+		expect(calls).toBe(2);
+		client.close();
+	});
+
 	test('a multi-collection frame updates all collections before any listener sees it', () => {
 		const client = createSyncClient({
 			url: 'ws://test/sync/ws',

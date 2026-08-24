@@ -10,6 +10,7 @@ import { jsonSerializer } from '../serializer';
 
 /** Client → server. */
 export type ClientFrame =
+	| { type: 'authenticate'; ticket: string }
 	| {
 			type: 'subscribe';
 			id: string;
@@ -164,6 +165,7 @@ const parseFrame = (
 	}
 	const frame = value as {
 		type?: unknown;
+		ticket?: unknown;
 		id?: unknown;
 		collection?: unknown;
 		params?: unknown;
@@ -175,6 +177,11 @@ const parseFrame = (
 		memberId?: unknown;
 		state?: unknown;
 	};
+	if (frame.type === 'authenticate') {
+		return typeof frame.ticket === 'string'
+			? { type: 'authenticate', ticket: frame.ticket }
+			: undefined;
+	}
 	if (frame.type === 'subscribe') {
 		// 1.17.0+: `since` accepts a number (legacy local-version) OR an
 		// opaque cursor string. Drop anything else.
@@ -337,6 +344,13 @@ export const createSyncConnection = ({
 		const frame = parseFrame(raw, serializer);
 		if (frame === undefined) {
 			send({ type: 'error', message: 'Malformed sync frame' });
+			return;
+		}
+
+		// Authentication frames belong to the socket adapter and are consumed
+		// before a frame reaches a core Sync connection.
+		if (frame.type === 'authenticate') {
+			send({ type: 'error', message: 'Unexpected authentication frame' });
 			return;
 		}
 

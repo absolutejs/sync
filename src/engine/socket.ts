@@ -105,6 +105,15 @@ export type SyncSocketOptions = {
 	resolveContext?: (
 		data: Record<string, unknown>
 	) => unknown | Promise<unknown>;
+	/** Optional message-level authentication for browser/native clients that
+	 * cannot attach Authorization headers to a WebSocket upgrade. The first
+	 * frame must contain a short-lived single-use ticket. */
+	authenticate?: (
+		ticket: string,
+		data: Record<string, unknown>
+	) => unknown | Promise<unknown>;
+	/** Time allowed for the first authentication frame. Defaults to 10 seconds. */
+	authenticationTimeoutMs?: number;
 	/**
 	 * Bytes threshold for the per-connection WS send buffer. When
 	 * `ws.getBufferedAmount()` exceeds this, `onSlow` fires once per
@@ -142,6 +151,9 @@ export type SyncSocketOptions = {
 };
 
 type TrackedConnection = {
+	activate: (ctx: unknown) => Promise<void>;
+	authenticating?: Promise<void>;
+	authenticationTimer?: ReturnType<typeof setTimeout>;
 	// Null until the async `resolveContext` resolves. Frames that arrive in that
 	// window are buffered in `pending` and replayed once the connection exists —
 	// otherwise a client that sends `subscribe` synchronously on open (every
@@ -166,6 +178,8 @@ type TrackedConnection = {
  * `onSlow` / `closeOnSlow`.
  */
 export const syncSocket = ({
+	authenticate,
+	authenticationTimeoutMs = 10_000,
 	engine,
 	controller,
 	path = '/sync/ws',
@@ -186,6 +200,11 @@ export const syncSocket = ({
 		);
 	}
 	const threshold = maxBufferedBytes ?? Infinity;
+	if (
+		!Number.isFinite(authenticationTimeoutMs) ||
+		authenticationTimeoutMs <= 0
+	)
+		throw new TypeError('authenticationTimeoutMs must be positive');
 
 	const fireSlow = (event: SlowConnectionEvent) => {
 		if (!onSlow) return;
@@ -230,6 +249,7 @@ export const syncSocket = ({
 					// `pending` rather than dropped (the `message` handler queues them
 					// when `connection` is still null).
 					const tracked: TrackedConnection = {
+						activate: async () => undefined,
 						connection: null,
 						pending: [],
 						slowSignaled: false
@@ -237,6 +257,59 @@ export const syncSocket = ({
 					connections.set(bunWs.id, tracked);
 					controllerState?.sockets.set(bunWs.id, bunWs);
 
+					tracked.activate = async (ctx) => {
+						const connection = createSyncConnection({
+							engine,
+							ctx,
+							presence,
+							serializer,
+							send: (frame) => {
+								const payload = serializer.encodeServer(frame);
+								const ret = bunWs.send(
+									typeof payload === 'string'
+										? payload
+										: (payload as Uint8Array)
+								);
+								const buffered =
+									bunWs.getBufferedAmount?.() ?? 0;
+								const overBuffer = buffered > threshold;
+								const backpressure = ret === -1;
+								if (
+									(overBuffer || backpressure) &&
+									!tracked.slowSignaled
+								) {
+									tracked.slowSignaled = true;
+									fireSlow({
+										bufferedAmount: buffered,
+										reason: backpressure
+											? 'send-backpressure'
+											: 'buffer-threshold',
+										stats: connection.stats(),
+										wsId: bunWs.id
+									});
+									if (closeOnSlow) bunWs.close?.();
+								}
+								return ret;
+							}
+						});
+						if (!connections.has(bunWs.id)) {
+							connection.close();
+							return;
+						}
+						tracked.connection = connection;
+						const buffered = tracked.pending;
+						tracked.pending = [];
+						for (const frame of buffered)
+							await connection.handle(frame);
+					};
+
+					if (authenticate) {
+						tracked.authenticationTimer = setTimeout(() => {
+							if (!tracked.connection)
+								bunWs.close?.(4401, 'Authentication Timeout');
+						}, authenticationTimeoutMs);
+						return;
+					}
 					const ctx = resolveContext
 						? // Elysia 2 hands the route context straight to the handler; the
 							// upgrade data that used to sit under `ws.data` is now spread on
@@ -245,59 +318,51 @@ export const syncSocket = ({
 								ws as unknown as Record<string, unknown>
 							)
 						: {};
-					const connection = createSyncConnection({
-						engine,
-						ctx,
-						presence,
-						serializer,
-						send: (frame) => {
-							const payload = serializer.encodeServer(frame);
-							const ret = bunWs.send(
-								typeof payload === 'string'
-									? payload
-									: (payload as Uint8Array)
-							);
-							const buffered = bunWs.getBufferedAmount?.() ?? 0;
-
-							const overBuffer = buffered > threshold;
-							const backpressure = ret === -1;
-							if (
-								(overBuffer || backpressure) &&
-								!tracked.slowSignaled
-							) {
-								tracked.slowSignaled = true;
-								fireSlow({
-									bufferedAmount: buffered,
-									reason: backpressure
-										? 'send-backpressure'
-										: 'buffer-threshold',
-									stats: connection.stats(),
-									wsId: bunWs.id
-								});
-								if (closeOnSlow) bunWs.close?.();
-							}
-							return ret;
-						}
-					});
-
-					// The socket may have closed while we were awaiting auth.
-					if (!connections.has(bunWs.id)) {
-						connection.close();
-						return;
-					}
-					tracked.connection = connection;
-					// Replay anything that arrived before auth resolved, in order.
-					const buffered = tracked.pending;
-					tracked.pending = [];
-					for (const frame of buffered) {
-						await connection.handle(frame);
-					}
+					await tracked.activate(ctx);
 				},
 				async message(ws, message) {
 					const tracked = connections.get(ws.id);
 					if (!tracked) return;
 					if (tracked.connection) {
 						await tracked.connection.handle(message);
+					} else if (authenticate && !tracked.authenticating) {
+						const decoded = serializer.decode(message);
+						if (
+							typeof decoded !== 'object' ||
+							decoded === null ||
+							Reflect.get(decoded, 'type') !== 'authenticate' ||
+							typeof Reflect.get(decoded, 'ticket') !== 'string'
+						) {
+							(
+								ws as unknown as {
+									close?: (
+										code?: number,
+										reason?: string
+									) => void;
+								}
+							).close?.(4401, 'Authentication Required');
+							return;
+						}
+						tracked.authenticating = (async () => {
+							try {
+								const ctx = await authenticate(
+									Reflect.get(decoded, 'ticket') as string,
+									ws as unknown as Record<string, unknown>
+								);
+								await tracked.activate(ctx);
+								clearTimeout(tracked.authenticationTimer);
+								tracked.authenticationTimer = undefined;
+							} catch {
+								(
+									ws as unknown as {
+										close?: (
+											code?: number,
+											reason?: string
+										) => void;
+									}
+								).close?.(4401, 'Authentication Failed');
+							}
+						})();
 					} else {
 						tracked.pending.push(message);
 					}
@@ -311,6 +376,7 @@ export const syncSocket = ({
 				close(ws) {
 					const tracked = connections.get(ws.id);
 					if (tracked) {
+						clearTimeout(tracked.authenticationTimer);
 						tracked.connection?.close();
 						connections.delete(ws.id);
 						controllerState?.sockets.delete(ws.id);

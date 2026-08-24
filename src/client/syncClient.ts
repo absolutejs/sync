@@ -26,6 +26,9 @@ export type SyncClientOptions = {
 	url: string;
 	/** WebSocket implementation; defaults to the global one (pass for tests/SSR). */
 	webSocketImpl?: typeof WebSocket;
+	/** Fetch a new short-lived, single-use ticket before every connection or
+	 * reconnect. The ticket is sent in the first WebSocket frame, never a URL. */
+	socketTicket?: () => Promise<string>;
 	/** Initial reconnect backoff (ms); doubles per attempt. Defaults to 500. */
 	reconnectMs?: number;
 	/** Max reconnect backoff (ms). Defaults to 10000. */
@@ -343,6 +346,30 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		const ws = new Impl(options.url);
 		socket = ws;
 		ws.onopen = () => {
+			if (options.socketTicket) {
+				void options
+					.socketTicket()
+					.then((ticket) => {
+						if (socket !== ws || closed) return;
+						wsSend(
+							serializer.encodeClient({
+								type: 'authenticate',
+								ticket
+							})
+						);
+						connected = true;
+						for (const entry of entries.values())
+							sendSubscribe(entry);
+						for (const entry of entries.values())
+							for (const mutation of entry.pending)
+								sendMutate(mutation);
+					})
+					.catch((error) => {
+						options.onError?.(error);
+						ws.close();
+					});
+				return;
+			}
 			connected = true;
 			for (const entry of entries.values()) {
 				sendSubscribe(entry);

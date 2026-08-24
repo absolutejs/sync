@@ -248,6 +248,37 @@ new Elysia()
 socketController.drain();
 ```
 
+Browser and installed-app clients that cannot set an `Authorization` header on
+the WebSocket upgrade can authenticate with a short-lived one-time ticket. The
+ticket is fetched over authenticated HTTPS, sent as the first socket frame, and
+never appears in a URL. `@absolutejs/auth` supplies the issuer/store/consumer;
+Sync owns only the transport handshake.
+
+```ts
+const client = createSyncClient({
+	url: 'wss://app.example/sync/ws',
+	socketTicket: () => mobileAuth.socketTicket('https://app.example/sync')
+});
+
+syncSocket({
+	authenticate: async (ticket) => {
+		const principal = await consumeSocketTicket({
+			audience: 'https://app.example/sync',
+			getUser,
+			store: socketTicketStore,
+			ticket
+		});
+		if (!principal) throw new Error('Invalid socket ticket');
+		return principal;
+	},
+	engine
+});
+```
+
+Each reconnect invokes `socketTicket` again. The server rejects malformed,
+expired, replayed, or missing tickets with close code `4401`; unauthenticated
+sockets also have a bounded first-frame timeout.
+
 ```ts
 // browser
 import { createSyncCollection } from '@absolutejs/sync/client';
@@ -470,7 +501,7 @@ tenant to a shard adds zero standing connections.
 | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `createReactiveHub()`                                                                                                                                  | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`).                                                                                                                                                                                                                                                                                         |
 | `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                                                                                   | Elysia plugin: SSE stream of hub events.                                                                                                                                                                                                                                                                                                                     |
-| `syncSocket({ engine, path?, resolveContext? })`                                                                                                       | Elysia WebSocket plugin for the sync engine.                                                                                                                                                                                                                                                                                                                 |
+| `syncSocket({ engine, path?, resolveContext?, authenticate? })`                                                                                        | Elysia WebSocket plugin for the sync engine. `authenticate` requires a first-frame one-time ticket and returns the per-connection authorization context.                                                                                                                                                                                                     |
 | `createSyncSocketController()`                                                                                                                         | Host control plane for blue-green drains. Pass it as `syncSocket({ controller, engine })`, then call `controller.drain()` on the old slot to close current and late sockets with code 1012 while clients reconnect through the switched load balancer.                                                                                                       |
 | `scheduled({ engine, prefix?, onError? })` _(`/scheduled` subpath)_                                                                                    | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). Kept off the main entry so `syncSocket` needs no cron dep.                                                                                                                                                                                             |
 | `syncDevtools({ engine, path?, snapshotMs? })`                                                                                                         | Elysia plugin: a live devtools dashboard (collections, subscription counts, mutations, schedules, change feed) over SSE. Backed by `engine.inspect()` + `engine.onActivity()`. **1.23** also exposes a Point-in-time replay panel (datetime picker + tables filter) and a `GET <path>/replay?at=<ms>&tables=<csv>` JSON endpoint wrapping `engine.replayTo`. |
@@ -485,7 +516,7 @@ tenant to a shard adds zero standing connections.
 | `createLiveQuery({ topics, fetcher, ... })`                    | Hydrate-once, refetch-on-event observable query store.                                                                                                                                                                                                                 |
 | `jsonFetcher(url, init?)`                                      | Default `fetcher`: GET + JSON parse, forwards the abort signal.                                                                                                                                                                                                        |
 | `createSyncCollection({ url, collection, ... })`               | Live diff-driven collection store with optimistic `mutate`.                                                                                                                                                                                                            |
-| `createSyncClient({ url })`                                    | One socket, many collections (`client.collection(...)`). Applies a multi-collection mutation's diffs as one **consistent frame** — no torn cross-collection paint.                                                                                                     |
+| `createSyncClient({ url, socketTicket? })`                     | One socket, many collections (`client.collection(...)`). Fetches a fresh one-time ticket for every connection/reconnect when configured, before sending subscriptions. Applies a multi-collection mutation's diffs as one **consistent frame**.                           |
 | `createPresence({ url, room, state })`                         | Join a presence room: see who's online / typing (`get` + `subscribe`) and publish your own state (`set`).                                                                                                                                                              |
 | `createCollaborativeText({ url, collection, id, field, ... })` | Live CRDT collaborative-text controller (`get`/`subscribe`/`setText`/`close`): tracks a row's CRDT field, merges remote edits into a local replica, and broadcasts via the engine's `"<collection>:merge"` mutation. Backs the `useCollaborativeText` framework hooks. |
 | `localStorageMutationStorage(key)`                             | `localStorage`-backed offline write queue for `createSyncCollection`.                                                                                                                                                                                                  |
