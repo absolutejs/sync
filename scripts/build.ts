@@ -49,6 +49,7 @@ if (!serverBuild.success) {
 const browserBuild = await Bun.build({
 	entrypoints: [
 		'src/client/index.ts',
+		'src/client/runtimeTransport.ts',
 		'src/crdt/index.ts',
 		'src/adapters/tanstack-db/index.ts',
 		'src/react/index.ts',

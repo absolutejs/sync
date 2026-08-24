@@ -5,6 +5,7 @@ import type { ServerFrame } from '../src/engine/connection';
 import { defineMutation } from '../src/engine/mutation';
 import { createSyncEngine } from '../src/engine/syncEngine';
 import { createSyncClient } from '../src/client/syncClient';
+import { installSyncClientRuntimeTransport } from '../src/client/runtimeTransport';
 
 type Row = { id: number; v: number };
 
@@ -141,6 +142,29 @@ class FakeWebSocket {
 }
 
 describe('createSyncClient consistent frame', () => {
+	test('unchanged clients use the installed native ticket transport', async () => {
+		const uninstall = installSyncClientRuntimeTransport({
+			socketTicket: async () => 'runtime-ticket'
+		});
+		try {
+			const client = createSyncClient({
+				url: 'ws://test/sync/ws',
+				webSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+			});
+			client.collection<Row>({ collection: 'orders' });
+			const socket = FakeWebSocket.last!;
+			socket.open();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(JSON.parse(socket.sent[0]!)).toEqual({
+				ticket: 'runtime-ticket',
+				type: 'authenticate'
+			});
+			client.close();
+		} finally {
+			uninstall();
+		}
+	});
+
 	test('sends a fresh socket ticket as the first frame on every connection', async () => {
 		let calls = 0;
 		const client = createSyncClient({

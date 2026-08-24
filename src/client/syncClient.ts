@@ -11,6 +11,7 @@ import {
 	createReconnectBackoff,
 	hasReconnectHealthyFrameType
 } from './reconnectBackoff';
+import { getSyncClientRuntimeTransport } from './runtimeTransport';
 
 const serverFrameTypes = [
 	'snapshot',
@@ -131,6 +132,8 @@ type Entry = {
  * replayed on reconnect (make server mutations idempotent).
  */
 export const createSyncClient = (options: SyncClientOptions): SyncClient => {
+	const socketTicket =
+		options.socketTicket ?? getSyncClientRuntimeTransport()?.socketTicket;
 	const reconnectMs = options.reconnectMs ?? 500;
 	const maxReconnectMs = options.maxReconnectMs ?? 10_000;
 	const serializer: FrameSerializer = options.serializer ?? jsonSerializer;
@@ -346,9 +349,8 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		const ws = new Impl(options.url);
 		socket = ws;
 		ws.onopen = () => {
-			if (options.socketTicket) {
-				void options
-					.socketTicket()
+			if (socketTicket) {
+				void socketTicket()
 					.then((ticket) => {
 						if (socket !== ws || closed) return;
 						wsSend(

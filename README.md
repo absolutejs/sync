@@ -279,6 +279,12 @@ Each reconnect invokes `socketTicket` again. The server rejects malformed,
 expired, replayed, or missing tickets with close code `4401`; unauthenticated
 sockets also have a bounded first-frame timeout.
 
+AbsoluteJS native shells install the ticket supplier through Sync's scoped
+client runtime registry. Existing `createSyncClient({ url })` calls therefore
+send a fresh one-time ticket on every native connection without putting a token
+in the URL or requiring application changes. An explicit `socketTicket` option
+always takes precedence, and browser/server runtimes remain unchanged.
+
 ```ts
 // browser
 import { createSyncCollection } from '@absolutejs/sync/client';

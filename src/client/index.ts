@@ -40,6 +40,7 @@ export type {
 } from './presence';
 
 export { createSyncClient } from './syncClient';
+export * from './runtimeTransport';
 export type {
 	SyncClient,
 	SyncClientOptions,
