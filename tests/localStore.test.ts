@@ -10,6 +10,7 @@ import type {
 	LocalMutationRecord,
 	SyncLocalStore
 } from '../src/client/localStore';
+import { assertSyncLocalStoreConformance } from '../src/testing';
 
 const operation = (operationId: string): LocalMutationRecord => ({
 	operationId,
@@ -37,6 +38,11 @@ const adapters: Array<[string, StoreFactory]> = [
 
 for (const [adapter, createStore] of adapters) {
 	describe(`${adapter} SyncLocalStore conformance`, () => {
+		test('passes the portable adapter contract', async () => {
+			await expect(
+				assertSyncLocalStoreConformance({ store: createStore() })
+			).resolves.toBeUndefined();
+		});
 		test('commits collection state and its outbound operation atomically', async () => {
 			const store = createStore();
 			await store.transaction('account-a', 'readwrite', async (tx) => {

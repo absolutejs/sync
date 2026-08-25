@@ -18,6 +18,7 @@ import {
 	type SyncEngine,
 	type SyncEngineOptions
 } from './engine/syncEngine';
+import type { LocalMutationRecord, SyncLocalStore } from './client/localStore';
 
 /**
  * Construct a {@link SyncEngine} for tests. Today this is a documented
@@ -76,3 +77,131 @@ export const runAsActor = (
 	extraCtx?: Record<string, unknown>
 ): Promise<unknown> =>
 	engine.runMutation(mutation, args, { ...extraCtx, userId: actorId });
+
+export type SyncLocalStoreConformanceOptions = {
+	/** A fresh adapter instance. The harness may delete its test namespaces. */
+	store: SyncLocalStore;
+	/** Optional prefix when a test database is shared with other processes. */
+	namespacePrefix?: string;
+};
+
+const conformanceMutation = (operationId: string): LocalMutationRecord => ({
+	args: { title: operationId },
+	attempts: 0,
+	createdAt: 1,
+	inverse: [],
+	name: 'tasks:create',
+	operationId,
+	optimistic: []
+});
+
+/**
+ * Runs the portable durability contract used by Sync's memory, IndexedDB,
+ * and native SQLite adapters. An empty result means the adapter preserves
+ * atomic rows/outbox state, rollback, readonly behavior, and principal
+ * isolation.
+ */
+export const inspectSyncLocalStoreConformance = async ({
+	store,
+	namespacePrefix = `sync-conformance-${crypto.randomUUID()}`
+}: SyncLocalStoreConformanceOptions): Promise<string[]> => {
+	const issues: string[] = [];
+	const accountA = `${namespacePrefix}:account-a`;
+	const accountB = `${namespacePrefix}:account-b`;
+	try {
+		await store.transaction(accountA, 'readwrite', async (tx) => {
+			await tx.setInstallationId('install-a');
+			await tx.putCollection('tasks', {
+				cursor: 'cursor-7',
+				rows: [{ id: 1, title: 'offline' }],
+				version: 7
+			});
+			await tx.putMutation(conformanceMutation('install-a:op-1'));
+		});
+		const committed = await store.transaction(
+			accountA,
+			'readonly',
+			async (tx) => ({
+				collection: await tx.getCollection('tasks'),
+				installationId: await tx.getInstallationId(),
+				mutations: await tx.listMutations()
+			})
+		);
+		if (
+			committed.installationId !== 'install-a' ||
+			committed.collection?.cursor !== 'cursor-7' ||
+			committed.collection?.version !== 7 ||
+			committed.mutations[0]?.operationId !== 'install-a:op-1'
+		)
+			issues.push('atomic state did not round-trip');
+
+		try {
+			await store.transaction(accountB, 'readwrite', async (tx) => {
+				await tx.putCollection('tasks', {
+					rows: [{ id: 2 }],
+					version: 1
+				});
+				await tx.putMutation(conformanceMutation('install-b:rollback'));
+				throw new Error('conformance rollback');
+			});
+			issues.push(
+				'throwing transaction committed instead of rolling back'
+			);
+		} catch (error) {
+			if (
+				!(error instanceof Error) ||
+				error.message !== 'conformance rollback'
+			)
+				throw error;
+		}
+		const rolledBack = await store.transaction(
+			accountB,
+			'readonly',
+			async (tx) => ({
+				collection: await tx.getCollection('tasks'),
+				mutations: await tx.listMutations()
+			})
+		);
+		if (rolledBack.collection !== undefined || rolledBack.mutations.length)
+			issues.push('transaction rollback left partial state');
+
+		try {
+			await store.transaction(accountA, 'readonly', (tx) =>
+				tx.putMutation(conformanceMutation('readonly-write'))
+			);
+			issues.push('readonly transaction accepted a write');
+		} catch {
+			// Expected.
+		}
+
+		await store.transaction(accountB, 'readwrite', (tx) =>
+			tx.putMutation(conformanceMutation('install-b:op-1'))
+		);
+		await store.deleteNamespace(accountA);
+		const [deleted, retained] = await Promise.all([
+			store.transaction(accountA, 'readonly', (tx) => tx.listMutations()),
+			store.transaction(accountB, 'readonly', (tx) => tx.listMutations())
+		]);
+		if (deleted.length !== 0)
+			issues.push('deleteNamespace retained signed-out account state');
+		if (retained[0]?.operationId !== 'install-b:op-1')
+			issues.push('deleteNamespace crossed a principal boundary');
+	} finally {
+		await Promise.all([
+			store.deleteNamespace(accountA),
+			store.deleteNamespace(accountB)
+		]);
+	}
+
+	return issues;
+};
+
+export const assertSyncLocalStoreConformance = async (
+	options: SyncLocalStoreConformanceOptions
+): Promise<void> => {
+	const issues = await inspectSyncLocalStoreConformance(options);
+	if (issues.length)
+		throw new Error(
+			`Sync local-store conformance failed: ${issues.join('; ')}`
+		);
+};
