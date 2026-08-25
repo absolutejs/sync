@@ -1,4 +1,12 @@
+import type { SyncLocalStore } from './localStore';
+
 export type SyncClientRuntimeTransport = {
+	durable?: {
+		createId?: () => string;
+		onError?: (error: unknown) => void;
+		store: SyncLocalStore;
+		namespace: string;
+	};
 	socketTicket: () => Promise<string>;
 };
 

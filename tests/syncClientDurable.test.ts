@@ -6,6 +6,7 @@ import {
 	createSyncClient
 } from '../src/client';
 import type { LocalMutationRecord, SyncLocalStore } from '../src/client';
+import { installSyncClientRuntimeTransport } from '../src/client/runtimeTransport';
 import type { ServerFrame } from '../src/engine/connection';
 
 type Order = { id: number; status: string };
@@ -65,6 +66,41 @@ afterEach(() => {
 });
 
 describe('createSyncClient durable profile', () => {
+	test('uses Auth-provisioned runtime durability without page configuration', async () => {
+		const store = createMemorySyncLocalStore();
+		await store.transaction('principal-a', 'readwrite', (tx) =>
+			tx.putCollection<Order>('orders', {
+				rows: [{ id: 9, status: 'runtime-cached' }],
+				version: 3
+			})
+		);
+		const uninstall = installSyncClientRuntimeTransport({
+			durable: { namespace: 'principal-a', store },
+			socketTicket: async () => 'ticket'
+		});
+		try {
+			const client = createSyncClient({
+				reconnectMs: 0,
+				url: 'ws://test/sync/ws',
+				webSocketImpl: Impl
+			});
+			const orders = client.collection<Order>({ collection: 'orders' });
+			const socket = await waitForSocket();
+			socket.open();
+			await waitFor(
+				() =>
+					socket.frames().some((frame) => frame.type === 'subscribe'),
+				'runtime durable subscribe was not sent'
+			);
+			expect(orders.get().data).toEqual([
+				{ id: 9, status: 'runtime-cached' }
+			]);
+			client.close();
+		} finally {
+			uninstall();
+		}
+	});
+
 	test('hydrates cached rows before subscribing and resumes from the cursor', async () => {
 		const store = createIndexedDbSyncLocalStore({
 			databaseName: `sync-client-${crypto.randomUUID()}`,

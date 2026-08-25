@@ -222,8 +222,9 @@ const defaultLocalKey = (collection: string, params: unknown): string =>
  * replayed on reconnect (make server mutations idempotent).
  */
 export const createSyncClient = (options: SyncClientOptions): SyncClient => {
-	const socketTicket =
-		options.socketTicket ?? getSyncClientRuntimeTransport()?.socketTicket;
+	const runtime = getSyncClientRuntimeTransport();
+	const socketTicket = options.socketTicket ?? runtime?.socketTicket;
+	const durable = options.durable ?? runtime?.durable;
 	const reconnectMs = options.reconnectMs ?? 500;
 	const maxReconnectMs = options.maxReconnectMs ?? 10_000;
 	const serializer: FrameSerializer = options.serializer ?? jsonSerializer;
@@ -322,7 +323,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	};
 
 	const reportStorageError = (error: unknown) => {
-		options.durable?.onError?.(error);
+		durable?.onError?.(error);
 		options.onError?.(error);
 	};
 	let localWriteTail: Promise<void> = Promise.resolve();
@@ -336,7 +337,6 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	};
 
 	const persistEntries = (affected: Iterable<Entry>) => {
-		const durable = options.durable;
 		if (durable === undefined) return;
 		const snapshots = new Map<
 			string,
@@ -393,7 +393,6 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		error?: Error
 	) => {
 		const mutation = mutationOwner.get(mutationId);
-		const durable = options.durable;
 		if (mutation?.operationId === undefined || durable === undefined) {
 			finishPending(mutationId, result, error);
 			return;
@@ -534,7 +533,6 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			name: mutation.name,
 			args: mutation.args
 		});
-		const durable = options.durable;
 		if (durable === undefined || mutation.operationId === undefined) {
 			wsSend(payload);
 			return;
@@ -568,7 +566,6 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	};
 
 	const initializeDurable = async () => {
-		const durable = options.durable;
 		if (durable === undefined) return;
 		installationId = await ensureSyncInstallationId(
 			durable.store,
@@ -598,7 +595,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	};
 
 	const durableReady =
-		options.durable === undefined
+		durable === undefined
 			? Promise.resolve()
 			: initializeDurable().catch((error) => {
 					reportStorageError(error);
@@ -606,7 +603,6 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				});
 
 	const hydrateEntry = async (entry: Entry) => {
-		const durable = options.durable;
 		if (durable === undefined) return;
 		await durableReady;
 		const record = await durable.store.transaction(
@@ -664,7 +660,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			for (const mutation of pending) sendMutate(mutation);
 		};
 		ws.onopen = () => {
-			if (options.durable === undefined) {
+			if (durable === undefined) {
 				sendInitialFrames();
 				return;
 			}
@@ -709,7 +705,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		};
 	};
 
-	if (options.durable === undefined) connect();
+	if (durable === undefined) connect();
 	else void durableReady.then(connect).catch(() => {});
 
 	const normalizeOptimisticOperations = <T>(
@@ -861,7 +857,6 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 						sendMutate(mutation);
 					};
 
-					const durable = options.durable;
 					if (durable === undefined) {
 						const optimisticOperations =
 							normalizeOptimisticOperations(
