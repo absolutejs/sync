@@ -19,6 +19,12 @@ import {
 	hasReconnectHealthyFrameType
 } from './reconnectBackoff';
 import { getSyncClientRuntimeTransport } from './runtimeTransport';
+import type {
+	SyncClientConnectionStatus,
+	SyncClientStatus,
+	SyncFlushOptions,
+	SyncFlushResult
+} from './runtimeTransport';
 import {
 	SyncMutationRejectedError,
 	type SyncMutationRejection
@@ -74,34 +80,6 @@ export type DurableSyncClientOptions = {
 	maxAttempts?: number;
 	/** Client-side retry delay when the server provides no hint. */
 	retryBackoff?: (attempt: number) => number;
-};
-
-export type SyncClientConnectionStatus =
-	| 'closed'
-	| 'connecting'
-	| 'offline'
-	| 'online';
-
-/** Framework-neutral local-first diagnostics. */
-export type SyncClientStatus = {
-	connection: SyncClientConnectionStatus;
-	pending: number;
-	deadLetters: number;
-	oldestPendingAt?: number;
-	lastSuccessfulPullAt?: number;
-	lastSuccessfulPushAt?: number;
-	lastError?: string;
-};
-
-export type SyncFlushOptions = {
-	/** Finite foreground/background budget. Defaults to 10 seconds. */
-	timeoutMs?: number;
-};
-
-export type SyncFlushResult = {
-	deadLetters: number;
-	pending: number;
-	timedOut: boolean;
 };
 
 export type SyncCollectionHandleOptions<T> = {
@@ -1362,3 +1340,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 };
 
 export type { SyncCollectionState, SyncCollectionStatus };
+export type {
+	SyncClientConnectionStatus,
+	SyncClientStatus,
+	SyncFlushOptions,
+	SyncFlushResult
+} from './runtimeTransport';

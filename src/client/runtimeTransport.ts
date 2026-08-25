@@ -1,5 +1,33 @@
 import type { SyncLocalStore } from './localStore';
 
+export type SyncClientConnectionStatus =
+	| 'closed'
+	| 'connecting'
+	| 'offline'
+	| 'online';
+
+/** Framework-neutral local-first diagnostics. */
+export type SyncClientStatus = {
+	connection: SyncClientConnectionStatus;
+	pending: number;
+	deadLetters: number;
+	oldestPendingAt?: number;
+	lastSuccessfulPullAt?: number;
+	lastSuccessfulPushAt?: number;
+	lastError?: string;
+};
+
+export type SyncFlushOptions = {
+	/** Finite foreground/background budget. Defaults to 10 seconds. */
+	timeoutMs?: number;
+};
+
+export type SyncFlushResult = {
+	deadLetters: number;
+	pending: number;
+	timedOut: boolean;
+};
+
 export type SyncClientRuntimeTransport = {
 	durable?: {
 		createId?: () => string;
@@ -15,19 +43,11 @@ export type SyncClientRuntimeTransport = {
 };
 
 export type SyncRuntimeClient = {
-	flush: (options?: { timeoutMs?: number }) => Promise<{
-		deadLetters: number;
-		pending: number;
-		timedOut: boolean;
-	}>;
+	flush: (options?: SyncFlushOptions) => Promise<SyncFlushResult>;
 	reconnect: () => void;
-	status: () => {
-		connection: 'closed' | 'connecting' | 'offline' | 'online';
-		deadLetters: number;
-		pending: number;
-	};
+	status: () => SyncClientStatus;
 	subscribeStatus: (
-		listener: (status: ReturnType<SyncRuntimeClient['status']>) => void
+		listener: (status: SyncClientStatus) => void
 	) => () => void;
 };
 
