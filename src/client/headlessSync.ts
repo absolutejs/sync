@@ -48,6 +48,7 @@ export type RunHeadlessSyncOptions = {
 			credentials: 'include';
 			headers: Record<string, string>;
 			method: 'POST';
+			redirect: 'error';
 		}
 	) => Promise<HeadlessSyncFetchResponse>;
 	now?: () => number;
@@ -144,7 +145,7 @@ export const runHeadlessSync = async ({
 	endpoint,
 	store,
 	namespace,
-	collections = [],
+	collections,
 	maxMutations: configuredMaxMutations,
 	maxPulls: configuredMaxPulls,
 	maxAttempts: configuredMaxAttempts,
@@ -179,11 +180,27 @@ export const runHeadlessSync = async ({
 				await tx.putMutation(next);
 				mutations.push(next);
 			}
+			const discoveredCollections: HeadlessSyncCollection[] =
+				collections ??
+				(await tx.listCollections())
+					.filter(
+						({ record }) =>
+							record.headlessKey === 'id' &&
+							typeof record.collection === 'string' &&
+							record.collection.length > 0
+					)
+					.map(({ key, record }) => ({
+						collection: record.collection!,
+						localKey: key,
+						params: record.params
+					}));
 			const pulls = await Promise.all(
-				collections.slice(0, maxPulls).map(async (collection) => ({
-					collection,
-					record: await tx.getCollection(collection.localKey)
-				}))
+				discoveredCollections
+					.slice(0, maxPulls)
+					.map(async (collection) => ({
+						collection,
+						record: await tx.getCollection(collection.localKey)
+					}))
 			);
 			return { mutations, pulls };
 		}
@@ -221,7 +238,8 @@ export const runHeadlessSync = async ({
 				'content-type': 'application/json',
 				...(await headers?.())
 			},
-			method: 'POST'
+			method: 'POST',
+			redirect: 'error'
 		});
 		if (!fetched.ok)
 			throw new Error(

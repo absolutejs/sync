@@ -196,10 +196,15 @@ HTTP exchange at `/__absolute/sync/background`: durable mutations execute in
 order, then declared collections return a snapshot or cursor catch-up and
 immediately unsubscribe. When `@absolutejs/auth` is mounted first, bearer
 requests and first-frame socket tickets automatically resolve to the same typed
-`{ authPrincipal, user }` context. An existing `resolveContext` is reused; custom
-auth can instead provide `headless.resolveContext`. Requests without a Bearer
-credential fail closed. Set `headless: false` to opt out or configure
-`headless.path`, `maxMutations`, and `maxPulls`.
+`{ authPrincipal, user }` context. Browser PWAs may use their existing HTTP-only
+session only through an exact-same-origin JSON `POST`; Origin and Fetch Metadata
+are checked before Auth is consulted. Native work still requires Bearer. The
+no-store `POST /__absolute/sync/principal` returns only the opaque active
+IndexedDB namespace for the PWA bootstrap. An existing `resolveContext` is
+reused for Bearer work; custom auth can instead provide
+`headless.resolveContext`. Set `headless: false` to opt out,
+`headless.principalPath: false` to disable the PWA session bridge, or configure
+the paths and request limits.
 
 The lower-level `headlessSyncRoute(engine, { resolveContext })` remains available
 for unusual server composition. The client-side `runHeadlessSync` helper
@@ -536,6 +541,7 @@ tenant to a shard adds zero standing connections.
 | `indexedDbCollectionCache({ key, ... })`                       | IndexedDB-backed local-first read cache — durable, large-capacity. Same resume semantics, async storage.                                                                                                                                                               |
 | `createMemorySyncLocalStore()`                                 | Reference implementation of the next-generation transactional local store: principal namespaces, installation identity, confirmed rows/cursors, and a serializable operation outbox commit atomically.                                                                 |
 | `createIndexedDbSyncLocalStore()`                              | Browser/PWA implementation of the same transaction contract. Multi-collection frames, confirmed cursors, installation identity, and the operation outbox commit atomically in IndexedDB.                                                                               |
+| `runHeadlessSync()`                                            | One bounded HTTP push/pull transaction for a worker or native runner. It can discover persisted `id`-keyed collection descriptors automatically and refuses redirects.                                                                                                 |
 | `ensureSyncInstallationId(store, namespace)`                   | Atomically creates or returns the stable installation identity used by `createSyncOperationId`.                                                                                                                                                                        |
 
 The multiplexed client has an additive durable profile. The namespace must come

@@ -57,6 +57,11 @@ export type SyncLocalTransaction = {
 	getCollection: <T = unknown>(
 		key: string
 	) => Promise<LocalCollectionRecord<T> | undefined>;
+	/** Enumerate this principal's durable collection descriptors for a
+	 * service-worker/native runner. Rows never cross namespace boundaries. */
+	listCollections: () => Promise<
+		Array<{ key: string; record: LocalCollectionRecord }>
+	>;
 	putCollection: <T = unknown>(
 		key: string,
 		record: LocalCollectionRecord<T>
@@ -171,6 +176,11 @@ export const createMemorySyncLocalStore = (): SyncLocalStore => {
 						? undefined
 						: clone(record as LocalCollectionRecord<T>);
 				},
+				listCollections: async () =>
+					[...working.collections.entries()].map(([key, record]) => ({
+						key,
+						record: clone(record)
+					})),
 				putCollection: async (key, record) => {
 					writable();
 					working.collections.set(key, clone(record));
@@ -341,6 +351,17 @@ export const createIndexedDbSyncLocalStore = ({
 				if (row === undefined) return undefined;
 				const { namespace: _namespace, key: _key, ...record } = row;
 				return record as LocalCollectionRecord<T>;
+			},
+			listCollections: async () => {
+				const rows = await requestResult<IndexedCollectionRow[]>(
+					collections.index('namespace').getAll(namespace)
+				);
+				return rows.map(
+					({ namespace: _namespace, key, ...record }) => ({
+						key,
+						record
+					})
+				);
 			},
 			putCollection: async (key, record) => {
 				writable();

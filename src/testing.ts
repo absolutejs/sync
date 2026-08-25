@@ -123,6 +123,7 @@ export const inspectSyncLocalStoreConformance = async ({
 			'readonly',
 			async (tx) => ({
 				collection: await tx.getCollection('tasks'),
+				collections: await tx.listCollections(),
 				installationId: await tx.getInstallationId(),
 				mutations: await tx.listMutations()
 			})
@@ -131,6 +132,9 @@ export const inspectSyncLocalStoreConformance = async ({
 			committed.installationId !== 'install-a' ||
 			committed.collection?.cursor !== 'cursor-7' ||
 			committed.collection?.version !== 7 ||
+			committed.collections.length !== 1 ||
+			committed.collections[0]?.key !== 'tasks' ||
+			committed.collections[0]?.record.cursor !== 'cursor-7' ||
 			committed.mutations[0]?.operationId !== 'install-a:op-1'
 		)
 			issues.push('atomic state did not round-trip');

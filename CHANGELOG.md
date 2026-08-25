@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.24.0] — 2026-08-25
+
+- Add exact-same-origin HTTP-only session authentication for the finite PWA
+  transport when the Absolute Auth capability is mounted. Bearer/native work
+  remains unchanged; cross-origin, missing-Origin, non-JSON, and Fetch Metadata
+  mismatches fail closed.
+- Add the no-store `POST /__absolute/sync/principal` bootstrap, which returns
+  only Auth's opaque account namespace after the same request-boundary checks.
+- Let `runHeadlessSync()` discover safely resumable, `id`-keyed collection
+  descriptors from the principal's transactional store and set
+  `redirect: "error"` on every finite exchange.
+- Extend the portable local-store contract with namespace-scoped collection
+  enumeration for IndexedDB, memory, and native SQLite adapters.
+- Allow browser runtime transports to omit socket tickets so authenticated web
+  sessions can keep using their existing cookie transport.
+
 ## [2.17.0] — 2026-08-25
 
 - Add `createIndexedDbSyncLocalStore`, a real browser/PWA implementation of the

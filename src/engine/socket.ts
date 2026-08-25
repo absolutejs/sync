@@ -13,6 +13,7 @@ import {
 } from './routes';
 
 const DEFAULT_HEADLESS_PATH = '/__absolute/sync/background';
+const DEFAULT_HEADLESS_PRINCIPAL_PATH = '/__absolute/sync/principal';
 const TICKET_AUTH_QUERY = '__absolute_auth';
 
 type AbsoluteAuthSyncBridge = {
@@ -23,6 +24,13 @@ type AbsoluteAuthSyncBridge = {
 	resolveBearer: (input: {
 		authorization?: string;
 	}) => Promise<unknown | undefined>;
+	resolveSession?: (input: { authPrincipal?: unknown }) => Promise<
+		| {
+				context: unknown;
+				namespace: string;
+		  }
+		| undefined
+	>;
 };
 
 type SyncAuthenticator = (
@@ -70,8 +78,36 @@ export type SyncHeadlessOptions = Omit<
 > & {
 	/** Finite HTTP route. Defaults to `/__absolute/sync/background`. */
 	path?: string;
+	/** Opaque browser-principal bootstrap route. Defaults to
+	 * `/__absolute/sync/principal`. Set false to disable cookie-session PWA
+	 * background Sync while retaining Bearer/native work. */
+	principalPath?: false | string;
 	/** Custom bearer-to-application-context mapping. */
 	resolveContext?: HeadlessSyncRouteOptions<unknown>['resolveContext'];
+};
+
+const sameOriginSessionRequest = (context: SyncRouteContext) => {
+	const request = context.request;
+	if (!(request instanceof Request)) return false;
+	if (request.method !== 'POST') return false;
+	if (
+		!request.headers
+			.get('content-type')
+			?.toLowerCase()
+			.startsWith('application/json')
+	)
+		return false;
+	const origin = request.headers.get('origin');
+	if (!origin) return false;
+	let targetOrigin: string;
+	try {
+		targetOrigin = new URL(request.url).origin;
+	} catch {
+		return false;
+	}
+	if (origin !== targetOrigin) return false;
+	const fetchSite = request.headers.get('sec-fetch-site');
+	return fetchSite === null || fetchSite === 'same-origin';
 };
 
 /**
@@ -277,15 +313,25 @@ export const syncSocket = ({
 	const headlessOptions = headless === false ? undefined : (headless ?? {});
 	const headlessContext = async (context: SyncRouteContext) => {
 		const authorization = readAuthorization(context);
-		if (!/^Bearer [^\s]+$/iu.test(authorization ?? ''))
-			throw new Error('ABSOLUTE_SYNC_UNAUTHORIZED');
-		const resolved = headlessOptions?.resolveContext
-			? await headlessOptions.resolveContext(context)
-			: resolveContext
-				? await resolveContext(context)
-				: await readAuthBridge(context)?.resolveBearer({
-						authorization
-					});
+		const bearer = /^Bearer [^\s]+$/iu.test(authorization ?? '');
+		const authBridge = readAuthBridge(context);
+		let resolved: unknown;
+		if (bearer) {
+			resolved = headlessOptions?.resolveContext
+				? await headlessOptions.resolveContext(context)
+				: resolveContext
+					? await resolveContext(context)
+					: await authBridge?.resolveBearer({ authorization });
+		} else if (
+			authBridge?.resolveSession &&
+			sameOriginSessionRequest(context)
+		) {
+			resolved = (
+				await authBridge.resolveSession({
+					authPrincipal: context.authPrincipal
+				})
+			)?.context;
+		}
 		if (resolved === undefined || resolved === null)
 			throw new Error('ABSOLUTE_SYNC_UNAUTHORIZED');
 
@@ -509,6 +555,44 @@ export const syncSocket = ({
 		});
 
 	if (finiteHandler && headlessOptions) {
+		const principalPath =
+			headlessOptions.principalPath === false
+				? undefined
+				: (headlessOptions.principalPath ??
+					DEFAULT_HEADLESS_PRINCIPAL_PATH);
+		if (principalPath) {
+			app.post(principalPath, async (context) => {
+				const routeContext = context as unknown as SyncRouteContext;
+				context.set.headers['cache-control'] = 'no-store';
+				if (!sameOriginSessionRequest(routeContext))
+					return context.status(
+						'Unauthorized',
+						'Sync authentication required'
+					);
+				try {
+					const resolved = await readAuthBridge(
+						context as unknown as Record<string, unknown>
+					)?.resolveSession?.({
+						authPrincipal: routeContext.authPrincipal
+					});
+					if (!resolved)
+						return context.status(
+							'Unauthorized',
+							'Sync authentication required'
+						);
+
+					return {
+						namespace: resolved.namespace,
+						version: 1 as const
+					};
+				} catch {
+					return context.status(
+						'Unauthorized',
+						'Sync authentication required'
+					);
+				}
+			});
+		}
 		app.post(
 			headlessOptions.path ?? DEFAULT_HEADLESS_PATH,
 			async (context) => {

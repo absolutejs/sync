@@ -56,7 +56,13 @@ describe('syncSocket (Elysia WebSocket)', () => {
 		);
 		const tickets = new Set(['absolute-once']);
 		const context = { user: { id: 5 } };
+		const sessionPrincipal = {
+			kind: 'session',
+			subject: '5',
+			user: context.user
+		};
 		const app = new Elysia()
+			.decorate('authPrincipal', sessionPrincipal)
 			.decorate('absoluteAuthSync', {
 				consumeSocketTicket: async ({ ticket }: { ticket: string }) =>
 					tickets.delete(ticket) ? context : undefined,
@@ -67,6 +73,14 @@ describe('syncSocket (Elysia WebSocket)', () => {
 				}) =>
 					authorization === 'Bearer absolute-access'
 						? context
+						: undefined,
+				resolveSession: async ({
+					authPrincipal
+				}: {
+					authPrincipal?: unknown;
+				}) =>
+					authPrincipal === sessionPrincipal
+						? { context, namespace: 'auth:v1:opaque' }
 						: undefined
 			})
 			.use(syncSocket({ engine }))
@@ -118,6 +132,68 @@ describe('syncSocket (Elysia WebSocket)', () => {
 		expect(response.status).toBe(200);
 		expect(response.headers.get('cache-control')).toBe('no-store');
 		expect((await response.json()).pulls[0].rows).toEqual([open(1, 5)]);
+
+		const browserHeaders = {
+			'content-type': 'application/json',
+			origin: `http://localhost:${port}`,
+			'sec-fetch-site': 'same-origin'
+		};
+		const principal = await app.handle(
+			new Request(`http://localhost:${port}/__absolute/sync/principal`, {
+				body: '{}',
+				headers: browserHeaders,
+				method: 'POST'
+			})
+		);
+		expect(principal.status).toBe(200);
+		expect(principal.headers.get('cache-control')).toBe('no-store');
+		expect(await principal.json()).toEqual({
+			namespace: 'auth:v1:opaque',
+			version: 1
+		});
+
+		const sessionResponse = await app.handle(
+			new Request(`http://localhost:${port}/__absolute/sync/background`, {
+				body: JSON.stringify({
+					pulls: [
+						{
+							collection: 'orders',
+							id: 'pull-session',
+							params: { userId: 5 }
+						}
+					],
+					version: 1
+				}),
+				headers: browserHeaders,
+				method: 'POST'
+			})
+		);
+		expect(sessionResponse.status).toBe(200);
+		expect((await sessionResponse.json()).pulls[0].rows).toEqual([
+			open(1, 5)
+		]);
+
+		const rejectedBrowserHeaders: Array<Record<string, string>> = [
+			{ 'content-type': 'application/json' },
+			{
+				'content-type': 'application/json',
+				origin: 'https://attacker.example',
+				'sec-fetch-site': 'cross-site'
+			}
+		];
+		for (const headers of rejectedBrowserHeaders) {
+			const rejected = await app.handle(
+				new Request(
+					`http://localhost:${port}/__absolute/sync/background`,
+					{
+						body: JSON.stringify({ version: 1 }),
+						headers,
+						method: 'POST'
+					}
+				)
+			);
+			expect(rejected.status).toBe(401);
+		}
 
 		const unauthorized = await app.handle(
 			new Request(`http://localhost:${port}/__absolute/sync/background`, {

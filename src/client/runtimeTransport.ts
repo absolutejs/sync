@@ -39,7 +39,7 @@ export type SyncClientRuntimeTransport = {
 	};
 	/** Enroll clients in host lifecycle handling without page-level wiring. */
 	registerClient?: (client: SyncRuntimeClient) => void | (() => void);
-	socketTicket: () => Promise<string>;
+	socketTicket?: () => Promise<string>;
 };
 
 export type SyncRuntimeClient = {

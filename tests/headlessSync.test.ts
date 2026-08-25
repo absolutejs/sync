@@ -191,6 +191,66 @@ describe('headless HTTP sync', () => {
 		});
 	});
 
+	test('discovers persisted id-keyed collections and refuses redirects', async () => {
+		const store = createMemorySyncLocalStore();
+		await store.transaction('principal', 'readwrite', async (tx) => {
+			await tx.putCollection('tasks-key', {
+				collection: 'tasks',
+				headlessKey: 'id',
+				params: { owner: 'me' },
+				rows: [],
+				version: 0
+			});
+			await tx.putCollection('custom-keyed', {
+				collection: 'custom',
+				rows: [],
+				version: 0
+			});
+		});
+		const result = await runHeadlessSync({
+			endpoint: '/__absolute/sync/background',
+			fetch: async (_url, init) => {
+				expect(init.redirect).toBe('error');
+				const request = JSON.parse(init.body);
+				expect(request.pulls).toEqual([
+					{
+						collection: 'tasks',
+						id: '0',
+						params: { owner: 'me' }
+					}
+				]);
+				return {
+					json: async () => ({
+						mutations: [],
+						pulls: [
+							{
+								cursor: 'cursor-1',
+								id: '0',
+								rows: [{ id: 1, title: 'one' }],
+								type: 'snapshot',
+								version: 1
+							}
+						],
+						version: 1
+					}),
+					ok: true,
+					status: 200
+				};
+			},
+			namespace: 'principal',
+			store
+		});
+		expect(result.pulled).toBe(1);
+		expect(
+			await store.transaction('principal', 'readonly', (tx) =>
+				tx.getCollection('tasks-key')
+			)
+		).toMatchObject({
+			cursor: 'cursor-1',
+			rows: [{ id: 1, title: 'one' }]
+		});
+	});
+
 	test('dead-letters permanent responses and bounds retryable responses', async () => {
 		const store = createMemorySyncLocalStore();
 		await store.transaction('principal', 'readwrite', (tx) =>
