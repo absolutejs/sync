@@ -176,6 +176,33 @@ describe('createSyncClient consistent frame', () => {
 		}
 	});
 
+	test('registers unchanged clients for host lifecycle handling until close', () => {
+		let registered: { reconnect: () => void } | undefined;
+		let removed = 0;
+		const uninstall = installSyncClientRuntimeTransport({
+			registerClient: (client) => {
+				registered = client;
+
+				return () => {
+					removed += 1;
+				};
+			},
+			socketTicket: async () => 'runtime-ticket'
+		});
+		try {
+			const client = createSyncClient({
+				url: 'ws://test/sync/ws',
+				webSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+			});
+			expect(registered?.reconnect).toBe(client.reconnect);
+			client.close();
+			client.close();
+			expect(removed).toBe(1);
+		} finally {
+			uninstall();
+		}
+	});
+
 	test('sends a fresh socket ticket as the first frame on every connection', async () => {
 		let calls = 0;
 		const client = createSyncClient({

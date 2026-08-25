@@ -7,7 +7,13 @@ export type SyncClientRuntimeTransport = {
 		store: SyncLocalStore;
 		namespace: string;
 	};
+	/** Enroll clients in host lifecycle handling without page-level wiring. */
+	registerClient?: (client: SyncRuntimeClient) => void | (() => void);
 	socketTicket: () => Promise<string>;
+};
+
+export type SyncRuntimeClient = {
+	reconnect: () => void;
 };
 
 type Installation = { transport: SyncClientRuntimeTransport };

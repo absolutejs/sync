@@ -919,7 +919,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		};
 	};
 
+	let removeRuntimeClient: (() => void) | undefined;
 	const close = () => {
+		if (closed) return;
 		closed = true;
 		if (reconnectTimer !== undefined) {
 			clearTimeout(reconnectTimer);
@@ -928,6 +930,8 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		entries.clear();
 		mutationOwner.clear();
 		pending.length = 0;
+		removeRuntimeClient?.();
+		removeRuntimeClient = undefined;
 	};
 
 	const disconnect = () => {
@@ -959,7 +963,10 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		connect();
 	};
 
-	return { collection, close, disconnect, reconnect };
+	const client = { collection, close, disconnect, reconnect };
+	removeRuntimeClient = runtime?.registerClient?.(client) ?? undefined;
+
+	return client;
 };
 
 export type { SyncCollectionState, SyncCollectionStatus };
