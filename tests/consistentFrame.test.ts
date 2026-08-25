@@ -113,7 +113,16 @@ describe('connection frame coalescing', () => {
 });
 
 class FakeWebSocket {
+	static readonly CONNECTING = 0;
+	static readonly OPEN = 1;
+	static readonly CLOSING = 2;
+	static readonly CLOSED = 3;
 	static last: FakeWebSocket | undefined;
+	readonly CONNECTING = FakeWebSocket.CONNECTING;
+	readonly OPEN = FakeWebSocket.OPEN;
+	readonly CLOSING = FakeWebSocket.CLOSING;
+	readonly CLOSED = FakeWebSocket.CLOSED;
+	readyState = FakeWebSocket.CONNECTING;
 	onopen: (() => void) | undefined;
 	onmessage: ((event: { data: string }) => void) | undefined;
 	onclose: (() => void) | undefined;
@@ -128,11 +137,13 @@ class FakeWebSocket {
 	}
 
 	close() {
+		this.readyState = FakeWebSocket.CLOSED;
 		this.onclose?.();
 	}
 
 	// test driver helpers
 	open() {
+		this.readyState = FakeWebSocket.OPEN;
 		this.onopen?.();
 	}
 
@@ -198,6 +209,31 @@ describe('createSyncClient consistent frame', () => {
 			type: 'authenticate'
 		});
 		expect(calls).toBe(2);
+		client.close();
+	});
+
+	test('reconnect() bypasses backoff and refreshes the native ticket', async () => {
+		let calls = 0;
+		const client = createSyncClient({
+			reconnectMs: 60_000,
+			socketTicket: async () => `ticket-${++calls}`,
+			url: 'ws://test/sync/ws',
+			webSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+		});
+		client.collection<Row>({ collection: 'orders' });
+		const first = FakeWebSocket.last!;
+		first.open();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		client.reconnect();
+		const second = FakeWebSocket.last!;
+		expect(second).not.toBe(first);
+		second.open();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(JSON.parse(second.sent[0] ?? '')).toEqual({
+			ticket: 'ticket-2',
+			type: 'authenticate'
+		});
 		client.close();
 	});
 

@@ -112,6 +112,8 @@ export type SyncClient = {
 	 * client). No-op if the socket is already closed.
 	 */
 	disconnect: () => void;
+	/** Reconnect immediately, refreshing any runtime-provided socket ticket. */
+	reconnect: () => void;
 	/** Close the socket and every handle. */
 	close: () => void;
 };
@@ -247,6 +249,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		maxReconnectMs
 	);
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	let immediateReconnect = false;
 
 	const notify = (entry: Entry) => {
 		for (const listener of entry.listeners) {
@@ -628,6 +631,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		if (closed) {
 			return;
 		}
+		reconnectTimer = undefined;
 		const ws = new Impl(options.url);
 		socket = ws;
 		const sendInitialFrames = () => {
@@ -689,10 +693,17 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			}
 		};
 		ws.onclose = () => {
+			if (socket === ws) socket = undefined;
 			connected = false;
-			if (closed || reconnectMs <= 0) {
+			if (closed) {
 				return;
 			}
+			if (immediateReconnect) {
+				immediateReconnect = false;
+				connect();
+				return;
+			}
+			if (reconnectMs <= 0) return;
 			const delay = reconnectBackoff.nextDelay();
 			reconnectTimer = setTimeout(connect, delay);
 		};
@@ -937,7 +948,23 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		socket.close();
 	};
 
-	return { collection, close, disconnect };
+	const reconnect = () => {
+		if (closed) return;
+		if (reconnectTimer !== undefined) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = undefined;
+		}
+		const current = socket;
+		if (current && current.readyState !== current.CLOSED) {
+			immediateReconnect = true;
+			current.close();
+			return;
+		}
+		socket = undefined;
+		connect();
+	};
+
+	return { collection, close, disconnect, reconnect };
 };
 
 export type { SyncCollectionState, SyncCollectionStatus };
