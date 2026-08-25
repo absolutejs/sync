@@ -19,6 +19,7 @@ export type {
 	MutationStorage,
 	OptimisticDraft,
 	PendingMutationRecord,
+	SerializableOptimisticOperation,
 	SyncCollection,
 	SyncCollectionOptions,
 	SyncCollectionState,
@@ -42,6 +43,7 @@ export type {
 export { createSyncClient } from './syncClient';
 export {
 	createMemorySyncLocalStore,
+	createIndexedDbSyncLocalStore,
 	createSyncOperationId,
 	ensureSyncInstallationId
 } from './localStore';
@@ -49,12 +51,14 @@ export type {
 	LocalCollectionRecord,
 	LocalMutationRecord,
 	LocalOptimisticOperation,
+	IndexedDbSyncLocalStoreOptions,
 	SyncLocalStore,
 	SyncLocalStoreMode,
 	SyncLocalTransaction
 } from './localStore';
 export * from './runtimeTransport';
 export type {
+	DurableSyncClientOptions,
 	SyncClient,
 	SyncClientOptions,
 	SyncCollectionHandle,

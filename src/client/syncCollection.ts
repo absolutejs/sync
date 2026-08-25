@@ -46,7 +46,21 @@ export type MutateOptions<T> = {
 	 * mutation (UI updates only once the authoritative diff arrives).
 	 */
 	optimistic?: (draft: OptimisticDraft<T>) => void;
+	/**
+	 * Serializable optimistic effects for the durable multiplexed client. A
+	 * missing `collection` targets the handle that initiated the mutation; set it
+	 * to another handle's `localKey` for an atomic cross-collection overlay.
+	 */
+	optimisticOperations?: SerializableOptimisticOperation<T>[];
 };
+
+export type SerializableOptimisticOperation<T = unknown> =
+	| {
+			type: 'insert' | 'update';
+			row: T;
+			collection?: string;
+	  }
+	| { type: 'delete'; key: RowKey; collection?: string };
 
 /** A pending mutation persisted for replay across reloads. */
 export type PendingMutationRecord = {

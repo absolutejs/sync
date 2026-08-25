@@ -3,9 +3,16 @@ import type { RowKey } from '../engine/types';
 import type {
 	MutateOptions,
 	OptimisticDraft,
+	SerializableOptimisticOperation,
 	SyncCollectionState,
 	SyncCollectionStatus
 } from './syncCollection';
+import { createSyncOperationId, ensureSyncInstallationId } from './localStore';
+import type {
+	LocalMutationRecord,
+	LocalOptimisticOperation,
+	SyncLocalStore
+} from './localStore';
 import { jsonSerializer, type FrameSerializer } from '../serializer';
 import {
 	createReconnectBackoff,
@@ -43,6 +50,22 @@ export type SyncClientOptions = {
 	 * ends to cut bandwidth + parse CPU on large snapshots.
 	 */
 	serializer?: FrameSerializer;
+	/**
+	 * Opt into restart-safe local-first state. The AbsoluteJS integration layer
+	 * can provision this from Auth and the active runtime; direct users provide
+	 * one principal namespace.
+	 */
+	durable?: DurableSyncClientOptions;
+};
+
+export type DurableSyncClientOptions = {
+	store: SyncLocalStore;
+	/** Stable authenticated principal/tenant partition. Never reuse across users. */
+	namespace: string;
+	/** Injectable UUID source for deterministic tests. */
+	createId?: () => string;
+	/** Storage failures are reported here and through the client's `onError`. */
+	onError?: (error: unknown) => void;
 };
 
 export type SyncCollectionHandleOptions<T> = {
@@ -52,6 +75,11 @@ export type SyncCollectionHandleOptions<T> = {
 	params?: unknown;
 	/** Row identity. Defaults to `row.id`. */
 	key?: (row: T) => RowKey;
+	/**
+	 * Stable persistence key. Defaults to collection + canonicalized params.
+	 * Set explicitly when params are not JSON-serializable.
+	 */
+	localKey?: string;
 };
 
 export type SyncCollectionHandle<T> = {
@@ -90,20 +118,24 @@ export type SyncClient = {
 
 type PendingMutation = {
 	mutationId: number;
+	operationId?: string;
+	ownerKey: string;
 	name: string;
 	args: unknown;
 	optimistic?: (draft: OptimisticDraft<unknown>) => void;
-	resolve: (result: unknown) => void;
-	reject: (error: unknown) => void;
+	optimisticOperations: LocalOptimisticOperation[];
+	inverse: LocalOptimisticOperation[];
+	resolve?: (result: unknown) => void;
+	reject?: (error: unknown) => void;
 };
 
 type Entry = {
 	id: string;
+	localKey: string;
 	collection: string;
 	params: unknown;
 	key: (row: unknown) => RowKey;
 	confirmed: Map<RowKey, unknown>;
-	pending: PendingMutation[];
 	state: SyncCollectionState<unknown>;
 	listeners: Set<(state: SyncCollectionState<unknown>) => void>;
 	appliedVersion: number;
@@ -116,7 +148,63 @@ type Entry = {
 	 */
 	cursor: string | undefined;
 	closed: boolean;
+	hydrated: Promise<void>;
 };
+
+const canonicalJson = (value: unknown): string => {
+	const seen = new Set<object>();
+	const normalize = (input: unknown): unknown => {
+		if (input === undefined) return null;
+		if (
+			input === null ||
+			typeof input === 'string' ||
+			typeof input === 'boolean'
+		) {
+			return input;
+		}
+		if (typeof input === 'number') {
+			if (!Number.isFinite(input)) {
+				throw new Error(
+					'Sync collection params must contain finite numbers; provide an explicit localKey'
+				);
+			}
+			return input;
+		}
+		if (typeof input !== 'object') {
+			throw new Error(
+				'Sync collection params must be JSON-serializable; provide an explicit localKey'
+			);
+		}
+		if (seen.has(input)) {
+			throw new Error(
+				'Sync collection params contain a cycle; provide an explicit localKey'
+			);
+		}
+		seen.add(input);
+		try {
+			if (Array.isArray(input)) return input.map(normalize);
+			const prototype = Object.getPrototypeOf(input);
+			if (prototype !== Object.prototype && prototype !== null) {
+				throw new Error(
+					'Sync collection params must use plain objects; provide an explicit localKey'
+				);
+			}
+			return Object.fromEntries(
+				Object.entries(input as Record<string, unknown>)
+					.sort(([a], [b]) => a.localeCompare(b))
+					.map(([key, item]) => [key, normalize(item)])
+			);
+		} finally {
+			seen.delete(input);
+		}
+	};
+	return JSON.stringify(normalize(value));
+};
+
+const defaultLocalKey = (collection: string, params: unknown): string =>
+	params === undefined
+		? collection
+		: `${collection}:${canonicalJson(params)}`;
 
 /**
  * A multiplexed sync client: one WebSocket serving many live collections. Its
@@ -145,9 +233,11 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	}
 
 	const entries = new Map<string, Entry>();
-	const mutationOwner = new Map<number, Entry>();
+	const pending: PendingMutation[] = [];
+	const mutationOwner = new Map<number, PendingMutation>();
 	let nextEntryId = 0;
 	let mutationSeq = 0;
+	let installationId: string | undefined;
 
 	let socket: WebSocket | undefined;
 	let connected = false;
@@ -174,8 +264,15 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			set: (row) => working.set(entry.key(row), row),
 			delete: (rowKey) => working.delete(rowKey)
 		};
-		for (const mutation of entry.pending) {
-			mutation.optimistic?.(draft);
+		for (const mutation of pending) {
+			if (mutation.ownerKey === entry.localKey) {
+				mutation.optimistic?.(draft);
+			}
+			for (const operation of mutation.optimisticOperations) {
+				if (operation.collection !== entry.localKey) continue;
+				if (operation.type === 'delete') draft.delete(operation.key);
+				else draft.set(operation.row);
+			}
 		}
 		entry.state = {
 			...entry.state,
@@ -208,19 +305,111 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	};
 
 	const settlePending = (mutationId: number) => {
-		const entry = mutationOwner.get(mutationId);
+		const mutation = mutationOwner.get(mutationId);
 		mutationOwner.delete(mutationId);
-		if (entry === undefined) {
+		if (mutation === undefined) {
 			return undefined;
 		}
-		const index = entry.pending.findIndex(
-			(mutation) => mutation.mutationId === mutationId
-		);
+		const index = pending.findIndex((item) => item === mutation);
 		if (index === -1) {
 			return undefined;
 		}
-		const [mutation] = entry.pending.splice(index, 1);
-		return { entry, mutation: mutation! };
+		pending.splice(index, 1);
+		return mutation;
+	};
+
+	const reportStorageError = (error: unknown) => {
+		options.durable?.onError?.(error);
+		options.onError?.(error);
+	};
+	let localWriteTail: Promise<void> = Promise.resolve();
+	const queueLocalWrite = <R>(run: () => Promise<R>): Promise<R> => {
+		const next = localWriteTail.then(run);
+		localWriteTail = next.then(
+			() => undefined,
+			(error) => reportStorageError(error)
+		);
+		return next;
+	};
+
+	const persistEntries = (affected: Iterable<Entry>) => {
+		const durable = options.durable;
+		if (durable === undefined) return;
+		const snapshots = new Map<
+			string,
+			{ rows: unknown[]; version: number; cursor?: string }
+		>();
+		for (const entry of affected) {
+			snapshots.set(entry.localKey, {
+				rows: [...entry.confirmed.values()],
+				version: entry.appliedVersion,
+				cursor: entry.cursor
+			});
+		}
+		void queueLocalWrite(() =>
+			durable.store.transaction(
+				durable.namespace,
+				'readwrite',
+				async (tx) => {
+					for (const [key, record] of snapshots) {
+						await tx.putCollection(key, record);
+					}
+				}
+			)
+		).catch(() => {});
+	};
+
+	const recomputeMutationEntries = (mutation: PendingMutation) => {
+		const keys = new Set([
+			mutation.ownerKey,
+			...mutation.optimisticOperations.map(
+				(operation) => operation.collection
+			)
+		]);
+		for (const entry of entries.values()) {
+			if (keys.has(entry.localKey)) recompute(entry);
+		}
+	};
+
+	const finishPending = (
+		mutationId: number,
+		result: unknown,
+		error?: Error
+	) => {
+		const mutation = settlePending(mutationId);
+		if (mutation === undefined) return;
+		recomputeMutationEntries(mutation);
+		if (error === undefined) mutation.resolve?.(result);
+		else mutation.reject?.(error);
+	};
+
+	const finishDurablePending = (
+		mutationId: number,
+		echoedOperationId: string | undefined,
+		result: unknown,
+		error?: Error
+	) => {
+		const mutation = mutationOwner.get(mutationId);
+		const durable = options.durable;
+		if (mutation?.operationId === undefined || durable === undefined) {
+			finishPending(mutationId, result, error);
+			return;
+		}
+		if (echoedOperationId !== mutation.operationId) {
+			reportStorageError(
+				new Error(
+					`Durable mutation acknowledgment identity mismatch for ${mutation.operationId}`
+				)
+			);
+			return;
+		}
+		void queueLocalWrite(() =>
+			durable.store.transaction(durable.namespace, 'readwrite', (tx) =>
+				tx.deleteMutation(mutation.operationId!)
+			)
+		)
+			.catch(() => {})
+			.finally(() => finishPending(mutationId, result, error));
 	};
 
 	const applyFrame = (frame: ServerFrame) => {
@@ -239,6 +428,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			if (frame.cursor !== undefined) {
 				entry.cursor = frame.cursor;
 			}
+			persistEntries([entry]);
 			recompute(entry, { status: 'ready', error: undefined });
 		} else if (frame.type === 'diff') {
 			const entry = entries.get(frame.id);
@@ -255,6 +445,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			if (frame.cursor !== undefined) {
 				entry.cursor = frame.cursor;
 			}
+			persistEntries([entry]);
 			recompute(entry);
 		} else if (frame.type === 'frame') {
 			// The consistent frame: update every affected collection's confirmed
@@ -280,6 +471,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				rebuild(entry);
 				affected.add(entry);
 			}
+			persistEntries(affected);
 			for (const entry of affected) {
 				notify(entry);
 			}
@@ -292,17 +484,18 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			}
 			options.onError?.(frame.message);
 		} else if (frame.type === 'ack') {
-			const settled = settlePending(frame.mutationId);
-			if (settled !== undefined) {
-				recompute(settled.entry);
-				settled.mutation.resolve(frame.result);
-			}
+			finishDurablePending(
+				frame.mutationId,
+				frame.operationId,
+				frame.result
+			);
 		} else if (frame.type === 'reject') {
-			const settled = settlePending(frame.mutationId);
-			if (settled !== undefined) {
-				recompute(settled.entry);
-				settled.mutation.reject(new Error(String(frame.message)));
-			}
+			finishDurablePending(
+				frame.mutationId,
+				frame.operationId,
+				undefined,
+				new Error(String(frame.message))
+			);
 		}
 	};
 
@@ -330,16 +523,105 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	};
 
 	const sendMutate = (mutation: PendingMutation) => {
-		if (connected) {
-			wsSend(
-				serializer.encodeClient({
-					type: 'mutate',
-					mutationId: mutation.mutationId,
-					name: mutation.name,
-					args: mutation.args
-				})
-			);
+		if (!connected) return;
+		const payload = serializer.encodeClient({
+			type: 'mutate',
+			mutationId: mutation.mutationId,
+			operationId: mutation.operationId,
+			name: mutation.name,
+			args: mutation.args
+		});
+		const durable = options.durable;
+		if (durable === undefined || mutation.operationId === undefined) {
+			wsSend(payload);
+			return;
 		}
+		const targetSocket = socket;
+		void queueLocalWrite(() =>
+			durable.store.transaction(
+				durable.namespace,
+				'readwrite',
+				async (tx) => {
+					const record = await tx.getMutation(mutation.operationId!);
+					if (record !== undefined) {
+						await tx.putMutation({
+							...record,
+							attempts: record.attempts + 1
+						});
+					}
+				}
+			)
+		)
+			.catch(() => {})
+			.finally(() => {
+				if (
+					connected &&
+					socket === targetSocket &&
+					pending.includes(mutation)
+				) {
+					targetSocket?.send(payload as string);
+				}
+			});
+	};
+
+	const initializeDurable = async () => {
+		const durable = options.durable;
+		if (durable === undefined) return;
+		installationId = await ensureSyncInstallationId(
+			durable.store,
+			durable.namespace,
+			durable.createId
+		);
+		const records = await durable.store.transaction(
+			durable.namespace,
+			'readonly',
+			(tx) => tx.listMutations()
+		);
+		for (const record of records) {
+			mutationSeq += 1;
+			const mutation: PendingMutation = {
+				mutationId: mutationSeq,
+				operationId: record.operationId,
+				ownerKey:
+					record.owner ?? record.optimistic[0]?.collection ?? '',
+				name: record.name,
+				args: record.args,
+				optimisticOperations: record.optimistic,
+				inverse: record.inverse
+			};
+			pending.push(mutation);
+			mutationOwner.set(mutation.mutationId, mutation);
+		}
+	};
+
+	const durableReady =
+		options.durable === undefined
+			? Promise.resolve()
+			: initializeDurable().catch((error) => {
+					reportStorageError(error);
+					throw error;
+				});
+
+	const hydrateEntry = async (entry: Entry) => {
+		const durable = options.durable;
+		if (durable === undefined) return;
+		await durableReady;
+		const record = await durable.store.transaction(
+			durable.namespace,
+			'readonly',
+			(tx) => tx.getCollection(entry.localKey)
+		);
+		if (entry.closed || record === undefined) {
+			if (!entry.closed) recompute(entry);
+			return;
+		}
+		entry.confirmed.clear();
+		for (const row of record.rows) {
+			entry.confirmed.set(entry.key(row), row);
+		}
+		entry.appliedVersion = record.version;
+		entry.cursor = record.cursor;
+		recompute(entry);
 	};
 
 	const connect = () => {
@@ -348,7 +630,8 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		}
 		const ws = new Impl(options.url);
 		socket = ws;
-		ws.onopen = () => {
+		const sendInitialFrames = () => {
+			if (socket !== ws || closed) return;
 			if (socketTicket) {
 				void socketTicket()
 					.then((ticket) => {
@@ -362,9 +645,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 						connected = true;
 						for (const entry of entries.values())
 							sendSubscribe(entry);
-						for (const entry of entries.values())
-							for (const mutation of entry.pending)
-								sendMutate(mutation);
+						for (const mutation of pending) sendMutate(mutation);
 					})
 					.catch((error) => {
 						options.onError?.(error);
@@ -376,11 +657,21 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			for (const entry of entries.values()) {
 				sendSubscribe(entry);
 			}
-			for (const entry of entries.values()) {
-				for (const mutation of entry.pending) {
-					sendMutate(mutation);
-				}
+			for (const mutation of pending) sendMutate(mutation);
+		};
+		ws.onopen = () => {
+			if (options.durable === undefined) {
+				sendInitialFrames();
+				return;
 			}
+			void Promise.all(
+				[...entries.values()].map((entry) => entry.hydrated)
+			)
+				.then(sendInitialFrames)
+				.catch((error) => {
+					reportStorageError(error);
+					ws.close();
+				});
 		};
 		ws.onmessage = (event) => {
 			try {
@@ -407,32 +698,117 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		};
 	};
 
-	connect();
+	if (options.durable === undefined) connect();
+	else void durableReady.then(connect).catch(() => {});
+
+	const normalizeOptimisticOperations = <T>(
+		ownerKey: string,
+		operations: SerializableOptimisticOperation<T>[] | undefined
+	): LocalOptimisticOperation[] =>
+		(operations ?? []).map((operation) =>
+			operation.type === 'delete'
+				? {
+						type: 'delete',
+						collection: operation.collection ?? ownerKey,
+						key: operation.key
+					}
+				: {
+						type: operation.type,
+						collection: operation.collection ?? ownerKey,
+						row: operation.row
+					}
+		);
+
+	const captureInverse = (
+		operations: LocalOptimisticOperation[]
+	): LocalOptimisticOperation[] => {
+		const working = new Map<string, Map<RowKey, unknown>>();
+		const entryFor = (localKey: string) => {
+			const entry = [...entries.values()].find(
+				(item) => item.localKey === localKey
+			);
+			if (entry === undefined) {
+				throw new Error(
+					`Durable optimistic operation targets unopened collection "${localKey}"`
+				);
+			}
+			let rows = working.get(localKey);
+			if (rows === undefined) {
+				rows = new Map(
+					entry.state.data.map((row) => [entry.key(row), row])
+				);
+				working.set(localKey, rows);
+			}
+			return { entry, rows };
+		};
+		const inverse: LocalOptimisticOperation[] = [];
+		for (const operation of operations) {
+			const { entry, rows } = entryFor(operation.collection);
+			if (operation.type === 'delete') {
+				const existing = rows.get(operation.key);
+				if (existing !== undefined) {
+					inverse.unshift({
+						type: 'insert',
+						collection: operation.collection,
+						row: existing
+					});
+				}
+				rows.delete(operation.key);
+				continue;
+			}
+			const rowKey = entry.key(operation.row);
+			const existing = rows.get(rowKey);
+			inverse.unshift(
+				existing === undefined
+					? {
+							type: 'delete',
+							collection: operation.collection,
+							key: rowKey
+						}
+					: {
+							type: 'update',
+							collection: operation.collection,
+							row: existing
+						}
+			);
+			rows.set(rowKey, operation.row);
+		}
+		return inverse;
+	};
 
 	const collection = <T>(
 		handleOptions: SyncCollectionHandleOptions<T>
 	): SyncCollectionHandle<T> => {
 		const entryId = `c${nextEntryId}`;
 		nextEntryId += 1;
+		const localKey =
+			handleOptions.localKey ??
+			defaultLocalKey(handleOptions.collection, handleOptions.params);
+		if (localKey.length === 0) {
+			throw new Error('Sync collection localKey must not be empty');
+		}
 		const entry: Entry = {
 			id: entryId,
+			localKey,
 			collection: handleOptions.collection,
 			params: handleOptions.params,
 			key:
 				(handleOptions.key as ((row: unknown) => RowKey) | undefined) ??
 				((row: unknown) => (row as { id: RowKey }).id),
 			confirmed: new Map(),
-			pending: [],
 			state: { data: [], status: 'connecting', error: undefined },
 			listeners: new Set(),
 			appliedVersion: 0,
 			cursor: undefined,
-			closed: false
+			closed: false,
+			hydrated: Promise.resolve()
 		};
 		entries.set(entryId, entry);
-		if (connected) {
-			sendSubscribe(entry);
-		}
+		entry.hydrated = hydrateEntry(entry);
+		if (connected)
+			void entry.hydrated
+				.then(() => sendSubscribe(entry))
+				.catch(reportStorageError);
 
 		return {
 			get: () => entry.state as SyncCollectionState<T>,
@@ -448,21 +824,76 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			},
 			mutate: <R = unknown>(mutateOptions: MutateOptions<T>) =>
 				new Promise<R>((resolve, reject) => {
-					mutationSeq += 1;
-					const mutation: PendingMutation = {
-						mutationId: mutationSeq,
-						name: mutateOptions.name,
-						args: mutateOptions.args,
-						optimistic: mutateOptions.optimistic as
-							| ((draft: OptimisticDraft<unknown>) => void)
-							| undefined,
-						resolve: (result) => resolve(result as R),
-						reject
+					const addPending = (
+						operationId: string | undefined,
+						optimisticOperations: LocalOptimisticOperation[],
+						inverse: LocalOptimisticOperation[]
+					) => {
+						mutationSeq += 1;
+						const mutation: PendingMutation = {
+							mutationId: mutationSeq,
+							operationId,
+							ownerKey: entry.localKey,
+							name: mutateOptions.name,
+							args: mutateOptions.args,
+							optimistic: mutateOptions.optimistic as
+								| ((draft: OptimisticDraft<unknown>) => void)
+								| undefined,
+							optimisticOperations,
+							inverse,
+							resolve: (result) => resolve(result as R),
+							reject
+						};
+						pending.push(mutation);
+						mutationOwner.set(mutation.mutationId, mutation);
+						recomputeMutationEntries(mutation);
+						sendMutate(mutation);
 					};
-					entry.pending.push(mutation);
-					mutationOwner.set(mutation.mutationId, entry);
-					recompute(entry);
-					sendMutate(mutation);
+
+					const durable = options.durable;
+					if (durable === undefined) {
+						const optimisticOperations =
+							normalizeOptimisticOperations(
+								entry.localKey,
+								mutateOptions.optimisticOperations
+							);
+						const inverse = captureInverse(optimisticOperations);
+						addPending(undefined, optimisticOperations, inverse);
+						return;
+					}
+
+					void (async () => {
+						await entry.hydrated;
+						const optimisticOperations =
+							normalizeOptimisticOperations(
+								entry.localKey,
+								mutateOptions.optimisticOperations
+							);
+						const inverse = captureInverse(optimisticOperations);
+						await durableReady;
+						const operationId = createSyncOperationId(
+							installationId!,
+							durable.createId
+						);
+						const record: LocalMutationRecord = {
+							operationId,
+							owner: entry.localKey,
+							name: mutateOptions.name,
+							args: mutateOptions.args,
+							optimistic: optimisticOperations,
+							inverse,
+							createdAt: Date.now(),
+							attempts: 0
+						};
+						await queueLocalWrite(() =>
+							durable.store.transaction(
+								durable.namespace,
+								'readwrite',
+								(tx) => tx.putMutation(record)
+							)
+						);
+						addPending(operationId, optimisticOperations, inverse);
+					})().catch(reject);
 				}),
 			close: () => {
 				if (entry.closed) {
@@ -490,6 +921,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		socket?.close();
 		entries.clear();
 		mutationOwner.clear();
+		pending.length = 0;
 	};
 
 	const disconnect = () => {

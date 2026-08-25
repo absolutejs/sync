@@ -529,7 +529,38 @@ tenant to a shard adds zero standing connections.
 | `localStorageCollectionCache(key)`                             | `localStorage`-backed local-first read cache: confirmed rows survive a reload, resume from the cached version.                                                                                                                                                         |
 | `indexedDbCollectionCache({ key, ... })`                       | IndexedDB-backed local-first read cache — durable, large-capacity. Same resume semantics, async storage.                                                                                                                                                               |
 | `createMemorySyncLocalStore()`                                 | Reference implementation of the next-generation transactional local store: principal namespaces, installation identity, confirmed rows/cursors, and a serializable operation outbox commit atomically.                                                                 |
+| `createIndexedDbSyncLocalStore()`                              | Browser/PWA implementation of the same transaction contract. Multi-collection frames, confirmed cursors, installation identity, and the operation outbox commit atomically in IndexedDB.                                                                               |
 | `ensureSyncInstallationId(store, namespace)`                   | Atomically creates or returns the stable installation identity used by `createSyncOperationId`.                                                                                                                                                                        |
+
+The multiplexed client has an additive durable profile. The namespace must come
+from trusted Auth state and must change when the active account or tenant changes.
+Serializable optimistic operations survive reload/process death; the historical
+callback form remains available but is intentionally process-local.
+
+```ts
+const client = createSyncClient({
+	url: 'wss://app.example/sync/ws',
+	durable: {
+		store: createIndexedDbSyncLocalStore(),
+		namespace: principal.cachePartition
+	}
+});
+
+const orders = client.collection<Order>({ collection: 'orders' });
+await orders.mutate({
+	name: 'orders:create',
+	args: { total: 42 },
+	optimisticOperations: [
+		{ type: 'insert', row: { id: temporaryId, total: 42 } }
+	]
+});
+```
+
+The server must configure `createSyncEngine({ durableMutations })`; durable
+clients reject acknowledgments that do not echo the exact operation ID. Database
+writes and receipt results share the adapter transaction. HTTP/email/payment
+effects must still be handed to a transactional outbox rather than performed
+directly in a replayable mutation.
 
 ### Framework bindings — `@absolutejs/sync/{react,vue,svelte,angular}`
 

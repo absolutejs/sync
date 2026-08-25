@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.17.0] — 2026-08-25
+
+- Add `createIndexedDbSyncLocalStore`, a real browser/PWA implementation of the
+  unified local transaction contract. It atomically stores principal-scoped
+  installation identity, confirmed multi-collection rows/cursors, and the
+  outbound operation queue.
+- Add the opt-in `createSyncClient({ durable })` profile. The multiplexed client
+  now hydrates offline rows before subscribing, persists consistent frames in one
+  transaction, reconstructs serialized optimism after process death, and replays
+  the same operation ID until an identity-matched acknowledgment removes it.
+- Add serializable insert/update/delete optimistic operations with automatically
+  captured inverse operations. Existing optimistic callbacks remain compatible
+  as an explicitly process-local tier.
+- Keep old clients and stores compatible: the non-durable path remains
+  synchronous and unchanged, and 2.16 operation records without `owner` migrate
+  from their first optimistic collection.
+- Run one local-store conformance suite against both memory and IndexedDB, plus
+  durable client tests for restart replay, cursor hydration, cross-collection
+  persistence, account boundaries, and fail-closed acknowledgment matching.
+
 ## [2.16.0] — 2026-08-25
 
 - Add stable string `operationId` support to mutate/ack/reject frames while
