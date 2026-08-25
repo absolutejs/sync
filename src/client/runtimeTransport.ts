@@ -15,7 +15,20 @@ export type SyncClientRuntimeTransport = {
 };
 
 export type SyncRuntimeClient = {
+	flush: (options?: { timeoutMs?: number }) => Promise<{
+		deadLetters: number;
+		pending: number;
+		timedOut: boolean;
+	}>;
 	reconnect: () => void;
+	status: () => {
+		connection: 'closed' | 'connecting' | 'offline' | 'online';
+		deadLetters: number;
+		pending: number;
+	};
+	subscribeStatus: (
+		listener: (status: ReturnType<SyncRuntimeClient['status']>) => void
+	) => () => void;
 };
 
 type Installation = { transport: SyncClientRuntimeTransport };
