@@ -43,6 +43,96 @@ const connect = (port: number, frames: AnyFrame[]) => {
 };
 
 describe('syncSocket (Elysia WebSocket)', () => {
+	test('uses the Absolute Auth bridge for ticket sockets and finite bearer work', async () => {
+		type AuthCtx = { user: { id: number } };
+		const engine = createSyncEngine();
+		engine.register(
+			defineCollection<Order, Params, AuthCtx>({
+				authorize: (params, ctx) => params.userId === ctx.user.id,
+				hydrate: () => [open(1, 5)],
+				match: (row, params) => row.userId === params.userId,
+				name: 'orders'
+			})
+		);
+		const tickets = new Set(['absolute-once']);
+		const context = { user: { id: 5 } };
+		const app = new Elysia()
+			.decorate('absoluteAuthSync', {
+				consumeSocketTicket: async ({ ticket }: { ticket: string }) =>
+					tickets.delete(ticket) ? context : undefined,
+				resolveBearer: async ({
+					authorization
+				}: {
+					authorization?: string;
+				}) =>
+					authorization === 'Bearer absolute-access'
+						? context
+						: undefined
+			})
+			.use(syncSocket({ engine }))
+			.listen(0);
+		const port = app.server?.port ?? 0;
+		const frames: AnyFrame[] = [];
+		const ws = new WebSocket(
+			`ws://localhost:${port}/sync/ws?__absolute_auth=ticket`
+		);
+		ws.addEventListener('message', (event) => {
+			frames.push(JSON.parse(event.data as string) as AnyFrame);
+		});
+		await new Promise<void>((resolve, reject) => {
+			ws.addEventListener('open', () => resolve());
+			ws.addEventListener('error', () => reject(new Error('ws error')));
+		});
+		ws.send(
+			JSON.stringify({ ticket: 'absolute-once', type: 'authenticate' })
+		);
+		ws.send(
+			JSON.stringify({
+				collection: 'orders',
+				id: 's1',
+				params: { userId: 5 },
+				type: 'subscribe'
+			})
+		);
+		await waitFor(() => frames.some((frame) => frame.type === 'snapshot'));
+
+		const response = await app.handle(
+			new Request(`http://localhost:${port}/__absolute/sync/background`, {
+				body: JSON.stringify({
+					pulls: [
+						{
+							collection: 'orders',
+							id: 'pull-1',
+							params: { userId: 5 }
+						}
+					],
+					version: 1
+				}),
+				headers: {
+					authorization: 'Bearer absolute-access',
+					'content-type': 'application/json'
+				},
+				method: 'POST'
+			})
+		);
+		expect(response.status).toBe(200);
+		expect(response.headers.get('cache-control')).toBe('no-store');
+		expect((await response.json()).pulls[0].rows).toEqual([open(1, 5)]);
+
+		const unauthorized = await app.handle(
+			new Request(`http://localhost:${port}/__absolute/sync/background`, {
+				body: JSON.stringify({ version: 1 }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			})
+		);
+		expect(unauthorized.status).toBe(401);
+		expect(unauthorized.headers.get('www-authenticate')).toBe('Bearer');
+
+		ws.close();
+		await app.stop(true);
+	});
+
 	test('authenticates from a single-use first-frame ticket', async () => {
 		const engine = createSyncEngine();
 		engine.register(

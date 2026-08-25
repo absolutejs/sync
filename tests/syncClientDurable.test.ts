@@ -87,6 +87,7 @@ describe('createSyncClient durable profile', () => {
 			});
 			const orders = client.collection<Order>({ collection: 'orders' });
 			const socket = await waitForSocket();
+			expect(socket.url).toBe('ws://test/sync/ws?__absolute_auth=ticket');
 			socket.open();
 			await waitFor(
 				() =>

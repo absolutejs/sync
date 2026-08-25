@@ -195,8 +195,8 @@ export type {
 	EngineMetrics
 } from './devtools';
 
-export { hydrateRoute, mutateRoute } from './routes';
-export type { SyncRouteContext } from './routes';
+export { headlessSyncRoute, hydrateRoute, mutateRoute } from './routes';
+export type { HeadlessSyncRouteOptions, SyncRouteContext } from './routes';
 
 export { createSyncConnection } from './connection';
 export type {

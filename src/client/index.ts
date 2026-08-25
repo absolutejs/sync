@@ -41,6 +41,13 @@ export type {
 } from './presence';
 
 export { createSyncClient } from './syncClient';
+export { runHeadlessSync } from './headlessSync';
+export type {
+	HeadlessSyncCollection,
+	HeadlessSyncFetchResponse,
+	HeadlessSyncRunResult,
+	RunHeadlessSyncOptions
+} from './headlessSync';
 export { SyncMutationRejectedError } from '../reconciliation';
 export type {
 	SyncMutationRejection,

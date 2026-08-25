@@ -35,6 +35,11 @@ export type LocalCollectionRecord<T = unknown> = {
 	version: number;
 	/** Opaque cross-instance cursor; round-trip without inspecting it. */
 	cursor?: string;
+	/** Durable descriptor used by a separate background process. */
+	collection?: string;
+	params?: unknown;
+	/** Resume diffs are safe only when the background process knows the row key. */
+	headlessKey?: 'id';
 };
 
 export type SyncLocalStoreMode = 'readonly' | 'readwrite';

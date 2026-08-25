@@ -23,8 +23,19 @@ export type {
 export { sync } from './plugin';
 export type { SyncPluginOptions, SyncRequestContext } from './plugin';
 export { createSyncSocketController, syncSocket } from './engine/socket';
+export { headlessSyncRoute } from './engine/routes';
+export type { HeadlessSyncRouteOptions } from './engine/routes';
+export type {
+	HeadlessSyncMutation,
+	HeadlessSyncMutationResult,
+	HeadlessSyncPull,
+	HeadlessSyncPullResult,
+	HeadlessSyncRequest,
+	HeadlessSyncResponse
+} from './headlessProtocol';
 export type {
 	SlowConnectionEvent,
+	SyncHeadlessOptions,
 	SyncSocketController,
 	SyncSocketDrainOptions,
 	SyncSocketOptions

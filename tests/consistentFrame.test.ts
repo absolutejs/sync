@@ -223,7 +223,7 @@ describe('createSyncClient consistent frame', () => {
 				type: 'subscribe'
 			}
 		]);
-		expect(first.url).toBe('ws://test/sync/ws');
+		expect(first.url).toBe('ws://test/sync/ws?__absolute_auth=ticket');
 
 		client.disconnect();
 		await new Promise((resolve) => setTimeout(resolve, 5));

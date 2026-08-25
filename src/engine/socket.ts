@@ -6,6 +6,73 @@ import type { PresenceHub } from './presence';
 import type { SyncEngine } from './syncEngine';
 import type { FrameSerializer } from '../serializer';
 import { jsonSerializer } from '../serializer';
+import {
+	headlessSyncRoute,
+	type HeadlessSyncRouteOptions,
+	type SyncRouteContext
+} from './routes';
+
+const DEFAULT_HEADLESS_PATH = '/__absolute/sync/background';
+const TICKET_AUTH_QUERY = '__absolute_auth';
+
+type AbsoluteAuthSyncBridge = {
+	consumeSocketTicket: (input: {
+		audience?: string;
+		ticket: string;
+	}) => Promise<unknown | undefined>;
+	resolveBearer: (input: {
+		authorization?: string;
+	}) => Promise<unknown | undefined>;
+};
+
+type SyncAuthenticator = (
+	ticket: string,
+	data: Record<string, unknown>
+) => unknown | Promise<unknown>;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === 'object' && value !== null;
+
+const readAuthBridge = (
+	context: Record<string, unknown>
+): AbsoluteAuthSyncBridge | undefined => {
+	const bridge = context.absoluteAuthSync;
+	if (
+		!isRecord(bridge) ||
+		typeof bridge.consumeSocketTicket !== 'function' ||
+		typeof bridge.resolveBearer !== 'function'
+	)
+		return undefined;
+
+	return bridge as AbsoluteAuthSyncBridge;
+};
+
+const readAuthorization = (context: Record<string, unknown>) => {
+	const headers = context.headers;
+	if (isRecord(headers) && typeof headers.authorization === 'string')
+		return headers.authorization;
+	const request = context.request;
+	if (request instanceof Request)
+		return request.headers.get('authorization') ?? undefined;
+
+	return undefined;
+};
+
+const requestsTicketAuthentication = (context: Record<string, unknown>) => {
+	const query = context.query;
+
+	return isRecord(query) && query[TICKET_AUTH_QUERY] === 'ticket';
+};
+
+export type SyncHeadlessOptions = Omit<
+	HeadlessSyncRouteOptions<unknown>,
+	'resolveContext'
+> & {
+	/** Finite HTTP route. Defaults to `/__absolute/sync/background`. */
+	path?: string;
+	/** Custom bearer-to-application-context mapping. */
+	resolveContext?: HeadlessSyncRouteOptions<unknown>['resolveContext'];
+};
 
 /**
  * Diagnostic surfaced via {@link SyncSocketOptions.onSlow} when a connection
@@ -115,6 +182,11 @@ export type SyncSocketOptions = {
 	/** Time allowed for the first authentication frame. Defaults to 10 seconds. */
 	authenticationTimeoutMs?: number;
 	/**
+	 * Automatically mounted finite HTTP transport for native/PWA background
+	 * work. Set `false` to opt out. Defaults to the managed background path.
+	 */
+	headless?: false | SyncHeadlessOptions;
+	/**
 	 * Bytes threshold for the per-connection WS send buffer. When
 	 * `ws.getBufferedAmount()` exceeds this, `onSlow` fires once per
 	 * crossing. Default `Infinity` (disabled).
@@ -152,6 +224,7 @@ export type SyncSocketOptions = {
 
 type TrackedConnection = {
 	activate: (ctx: unknown) => Promise<void>;
+	authenticate?: SyncAuthenticator;
 	authenticating?: Promise<void>;
 	authenticationTimer?: ReturnType<typeof setTimeout>;
 	// Null until the async `resolveContext` resolves. Frames that arrive in that
@@ -184,6 +257,7 @@ export const syncSocket = ({
 	controller,
 	path = '/sync/ws',
 	resolveContext,
+	headless,
 	presence,
 	maxBufferedBytes,
 	onSlow,
@@ -200,6 +274,34 @@ export const syncSocket = ({
 		);
 	}
 	const threshold = maxBufferedBytes ?? Infinity;
+	const headlessOptions = headless === false ? undefined : (headless ?? {});
+	const headlessContext = async (context: SyncRouteContext) => {
+		const authorization = readAuthorization(context);
+		if (!/^Bearer [^\s]+$/iu.test(authorization ?? ''))
+			throw new Error('ABSOLUTE_SYNC_UNAUTHORIZED');
+		const resolved = headlessOptions?.resolveContext
+			? await headlessOptions.resolveContext(context)
+			: resolveContext
+				? await resolveContext(context)
+				: await readAuthBridge(context)?.resolveBearer({
+						authorization
+					});
+		if (resolved === undefined || resolved === null)
+			throw new Error('ABSOLUTE_SYNC_UNAUTHORIZED');
+
+		return resolved;
+	};
+	const finiteHandler = headlessOptions
+		? headlessSyncRoute(engine, {
+				resolveContext: headlessContext,
+				...(headlessOptions.maxMutations === undefined
+					? {}
+					: { maxMutations: headlessOptions.maxMutations }),
+				...(headlessOptions.maxPulls === undefined
+					? {}
+					: { maxPulls: headlessOptions.maxPulls })
+			})
+		: undefined;
 	if (
 		!Number.isFinite(authenticationTimeoutMs) ||
 		authenticationTimeoutMs <= 0
@@ -220,119 +322,161 @@ export const syncSocket = ({
 		}
 	};
 
-	return (
-		new Elysia({ name: '@absolutejs/sync/socket' })
-			// Elysia 2 no longer bundles WebSocket support; without this the
-			// route below is silently never served.
-			.use(websocket())
-			.ws(path, {
-				async open(ws) {
-					// Permissive shape: we read `getBufferedAmount` + `close` if the
-					// runtime supports them (Bun's ServerWebSocket does) — fall back
-					// silently for test fakes. Accepts both string and Uint8Array
-					// payloads (binary serializers via 1.16.0).
-					const bunWs = ws as unknown as {
-						id: string;
-						send: (
-							data: string | Uint8Array | ArrayBuffer
-						) => number;
-						getBufferedAmount?: () => number;
-						close?: (code?: number, reason?: string) => void;
-					};
-					if (controllerState?.draining) {
-						bunWs.close?.(1012, 'Service Restart');
-						return;
-					}
+	const app = new Elysia({ name: '@absolutejs/sync/socket' })
+		// Elysia 2 no longer bundles WebSocket support; without this the
+		// route below is silently never served.
+		.use(websocket())
+		.ws(path, {
+			async open(ws) {
+				// Permissive shape: we read `getBufferedAmount` + `close` if the
+				// runtime supports them (Bun's ServerWebSocket does) — fall back
+				// silently for test fakes. Accepts both string and Uint8Array
+				// payloads (binary serializers via 1.16.0).
+				const bunWs = ws as unknown as {
+					id: string;
+					send: (data: string | Uint8Array | ArrayBuffer) => number;
+					getBufferedAmount?: () => number;
+					close?: (code?: number, reason?: string) => void;
+				};
+				if (controllerState?.draining) {
+					bunWs.close?.(1012, 'Service Restart');
+					return;
+				}
 
-					// Register synchronously BEFORE awaiting `resolveContext`, so frames
-					// that arrive during the (possibly slow) auth resolve are buffered in
-					// `pending` rather than dropped (the `message` handler queues them
-					// when `connection` is still null).
-					const tracked: TrackedConnection = {
-						activate: async () => undefined,
-						connection: null,
-						pending: [],
-						slowSignaled: false
-					};
-					connections.set(bunWs.id, tracked);
-					controllerState?.sockets.set(bunWs.id, bunWs);
-
-					tracked.activate = async (ctx) => {
-						const connection = createSyncConnection({
-							engine,
-							ctx,
-							presence,
-							serializer,
-							send: (frame) => {
-								const payload = serializer.encodeServer(frame);
-								const ret = bunWs.send(
-									typeof payload === 'string'
-										? payload
-										: (payload as Uint8Array)
-								);
-								const buffered =
-									bunWs.getBufferedAmount?.() ?? 0;
-								const overBuffer = buffered > threshold;
-								const backpressure = ret === -1;
-								if (
-									(overBuffer || backpressure) &&
-									!tracked.slowSignaled
-								) {
-									tracked.slowSignaled = true;
-									fireSlow({
-										bufferedAmount: buffered,
-										reason: backpressure
-											? 'send-backpressure'
-											: 'buffer-threshold',
-										stats: connection.stats(),
-										wsId: bunWs.id
+				// Register synchronously BEFORE awaiting `resolveContext`, so frames
+				// that arrive during the (possibly slow) auth resolve are buffered in
+				// `pending` rather than dropped (the `message` handler queues them
+				// when `connection` is still null).
+				const tracked: TrackedConnection = {
+					activate: async () => undefined,
+					connection: null,
+					pending: [],
+					slowSignaled: false
+				};
+				connections.set(bunWs.id, tracked);
+				controllerState?.sockets.set(bunWs.id, bunWs);
+				const socketContext = ws as unknown as Record<string, unknown>;
+				const authBridge = readAuthBridge(socketContext);
+				tracked.authenticate =
+					authenticate ??
+					(requestsTicketAuthentication(socketContext) && authBridge
+						? async (ticket) => {
+								const context =
+									await authBridge.consumeSocketTicket({
+										ticket
 									});
-									if (closeOnSlow) bunWs.close?.();
-								}
-								return ret;
-							}
-						});
-						if (!connections.has(bunWs.id)) {
-							connection.close();
-							return;
-						}
-						tracked.connection = connection;
-						const buffered = tracked.pending;
-						tracked.pending = [];
-						for (const frame of buffered)
-							await connection.handle(frame);
-					};
+								if (context === undefined)
+									throw new Error(
+										'Invalid Absolute Auth socket ticket'
+									);
 
-					if (authenticate) {
-						tracked.authenticationTimer = setTimeout(() => {
-							if (!tracked.connection)
-								bunWs.close?.(4401, 'Authentication Timeout');
-						}, authenticationTimeoutMs);
+								return context;
+							}
+						: undefined);
+
+				tracked.activate = async (ctx) => {
+					const connection = createSyncConnection({
+						engine,
+						ctx,
+						presence,
+						serializer,
+						send: (frame) => {
+							const payload = serializer.encodeServer(frame);
+							const ret = bunWs.send(
+								typeof payload === 'string'
+									? payload
+									: (payload as Uint8Array)
+							);
+							const buffered = bunWs.getBufferedAmount?.() ?? 0;
+							const overBuffer = buffered > threshold;
+							const backpressure = ret === -1;
+							if (
+								(overBuffer || backpressure) &&
+								!tracked.slowSignaled
+							) {
+								tracked.slowSignaled = true;
+								fireSlow({
+									bufferedAmount: buffered,
+									reason: backpressure
+										? 'send-backpressure'
+										: 'buffer-threshold',
+									stats: connection.stats(),
+									wsId: bunWs.id
+								});
+								if (closeOnSlow) bunWs.close?.();
+							}
+							return ret;
+						}
+					});
+					if (!connections.has(bunWs.id)) {
+						connection.close();
 						return;
 					}
-					const ctx = resolveContext
-						? // Elysia 2 hands the route context straight to the handler; the
-							// upgrade data that used to sit under `ws.data` is now spread on
-							// it, and `data` itself holds internal connection state instead.
-							await resolveContext(
+					tracked.connection = connection;
+					const buffered = tracked.pending;
+					tracked.pending = [];
+					for (const frame of buffered)
+						await connection.handle(frame);
+				};
+
+				if (
+					requestsTicketAuthentication(socketContext) &&
+					!tracked.authenticate
+				) {
+					bunWs.close?.(4401, 'Authentication Unavailable');
+					return;
+				}
+				if (tracked.authenticate) {
+					tracked.authenticationTimer = setTimeout(() => {
+						if (!tracked.connection)
+							bunWs.close?.(4401, 'Authentication Timeout');
+					}, authenticationTimeoutMs);
+					return;
+				}
+				const ctx = resolveContext
+					? // Elysia 2 hands the route context straight to the handler; the
+						// upgrade data that used to sit under `ws.data` is now spread on
+						// it, and `data` itself holds internal connection state instead.
+						await resolveContext(
+							ws as unknown as Record<string, unknown>
+						)
+					: {};
+				await tracked.activate(ctx);
+			},
+			async message(ws, message) {
+				const tracked = connections.get(ws.id);
+				if (!tracked) return;
+				if (tracked.connection) {
+					await tracked.connection.handle(message);
+				} else if (tracked.authenticate && !tracked.authenticating) {
+					const decoded = serializer.decode(message);
+					if (
+						typeof decoded !== 'object' ||
+						decoded === null ||
+						Reflect.get(decoded, 'type') !== 'authenticate' ||
+						typeof Reflect.get(decoded, 'ticket') !== 'string'
+					) {
+						(
+							ws as unknown as {
+								close?: (
+									code?: number,
+									reason?: string
+								) => void;
+							}
+						).close?.(4401, 'Authentication Required');
+						return;
+					}
+					const authenticateTicket = tracked.authenticate;
+					tracked.authenticating = (async () => {
+						try {
+							const ctx = await authenticateTicket(
+								Reflect.get(decoded, 'ticket') as string,
 								ws as unknown as Record<string, unknown>
-							)
-						: {};
-					await tracked.activate(ctx);
-				},
-				async message(ws, message) {
-					const tracked = connections.get(ws.id);
-					if (!tracked) return;
-					if (tracked.connection) {
-						await tracked.connection.handle(message);
-					} else if (authenticate && !tracked.authenticating) {
-						const decoded = serializer.decode(message);
-						if (
-							typeof decoded !== 'object' ||
-							decoded === null ||
-							Reflect.get(decoded, 'type') !== 'authenticate' ||
-							typeof Reflect.get(decoded, 'ticket') !== 'string'
-						) {
+							);
+							await tracked.activate(ctx);
+							clearTimeout(tracked.authenticationTimer);
+							tracked.authenticationTimer = undefined;
+						} catch {
 							(
 								ws as unknown as {
 									close?: (
@@ -340,48 +484,59 @@ export const syncSocket = ({
 										reason?: string
 									) => void;
 								}
-							).close?.(4401, 'Authentication Required');
-							return;
+							).close?.(4401, 'Authentication Failed');
 						}
-						tracked.authenticating = (async () => {
-							try {
-								const ctx = await authenticate(
-									Reflect.get(decoded, 'ticket') as string,
-									ws as unknown as Record<string, unknown>
-								);
-								await tracked.activate(ctx);
-								clearTimeout(tracked.authenticationTimer);
-								tracked.authenticationTimer = undefined;
-							} catch {
-								(
-									ws as unknown as {
-										close?: (
-											code?: number,
-											reason?: string
-										) => void;
-									}
-								).close?.(4401, 'Authentication Failed');
-							}
-						})();
-					} else {
-						tracked.pending.push(message);
-					}
-				},
-				drain(ws) {
-					// WS buffer cleared — re-arm slow-client detection so the next
-					// over-threshold event fires onSlow again.
-					const tracked = connections.get(ws.id);
-					if (tracked) tracked.slowSignaled = false;
-				},
-				close(ws) {
-					const tracked = connections.get(ws.id);
-					if (tracked) {
-						clearTimeout(tracked.authenticationTimer);
-						tracked.connection?.close();
-						connections.delete(ws.id);
-						controllerState?.sockets.delete(ws.id);
-					}
+					})();
+				} else {
+					tracked.pending.push(message);
 				}
-			})
-	);
+			},
+			drain(ws) {
+				// WS buffer cleared — re-arm slow-client detection so the next
+				// over-threshold event fires onSlow again.
+				const tracked = connections.get(ws.id);
+				if (tracked) tracked.slowSignaled = false;
+			},
+			close(ws) {
+				const tracked = connections.get(ws.id);
+				if (tracked) {
+					clearTimeout(tracked.authenticationTimer);
+					tracked.connection?.close();
+					connections.delete(ws.id);
+					controllerState?.sockets.delete(ws.id);
+				}
+			}
+		});
+
+	if (finiteHandler && headlessOptions) {
+		app.post(
+			headlessOptions.path ?? DEFAULT_HEADLESS_PATH,
+			async (context) => {
+				try {
+					const response = await finiteHandler(
+						context as unknown as SyncRouteContext
+					);
+					context.set.headers['cache-control'] = 'no-store';
+
+					return response;
+				} catch (error) {
+					if (
+						error instanceof Error &&
+						error.message === 'ABSOLUTE_SYNC_UNAUTHORIZED'
+					) {
+						context.set.headers['cache-control'] = 'no-store';
+						context.set.headers['www-authenticate'] = 'Bearer';
+
+						return context.status(
+							'Unauthorized',
+							'Sync authentication required'
+						);
+					}
+					throw error;
+				}
+			}
+		);
+	}
+
+	return app;
 };

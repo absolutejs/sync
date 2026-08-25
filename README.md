@@ -190,6 +190,23 @@ Row-level reactive results: the client holds a collection and the server pushes
 a collection once (the filter powers both the DB hydrate and the incremental
 matcher), expose it over `syncSocket`, and drive changes from mutations.
 
+Installed apps and service workers can use the same engine without holding a
+WebSocket open. `syncSocket()` automatically mounts an authenticated, finite
+HTTP exchange at `/__absolute/sync/background`: durable mutations execute in
+order, then declared collections return a snapshot or cursor catch-up and
+immediately unsubscribe. When `@absolutejs/auth` is mounted first, bearer
+requests and first-frame socket tickets automatically resolve to the same typed
+`{ authPrincipal, user }` context. An existing `resolveContext` is reused; custom
+auth can instead provide `headless.resolveContext`. Requests without a Bearer
+credential fail closed. Set `headless: false` to opt out or configure
+`headless.path`, `maxMutations`, and `maxPulls`.
+
+The lower-level `headlessSyncRoute(engine, { resolveContext })` remains available
+for unusual server composition. The client-side `runHeadlessSync` helper
+performs the matching bounded transaction against any `SyncLocalStore`; native
+adapters may implement the same v1 wire contract without running application
+JavaScript.
+
 ```ts
 // server
 import { Elysia } from 'elysia';
@@ -251,28 +268,17 @@ socketController.drain();
 Browser and installed-app clients that cannot set an `Authorization` header on
 the WebSocket upgrade can authenticate with a short-lived one-time ticket. The
 ticket is fetched over authenticated HTTPS, sent as the first socket frame, and
-never appears in a URL. `@absolutejs/auth` supplies the issuer/store/consumer;
-Sync owns only the transport handshake.
+never appears in a URL. A non-secret query hint tells the server to wait for the
+first frame. When the Auth application is mounted before `syncSocket`, Auth
+supplies the issuer/store/consumer and Sync owns only the transport handshake.
 
 ```ts
 const client = createSyncClient({
 	url: 'wss://app.example/sync/ws',
-	socketTicket: () => mobileAuth.socketTicket('https://app.example/sync')
+	socketTicket: () => mobileAuth.socketTicket()
 });
 
-syncSocket({
-	authenticate: async (ticket) => {
-		const principal = await consumeSocketTicket({
-			audience: 'https://app.example/sync',
-			getUser,
-			store: socketTicketStore,
-			ticket
-		});
-		if (!principal) throw new Error('Invalid socket ticket');
-		return principal;
-	},
-	engine
-});
+new Elysia().use(authApplication).use(syncSocket({ engine }));
 ```
 
 Each reconnect invokes `socketTicket` again. The server rejects malformed,
@@ -507,7 +513,7 @@ tenant to a shard adds zero standing connections.
 | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `createReactiveHub()`                                                                                                                                  | In-memory topic pub/sub (`publish`, `subscribe`, `subscriberCount`).                                                                                                                                                                                                                                                                                         |
 | `sync({ hub, path?, resolveTopics?, heartbeatMs? })`                                                                                                   | Elysia plugin: SSE stream of hub events.                                                                                                                                                                                                                                                                                                                     |
-| `syncSocket({ engine, path?, resolveContext?, authenticate? })`                                                                                        | Elysia WebSocket plugin for the sync engine. `authenticate` requires a first-frame one-time ticket and returns the per-connection authorization context.                                                                                                                                                                                                     |
+| `syncSocket({ engine, path?, resolveContext?, authenticate?, headless? })`                                                                             | Elysia WebSocket plugin plus the finite `/__absolute/sync/background` HTTP route. Detects the `@absolutejs/auth` bridge automatically. `headless: false` opts out; custom auth may provide `headless.resolveContext`.                                                                                                                                        |
 | `createSyncSocketController()`                                                                                                                         | Host control plane for blue-green drains. Pass it as `syncSocket({ controller, engine })`, then call `controller.drain()` on the old slot to close current and late sockets with code 1012 while clients reconnect through the switched load balancer.                                                                                                       |
 | `scheduled({ engine, prefix?, onError? })` _(`/scheduled` subpath)_                                                                                    | Elysia plugin: fires the engine's registered schedules on their cron patterns (via `@elysiajs/cron`). Kept off the main entry so `syncSocket` needs no cron dep.                                                                                                                                                                                             |
 | `syncDevtools({ engine, path?, snapshotMs? })`                                                                                                         | Elysia plugin: a live devtools dashboard (collections, subscription counts, mutations, schedules, change feed) over SSE. Backed by `engine.inspect()` + `engine.onActivity()`. **1.23** also exposes a Point-in-time replay panel (datetime picker + tables filter) and a `GET <path>/replay?at=<ms>&tables=<csv>` JSON endpoint wrapping `engine.replayTo`. |

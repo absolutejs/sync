@@ -9,6 +9,7 @@ import type {
 } from './syncCollection';
 import { createSyncOperationId, ensureSyncInstallationId } from './localStore';
 import type {
+	LocalCollectionRecord,
 	LocalMutationRecord,
 	LocalOptimisticOperation,
 	SyncLocalStore
@@ -169,6 +170,7 @@ type Entry = {
 	collection: string;
 	params: unknown;
 	key: (row: unknown) => RowKey;
+	headlessKey: 'id' | undefined;
 	confirmed: Map<RowKey, unknown>;
 	state: SyncCollectionState<unknown>;
 	listeners: Set<(state: SyncCollectionState<unknown>) => void>;
@@ -239,6 +241,16 @@ const defaultLocalKey = (collection: string, params: unknown): string =>
 	params === undefined
 		? collection
 		: `${collection}:${canonicalJson(params)}`;
+
+const ticketAuthenticatedSocketUrl = (url: string) => {
+	if (/(?:\?|&)__absolute_auth=/u.test(url)) return url;
+	const hashAt = url.indexOf('#');
+	const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
+	const hash = hashAt === -1 ? '' : url.slice(hashAt);
+	const separator = beforeHash.includes('?') ? '&' : '?';
+
+	return `${beforeHash}${separator}__absolute_auth=ticket${hash}`;
+};
 
 /**
  * A multiplexed sync client: one WebSocket serving many live collections. Its
@@ -411,15 +423,15 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 
 	const persistEntries = (affected: Iterable<Entry>) => {
 		if (durable === undefined) return;
-		const snapshots = new Map<
-			string,
-			{ rows: unknown[]; version: number; cursor?: string }
-		>();
+		const snapshots = new Map<string, LocalCollectionRecord>();
 		for (const entry of affected) {
 			snapshots.set(entry.localKey, {
 				rows: [...entry.confirmed.values()],
 				version: entry.appliedVersion,
-				cursor: entry.cursor
+				cursor: entry.cursor,
+				collection: entry.collection,
+				params: entry.params,
+				...(entry.headlessKey ? { headlessKey: entry.headlessKey } : {})
 			});
 		}
 		void queueLocalWrite(() =>
@@ -844,7 +856,11 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		}
 		reconnectTimer = undefined;
 		updateStatus({ connection: 'connecting' });
-		const ws = new Impl(options.url);
+		const ws = new Impl(
+			socketTicket
+				? ticketAuthenticatedSocketUrl(options.url)
+				: options.url
+		);
 		socket = ws;
 		const sendInitialFrames = () => {
 			if (socket !== ws || closed) return;
@@ -1020,6 +1036,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			key:
 				(handleOptions.key as ((row: unknown) => RowKey) | undefined) ??
 				((row: unknown) => (row as { id: RowKey }).id),
+			headlessKey: handleOptions.key === undefined ? 'id' : undefined,
 			confirmed: new Map(),
 			state: { data: [], status: 'connecting', error: undefined },
 			listeners: new Set(),
