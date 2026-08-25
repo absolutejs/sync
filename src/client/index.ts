@@ -40,6 +40,19 @@ export type {
 } from './presence';
 
 export { createSyncClient } from './syncClient';
+export {
+	createMemorySyncLocalStore,
+	createSyncOperationId,
+	ensureSyncInstallationId
+} from './localStore';
+export type {
+	LocalCollectionRecord,
+	LocalMutationRecord,
+	LocalOptimisticOperation,
+	SyncLocalStore,
+	SyncLocalStoreMode,
+	SyncLocalTransaction
+} from './localStore';
 export * from './runtimeTransport';
 export type {
 	SyncClient,

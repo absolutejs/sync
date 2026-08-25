@@ -14,8 +14,10 @@ import type { GraphCollectionDefinition, GraphInstance } from './graph';
 import { createMaterializedView, isEmptyViewDiff } from './materializedView';
 import type { MaterializedView } from './materializedView';
 import type {
+	DurableMutationsOptions,
 	MutationActions,
 	MutationDefinition,
+	MutationExecutionOptions,
 	TableWriter,
 	TransactionRunner
 } from './mutation';
@@ -361,7 +363,8 @@ export type SyncEngine = {
 	runMutation: (
 		name: string,
 		args: unknown,
-		ctx: unknown
+		ctx: unknown,
+		options?: MutationExecutionOptions
 	) => Promise<unknown>;
 	/**
 	 * Atomically run N mutations in a single transaction (sync 1.11+).
@@ -907,6 +910,16 @@ export type SyncEngineOptions = {
 	 * mutations without a transaction (each writer call is its own DB op).
 	 */
 	transaction?: TransactionRunner;
+	/**
+	 * Replay-safe mutation delivery. When a transport supplies an `operationId`,
+	 * this runner atomically commits the mutation writes and their receipt, then
+	 * returns the stored result on retries. The scope is derived from trusted
+	 * server auth context rather than client input.
+	 *
+	 * This runner owns the transaction for durable calls. `transaction` remains
+	 * the fallback for legacy calls without an operation id.
+	 */
+	durableMutations?: DurableMutationsOptions<any>;
 	/**
 	 * Declarative, row-level permissions keyed by table (see
 	 * {@link definePermissions}). Read rules filter every row the engine emits;
@@ -3170,7 +3183,7 @@ export const createSyncEngine = (
 
 		migrate: (table, row) => migrateRow(table, row) as typeof row,
 
-		runMutation: async (name, args, ctx) => {
+		runMutation: async (name, args, ctx, executionOptions) => {
 			// 1.21.0: wrap the entire mutation lifecycle in a span. Noop
 			// when no tracerProvider was supplied.
 			const span = tracer.startSpan('sync.runMutation', {
@@ -3242,6 +3255,23 @@ export const createSyncEngine = (
 				const computeDelay = retry?.backoff ?? exponentialBackoff();
 				const maxElapsedMs = retry?.maxElapsedMs ?? 30_000;
 				const startedAt = Date.now();
+				const operationId = executionOptions?.operationId;
+				const durableMutations = options.durableMutations;
+				if (
+					operationId !== undefined &&
+					durableMutations === undefined
+				) {
+					throw new Error(
+						'Durable mutation received without createSyncEngine({ durableMutations })'
+					);
+				}
+				const durableScope =
+					operationId !== undefined && durableMutations !== undefined
+						? await durableMutations.scope(ctx)
+						: undefined;
+				if (durableScope !== undefined && durableScope.length === 0) {
+					throw new Error('Durable mutation scope must not be empty');
+				}
 
 				// Each attempt builds fresh `actions`/`buffered` via the makeActions
 				// call inside runHandler, so a retry never inherits half-applied
@@ -3253,13 +3283,45 @@ export const createSyncEngine = (
 					for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 						attemptsMade = attempt;
 						try {
-							const { buffered, result } =
-								runInTransaction !== undefined
-									? await runInTransaction((tx) =>
-											runHandler(tx)
-										)
-									: await runHandler(undefined);
-							await applyChangeBatch(buffered);
+							let buffered: {
+								table: string;
+								change: RowChange<unknown>;
+							}[] = [];
+							let result: unknown;
+							let replayed = false;
+							if (
+								operationId !== undefined &&
+								durableMutations !== undefined &&
+								durableScope !== undefined
+							) {
+								const durableResult =
+									await durableMutations.run(
+										{
+											args,
+											name,
+											operationId,
+											scope: durableScope
+										},
+										async (tx) => {
+											const executed =
+												await runHandler(tx);
+											buffered = executed.buffered;
+											return executed.result;
+										}
+									);
+								result = durableResult.result;
+								replayed = durableResult.replayed;
+							} else {
+								const executed =
+									runInTransaction !== undefined
+										? await runInTransaction((tx) =>
+												runHandler(tx)
+											)
+										: await runHandler(undefined);
+								buffered = executed.buffered;
+								result = executed.result;
+							}
+							if (!replayed) await applyChangeBatch(buffered);
 							mutationsCompleted += 1;
 							emitActivity({
 								type: 'mutation',

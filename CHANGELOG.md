@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.16.0] — 2026-08-25
+
+- Add stable string `operationId` support to mutate/ack/reject frames while
+  preserving the legacy numeric correlation id and wire behavior.
+- Add the server-owned `durableMutations` engine contract. Its adapter runs the
+  mutation's table writes and deduplication receipt in one database transaction,
+  scopes receipts from authenticated context, and returns the committed result
+  without re-running effects after a lost acknowledgment.
+- Add the framework-neutral `SyncLocalStore` transaction contract for confirmed
+  rows, cursors, installation identity, and serializable optimistic outbox
+  records. The in-memory reference adapter proves atomic rollback and principal
+  namespace isolation; IndexedDB and Capacitor SQLite adapters can share the same
+  conformance model.
+- Add stable installation/operation identity helpers and regression coverage for
+  legacy delivery, replay, rollback, account isolation, and protocol forwarding.
+
 ## [2.13.3] — 2026-08-12
 
 - Preserve exponential reconnect backoff across sockets that open but never

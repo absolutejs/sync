@@ -33,6 +33,56 @@ export type TransactionRunner = <R>(
 	run: (tx: unknown) => Promise<R>
 ) => Promise<R>;
 
+/** Stable identity attached to a replayable client mutation. */
+export type DurableMutationOperation = {
+	/** Server-derived account/tenant boundary. Never accept this from the client. */
+	scope: string;
+	/** Opaque, client-generated id that remains stable across retries and restarts. */
+	operationId: string;
+	/** Registered mutation name, retained with the receipt for misuse detection. */
+	name: string;
+	/** Original mutation arguments, available to adapters that fingerprint receipts. */
+	args: unknown;
+};
+
+/** Result of atomically running or replaying a durable mutation. */
+export type DurableMutationRunResult<R> = {
+	result: R;
+	/** True when a previously committed receipt supplied `result`. */
+	replayed: boolean;
+};
+
+/**
+ * Atomically deduplicates a replayable mutation.
+ *
+ * The adapter owns the database transaction and MUST commit the receipt in the
+ * same transaction as `execute(tx)`. It must serialize concurrent calls for the
+ * same `(scope, operationId)`, return the stored result when a receipt already
+ * exists, and enforce a unique key for that pair. The `tx` passed to `execute`
+ * is threaded to every {@link TableWriter}, coupling business writes and the
+ * receipt without a check-then-write crash gap.
+ */
+export type DurableMutationRunner = <R>(
+	operation: DurableMutationOperation,
+	execute: (tx: unknown) => Promise<R>
+) => Promise<DurableMutationRunResult<R>>;
+
+/** Server-owned configuration for exactly-once mutation effects. */
+export type DurableMutationsOptions<Ctx = unknown> = {
+	/**
+	 * Resolve the authenticated account/tenant boundary for receipt isolation.
+	 * The returned value must be stable for the same principal across reconnects.
+	 */
+	scope: (ctx: Ctx) => string | Promise<string>;
+	/** Database-specific atomic receipt + transaction implementation. */
+	run: DurableMutationRunner;
+};
+
+/** Optional execution metadata used by transports for replay-safe delivery. */
+export type MutationExecutionOptions = {
+	operationId?: string;
+};
+
 /**
  * Actions a mutation handler uses to write and publish changes.
  *

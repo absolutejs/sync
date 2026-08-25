@@ -115,8 +115,13 @@ export type { CrdtFieldsMap, RegisteredPack, SyncPack } from './pack';
 
 export { defineMutation } from './mutation';
 export type {
+	DurableMutationOperation,
+	DurableMutationRunner,
+	DurableMutationRunResult,
+	DurableMutationsOptions,
 	MutationActions,
 	MutationDefinition,
+	MutationExecutionOptions,
 	MutationHandler,
 	TableWriter,
 	TransactionRunner

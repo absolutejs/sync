@@ -28,7 +28,14 @@ export type ClientFrame =
 			since?: number | string;
 	  }
 	| { type: 'unsubscribe'; id: string }
-	| { type: 'mutate'; mutationId: number; name: string; args?: unknown }
+	| {
+			type: 'mutate';
+			mutationId: number;
+			name: string;
+			args?: unknown;
+			/** Stable across reconnect/restart; enables atomic receipt replay. */
+			operationId?: string;
+	  }
 	| { type: 'presence-join'; room: string; memberId: string; state: unknown }
 	| { type: 'presence-set'; room: string; state: unknown }
 	| { type: 'presence-leave'; room: string };
@@ -81,8 +88,18 @@ export type ServerFrame<T = unknown> =
 			left: string[];
 	  }
 	| { type: 'error'; id?: string; message: string }
-	| { type: 'ack'; mutationId: number; result?: unknown }
-	| { type: 'reject'; mutationId: number; message: string };
+	| {
+			type: 'ack';
+			mutationId: number;
+			operationId?: string;
+			result?: unknown;
+	  }
+	| {
+			type: 'reject';
+			mutationId: number;
+			operationId?: string;
+			message: string;
+	  };
 
 export type SyncConnectionOptions = {
 	engine: SyncEngine;
@@ -171,6 +188,7 @@ const parseFrame = (
 		params?: unknown;
 		since?: unknown;
 		mutationId?: unknown;
+		operationId?: unknown;
 		name?: unknown;
 		args?: unknown;
 		room?: unknown;
@@ -207,12 +225,16 @@ const parseFrame = (
 	}
 	if (frame.type === 'mutate') {
 		return typeof frame.mutationId === 'number' &&
-			typeof frame.name === 'string'
+			typeof frame.name === 'string' &&
+			(frame.operationId === undefined ||
+				(typeof frame.operationId === 'string' &&
+					frame.operationId.length > 0))
 			? {
 					type: 'mutate',
 					mutationId: frame.mutationId,
 					name: frame.name,
-					args: frame.args
+					args: frame.args,
+					operationId: frame.operationId as string | undefined
 				}
 			: undefined;
 	}
@@ -359,16 +381,23 @@ export const createSyncConnection = ({
 				const result = await engine.runMutation(
 					frame.name,
 					frame.args,
-					ctx
+					ctx,
+					{ operationId: frame.operationId }
 				);
 				// The mutation's diffs were buffered during runMutation; flush them
 				// (as one frame) before the ack so the ack always arrives after.
 				flush();
-				send({ type: 'ack', mutationId: frame.mutationId, result });
+				send({
+					type: 'ack',
+					mutationId: frame.mutationId,
+					operationId: frame.operationId,
+					result
+				});
 			} catch (error) {
 				send({
 					type: 'reject',
 					mutationId: frame.mutationId,
+					operationId: frame.operationId,
 					message:
 						error instanceof Error ? error.message : String(error)
 				});
