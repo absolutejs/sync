@@ -41,6 +41,11 @@ export type {
 } from './presence';
 
 export { createSyncClient } from './syncClient';
+export { SyncMutationRejectedError } from '../reconciliation';
+export type {
+	SyncMutationRejection,
+	SyncMutationRejectionKind
+} from '../reconciliation';
 export {
 	createMemorySyncLocalStore,
 	createIndexedDbSyncLocalStore,
@@ -60,9 +65,13 @@ export * from './runtimeTransport';
 export type {
 	DurableSyncClientOptions,
 	SyncClient,
+	SyncClientConnectionStatus,
 	SyncClientOptions,
+	SyncClientStatus,
 	SyncCollectionHandle,
-	SyncCollectionHandleOptions
+	SyncCollectionHandleOptions,
+	SyncFlushOptions,
+	SyncFlushResult
 } from './syncClient';
 
 export { syncStore, unwrapEden } from './syncStore';

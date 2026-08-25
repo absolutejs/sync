@@ -19,6 +19,10 @@ import {
 	hasReconnectHealthyFrameType
 } from './reconnectBackoff';
 import { getSyncClientRuntimeTransport } from './runtimeTransport';
+import {
+	SyncMutationRejectedError,
+	type SyncMutationRejection
+} from '../reconciliation';
 
 const serverFrameTypes = [
 	'snapshot',
@@ -66,6 +70,38 @@ export type DurableSyncClientOptions = {
 	createId?: () => string;
 	/** Storage failures are reported here and through the client's `onError`. */
 	onError?: (error: unknown) => void;
+	/** Inclusive automatic delivery ceiling. Defaults to 5 attempts. */
+	maxAttempts?: number;
+	/** Client-side retry delay when the server provides no hint. */
+	retryBackoff?: (attempt: number) => number;
+};
+
+export type SyncClientConnectionStatus =
+	| 'closed'
+	| 'connecting'
+	| 'offline'
+	| 'online';
+
+/** Framework-neutral local-first diagnostics. */
+export type SyncClientStatus = {
+	connection: SyncClientConnectionStatus;
+	pending: number;
+	deadLetters: number;
+	oldestPendingAt?: number;
+	lastSuccessfulPullAt?: number;
+	lastSuccessfulPushAt?: number;
+	lastError?: string;
+};
+
+export type SyncFlushOptions = {
+	/** Finite foreground/background budget. Defaults to 10 seconds. */
+	timeoutMs?: number;
+};
+
+export type SyncFlushResult = {
+	deadLetters: number;
+	pending: number;
+	timedOut: boolean;
 };
 
 export type SyncCollectionHandleOptions<T> = {
@@ -114,6 +150,20 @@ export type SyncClient = {
 	disconnect: () => void;
 	/** Reconnect immediately, refreshing any runtime-provided socket ticket. */
 	reconnect: () => void;
+	/** Current connection/outbox state without framework coupling. */
+	status: () => SyncClientStatus;
+	/** Subscribe to status changes; immediately emits the current state. */
+	subscribeStatus: (
+		listener: (status: SyncClientStatus) => void
+	) => () => void;
+	/** Retained operations requiring explicit remediation. */
+	listDeadLetters: () => Promise<LocalMutationRecord[]>;
+	/** Move a dead letter back to the pending outbox and retry it. */
+	retryDeadLetter: (operationId: string) => Promise<void>;
+	/** Permanently discard one dead letter. */
+	discardDeadLetter: (operationId: string) => Promise<void>;
+	/** Reconnect and wait within a finite budget for the current outbox to settle. */
+	flush: (options?: SyncFlushOptions) => Promise<SyncFlushResult>;
 	/** Close the socket and every handle. */
 	close: () => void;
 };
@@ -129,6 +179,10 @@ type PendingMutation = {
 	inverse: LocalOptimisticOperation[];
 	resolve?: (result: unknown) => void;
 	reject?: (error: unknown) => void;
+	attempts: number;
+	createdAt: number;
+	nextAttemptAt?: number;
+	sending?: boolean;
 };
 
 type Entry = {
@@ -227,6 +281,13 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	const durable = options.durable ?? runtime?.durable;
 	const reconnectMs = options.reconnectMs ?? 500;
 	const maxReconnectMs = options.maxReconnectMs ?? 10_000;
+	const maxAttempts = durable?.maxAttempts ?? 5;
+	if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+		throw new TypeError('durable.maxAttempts must be a positive integer');
+	}
+	const retryBackoff =
+		durable?.retryBackoff ??
+		((attempt: number) => Math.min(30_000, 500 * 2 ** (attempt - 1)));
 	const serializer: FrameSerializer = options.serializer ?? jsonSerializer;
 	const Impl = options.webSocketImpl ?? globalThis.WebSocket;
 	if (!Impl) {
@@ -238,6 +299,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	const entries = new Map<string, Entry>();
 	const pending: PendingMutation[] = [];
 	const mutationOwner = new Map<number, PendingMutation>();
+	const deadLetters = new Map<string, LocalMutationRecord>();
+	const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	const statusListeners = new Set<(status: SyncClientStatus) => void>();
 	let nextEntryId = 0;
 	let mutationSeq = 0;
 	let installationId: string | undefined;
@@ -251,6 +315,31 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	);
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	let immediateReconnect = false;
+	let clientStatus: SyncClientStatus = {
+		connection: 'connecting',
+		deadLetters: 0,
+		pending: 0
+	};
+
+	const snapshotStatus = (): SyncClientStatus => ({ ...clientStatus });
+	const updateStatus = (patch: Partial<SyncClientStatus> = {}) => {
+		const oldestPendingAt = pending.reduce<number | undefined>(
+			(oldest, mutation) =>
+				oldest === undefined
+					? mutation.createdAt
+					: Math.min(oldest, mutation.createdAt),
+			undefined
+		);
+		clientStatus = {
+			...clientStatus,
+			...patch,
+			pending: pending.length,
+			deadLetters: deadLetters.size,
+			...(oldestPendingAt === undefined ? {} : { oldestPendingAt })
+		};
+		if (oldestPendingAt === undefined) delete clientStatus.oldestPendingAt;
+		for (const listener of statusListeners) listener(snapshotStatus());
+	};
 
 	const notify = (entry: Entry) => {
 		for (const listener of entry.listeners) {
@@ -319,6 +408,12 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			return undefined;
 		}
 		pending.splice(index, 1);
+		if (mutation.operationId !== undefined) {
+			const timer = retryTimers.get(mutation.operationId);
+			if (timer !== undefined) clearTimeout(timer);
+			retryTimers.delete(mutation.operationId);
+		}
+		updateStatus();
 		return mutation;
 	};
 
@@ -373,6 +468,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			if (keys.has(entry.localKey)) recompute(entry);
 		}
 	};
+	let sendMutate: (mutation: PendingMutation) => void;
 
 	const finishPending = (
 		mutationId: number,
@@ -410,11 +506,103 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				tx.deleteMutation(mutation.operationId!)
 			)
 		)
-			.catch(() => {})
-			.finally(() => finishPending(mutationId, result, error));
+			.then(() => finishPending(mutationId, result, error))
+			.catch(() => {});
+	};
+
+	const deadLetterPending = (
+		mutationId: number,
+		rejection: SyncMutationRejection
+	) => {
+		const mutation = mutationOwner.get(mutationId);
+		if (mutation?.operationId === undefined || durable === undefined) {
+			finishPending(
+				mutationId,
+				undefined,
+				new SyncMutationRejectedError(rejection, mutation?.operationId)
+			);
+			return;
+		}
+		const deadLetteredAt = Date.now();
+		void queueLocalWrite(() =>
+			durable.store.transaction(
+				durable.namespace,
+				'readwrite',
+				async (tx) => {
+					const current = await tx.getMutation(mutation.operationId!);
+					if (current === undefined) return;
+					const record: LocalMutationRecord = {
+						...current,
+						attempts: mutation.attempts,
+						deadLetteredAt,
+						lastError: rejection.message,
+						rejection,
+						state: 'dead-letter'
+					};
+					delete record.nextAttemptAt;
+					await tx.putMutation(record);
+					deadLetters.set(record.operationId, record);
+				}
+			)
+		)
+			.then(() => {
+				updateStatus({ lastError: rejection.message });
+				finishPending(
+					mutationId,
+					undefined,
+					new SyncMutationRejectedError(
+						rejection,
+						mutation.operationId
+					)
+				);
+			})
+			.catch(() => {});
+	};
+
+	const retryRejectedPending = (
+		mutation: PendingMutation,
+		rejection: SyncMutationRejection
+	) => {
+		if (mutation.operationId === undefined || durable === undefined) {
+			deadLetterPending(mutation.mutationId, rejection);
+			return;
+		}
+		if (mutation.attempts >= maxAttempts) {
+			deadLetterPending(mutation.mutationId, rejection);
+			return;
+		}
+		const delay = Math.max(
+			0,
+			rejection.retryAfterMs ?? retryBackoff(mutation.attempts)
+		);
+		mutation.nextAttemptAt = Date.now() + delay;
+		void queueLocalWrite(() =>
+			durable.store.transaction(
+				durable.namespace,
+				'readwrite',
+				async (tx) => {
+					const record = await tx.getMutation(mutation.operationId!);
+					if (record === undefined) return;
+					await tx.putMutation({
+						...record,
+						attempts: mutation.attempts,
+						lastError: rejection.message,
+						nextAttemptAt: mutation.nextAttemptAt,
+						rejection,
+						state: 'pending'
+					});
+				}
+			)
+		)
+			.then(() => {
+				updateStatus({ lastError: rejection.message });
+				sendMutate(mutation);
+			})
+			.catch(() => {});
 	};
 
 	const applyFrame = (frame: ServerFrame) => {
+		updateStatus({ connection: 'online' });
 		if (frame.type === 'snapshot') {
 			const entry = entries.get(frame.id);
 			if (entry === undefined) {
@@ -432,6 +620,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			}
 			persistEntries([entry]);
 			recompute(entry, { status: 'ready', error: undefined });
+			updateStatus({ lastSuccessfulPullAt: Date.now() });
 		} else if (frame.type === 'diff') {
 			const entry = entries.get(frame.id);
 			if (entry === undefined) {
@@ -449,6 +638,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			}
 			persistEntries([entry]);
 			recompute(entry);
+			updateStatus({ lastSuccessfulPullAt: Date.now() });
 		} else if (frame.type === 'frame') {
 			// The consistent frame: update every affected collection's confirmed
 			// state first, then notify — so no listener observes a partial batch.
@@ -477,6 +667,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			for (const entry of affected) {
 				notify(entry);
 			}
+			updateStatus({ lastSuccessfulPullAt: Date.now() });
 		} else if (frame.type === 'error') {
 			if (frame.id !== undefined) {
 				const entry = entries.get(frame.id);
@@ -485,19 +676,36 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				}
 			}
 			options.onError?.(frame.message);
+			updateStatus({ lastError: String(frame.message) });
 		} else if (frame.type === 'ack') {
+			updateStatus({ lastSuccessfulPushAt: Date.now() });
 			finishDurablePending(
 				frame.mutationId,
 				frame.operationId,
 				frame.result
 			);
 		} else if (frame.type === 'reject') {
-			finishDurablePending(
-				frame.mutationId,
-				frame.operationId,
-				undefined,
-				new Error(String(frame.message))
-			);
+			const mutation = mutationOwner.get(frame.mutationId);
+			if (
+				mutation?.operationId !== undefined &&
+				frame.operationId !== mutation.operationId
+			) {
+				reportStorageError(
+					new Error(
+						`Durable mutation rejection identity mismatch for ${mutation.operationId}`
+					)
+				);
+				return;
+			}
+			const rejection: SyncMutationRejection = frame.rejection ?? {
+				kind: 'permanent',
+				message: String(frame.message)
+			};
+			if (rejection.kind === 'retryable' && mutation !== undefined) {
+				retryRejectedPending(mutation, rejection);
+			} else {
+				deadLetterPending(frame.mutationId, rejection);
+			}
 		}
 	};
 
@@ -524,7 +732,22 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		);
 	};
 
-	const sendMutate = (mutation: PendingMutation) => {
+	sendMutate = (mutation: PendingMutation) => {
+		if (mutation.nextAttemptAt !== undefined) {
+			const delay = mutation.nextAttemptAt - Date.now();
+			if (delay > 0 && mutation.operationId !== undefined) {
+				if (!retryTimers.has(mutation.operationId)) {
+					const timer = setTimeout(() => {
+						retryTimers.delete(mutation.operationId!);
+						mutation.nextAttemptAt = undefined;
+						sendMutate(mutation);
+					}, delay);
+					retryTimers.set(mutation.operationId, timer);
+				}
+				return;
+			}
+			mutation.nextAttemptAt = undefined;
+		}
 		if (!connected) return;
 		const payload = serializer.encodeClient({
 			type: 'mutate',
@@ -537,6 +760,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			wsSend(payload);
 			return;
 		}
+		if (mutation.sending) return;
+		mutation.sending = true;
+		mutation.attempts += 1;
 		const targetSocket = socket;
 		void queueLocalWrite(() =>
 			durable.store.transaction(
@@ -547,7 +773,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 					if (record !== undefined) {
 						await tx.putMutation({
 							...record,
-							attempts: record.attempts + 1
+							attempts: mutation.attempts,
+							state: 'pending',
+							nextAttemptAt: undefined
 						});
 					}
 				}
@@ -555,6 +783,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		)
 			.catch(() => {})
 			.finally(() => {
+				mutation.sending = false;
 				if (
 					connected &&
 					socket === targetSocket &&
@@ -578,6 +807,10 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			(tx) => tx.listMutations()
 		);
 		for (const record of records) {
+			if (record.state === 'dead-letter') {
+				deadLetters.set(record.operationId, record);
+				continue;
+			}
 			mutationSeq += 1;
 			const mutation: PendingMutation = {
 				mutationId: mutationSeq,
@@ -587,11 +820,15 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				name: record.name,
 				args: record.args,
 				optimisticOperations: record.optimistic,
-				inverse: record.inverse
+				inverse: record.inverse,
+				attempts: record.attempts,
+				createdAt: record.createdAt,
+				nextAttemptAt: record.nextAttemptAt
 			};
 			pending.push(mutation);
 			mutationOwner.set(mutation.mutationId, mutation);
 		}
+		updateStatus();
 	};
 
 	const durableReady =
@@ -628,6 +865,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			return;
 		}
 		reconnectTimer = undefined;
+		updateStatus({ connection: 'connecting' });
 		const ws = new Impl(options.url);
 		socket = ws;
 		const sendInitialFrames = () => {
@@ -649,6 +887,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 					})
 					.catch((error) => {
 						options.onError?.(error);
+						updateStatus({ lastError: String(error) });
 						ws.close();
 					});
 				return;
@@ -694,6 +933,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			if (closed) {
 				return;
 			}
+			updateStatus({ connection: 'offline' });
 			if (immediateReconnect) {
 				immediateReconnect = false;
 				connect();
@@ -834,7 +1074,8 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 					const addPending = (
 						operationId: string | undefined,
 						optimisticOperations: LocalOptimisticOperation[],
-						inverse: LocalOptimisticOperation[]
+						inverse: LocalOptimisticOperation[],
+						createdAt = Date.now()
 					) => {
 						mutationSeq += 1;
 						const mutation: PendingMutation = {
@@ -848,11 +1089,14 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 								| undefined,
 							optimisticOperations,
 							inverse,
+							attempts: 0,
+							createdAt,
 							resolve: (result) => resolve(result as R),
 							reject
 						};
 						pending.push(mutation);
 						mutationOwner.set(mutation.mutationId, mutation);
+						updateStatus();
 						recomputeMutationEntries(mutation);
 						sendMutate(mutation);
 					};
@@ -881,6 +1125,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 							installationId!,
 							durable.createId
 						);
+						const createdAt = Date.now();
 						const record: LocalMutationRecord = {
 							operationId,
 							owner: entry.localKey,
@@ -888,8 +1133,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 							args: mutateOptions.args,
 							optimistic: optimisticOperations,
 							inverse,
-							createdAt: Date.now(),
-							attempts: 0
+							createdAt,
+							attempts: 0,
+							state: 'pending'
 						};
 						await queueLocalWrite(() =>
 							durable.store.transaction(
@@ -898,7 +1144,12 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 								(tx) => tx.putMutation(record)
 							)
 						);
-						addPending(operationId, optimisticOperations, inverse);
+						addPending(
+							operationId,
+							optimisticOperations,
+							inverse,
+							createdAt
+						);
 					})().catch(reject);
 				}),
 			close: () => {
@@ -919,6 +1170,132 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		};
 	};
 
+	const listDeadLetters = async (): Promise<LocalMutationRecord[]> => {
+		if (durable === undefined) return [];
+		await durableReady;
+		return [...deadLetters.values()]
+			.sort((a, b) => a.createdAt - b.createdAt)
+			.map((record) => structuredClone(record));
+	};
+
+	const retryDeadLetter = async (operationId: string): Promise<void> => {
+		if (durable === undefined) {
+			throw new Error('Dead-letter retry requires a durable Sync client');
+		}
+		await durableReady;
+		if (closed)
+			throw new Error('Cannot retry a dead letter on a closed client');
+		const record = await queueLocalWrite(() =>
+			durable.store.transaction(
+				durable.namespace,
+				'readwrite',
+				async (tx) => {
+					const current = await tx.getMutation(operationId);
+					if (current?.state !== 'dead-letter') {
+						throw new Error(
+							`Unknown Sync dead letter "${operationId}"`
+						);
+					}
+					const next: LocalMutationRecord = {
+						...current,
+						attempts: 0,
+						state: 'pending'
+					};
+					delete next.deadLetteredAt;
+					delete next.lastError;
+					delete next.nextAttemptAt;
+					delete next.rejection;
+					await tx.putMutation(next);
+					return next;
+				}
+			)
+		);
+		deadLetters.delete(operationId);
+		mutationSeq += 1;
+		const mutation: PendingMutation = {
+			args: record.args,
+			attempts: 0,
+			createdAt: record.createdAt,
+			inverse: record.inverse,
+			mutationId: mutationSeq,
+			name: record.name,
+			operationId: record.operationId,
+			optimisticOperations: record.optimistic,
+			ownerKey: record.owner ?? record.optimistic[0]?.collection ?? ''
+		};
+		pending.push(mutation);
+		mutationOwner.set(mutation.mutationId, mutation);
+		recomputeMutationEntries(mutation);
+		updateStatus();
+		sendMutate(mutation);
+	};
+
+	const discardDeadLetter = async (operationId: string): Promise<void> => {
+		if (durable === undefined) {
+			throw new Error(
+				'Dead-letter discard requires a durable Sync client'
+			);
+		}
+		await durableReady;
+		if (!deadLetters.has(operationId)) {
+			throw new Error(`Unknown Sync dead letter "${operationId}"`);
+		}
+		await queueLocalWrite(() =>
+			durable.store.transaction(durable.namespace, 'readwrite', (tx) =>
+				tx.deleteMutation(operationId)
+			)
+		);
+		deadLetters.delete(operationId);
+		updateStatus();
+	};
+
+	const subscribeStatus = (listener: (status: SyncClientStatus) => void) => {
+		statusListeners.add(listener);
+		listener(snapshotStatus());
+		return () => {
+			statusListeners.delete(listener);
+		};
+	};
+
+	const flush = async ({ timeoutMs = 10_000 }: SyncFlushOptions = {}) => {
+		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+			throw new TypeError(
+				'Sync flush timeoutMs must be a non-negative number'
+			);
+		}
+		await durableReady;
+		if (pending.length === 0) {
+			return {
+				deadLetters: deadLetters.size,
+				pending: 0,
+				timedOut: false
+			};
+		}
+		if (!connected) reconnect();
+		const timedOut = await new Promise<boolean>((resolve) => {
+			let settled = false;
+			let remove: () => void = () => undefined;
+			const timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				remove();
+				resolve(true);
+			}, timeoutMs);
+			remove = subscribeStatus((current) => {
+				if (settled || current.pending > 0) return;
+				settled = true;
+				clearTimeout(timer);
+				remove();
+				resolve(false);
+			});
+		});
+		return {
+			deadLetters: deadLetters.size,
+			pending: pending.length,
+			timedOut
+		};
+	};
+
 	let removeRuntimeClient: (() => void) | undefined;
 	const close = () => {
 		if (closed) return;
@@ -927,9 +1304,13 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			clearTimeout(reconnectTimer);
 		}
 		socket?.close();
+		for (const timer of retryTimers.values()) clearTimeout(timer);
+		retryTimers.clear();
 		entries.clear();
 		mutationOwner.clear();
 		pending.length = 0;
+		updateStatus({ connection: 'closed' });
+		statusListeners.clear();
 		removeRuntimeClient?.();
 		removeRuntimeClient = undefined;
 	};
@@ -963,7 +1344,18 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		connect();
 	};
 
-	const client = { collection, close, disconnect, reconnect };
+	const client: SyncClient = {
+		close,
+		collection,
+		discardDeadLetter,
+		disconnect,
+		flush,
+		listDeadLetters,
+		reconnect,
+		retryDeadLetter,
+		status: snapshotStatus,
+		subscribeStatus
+	};
 	removeRuntimeClient = runtime?.registerClient?.(client) ?? undefined;
 
 	return client;

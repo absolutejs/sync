@@ -3,6 +3,7 @@ import { defineCollection } from '../src/engine/collection';
 import { createSyncConnection } from '../src/engine/connection';
 import type { ServerFrame } from '../src/engine/connection';
 import { defineMutation } from '../src/engine/mutation';
+import { SyncMutationRejectionError } from '../src/reconciliation';
 import { createSyncEngine, UnauthorizedError } from '../src/engine/syncEngine';
 import type { ViewDiff } from '../src/engine/types';
 
@@ -42,6 +43,21 @@ const setup = () => {
 					row: order
 				});
 				return order;
+			}
+		})
+	);
+	engine.registerMutation(
+		defineMutation<unknown, Ctx, void>({
+			name: 'conflict',
+			handler: () => {
+				throw new SyncMutationRejectionError(
+					'conflict',
+					'order changed elsewhere',
+					{
+						code: 'STALE_ORDER',
+						details: { version: 8 }
+					}
+				);
 			}
 		})
 	);
@@ -181,10 +197,33 @@ describe('connection mutate frames', () => {
 		}
 	});
 
+	test('carries explicit conflict metadata without exposing arbitrary errors', async () => {
+		const { engine } = setup();
+		const { conn, frames } = connect(engine);
+		await conn.handle({
+			type: 'mutate',
+			mutationId: 4,
+			name: 'conflict'
+		});
+
+		expect(frames[0]).toEqual({
+			type: 'reject',
+			mutationId: 4,
+			operationId: undefined,
+			message: 'order changed elsewhere',
+			rejection: {
+				kind: 'conflict',
+				message: 'order changed elsewhere',
+				code: 'STALE_ORDER',
+				details: { version: 8 }
+			}
+		});
+	});
+
 	test('a malformed mutate frame (missing name) is rejected as malformed', async () => {
 		const { engine } = setup();
 		const { conn, frames } = connect(engine);
-		await conn.handle({ type: 'mutate', mutationId: 4 });
+		await conn.handle({ type: 'mutate', mutationId: 5 });
 
 		expect(frames[0]?.type).toBe('error');
 	});

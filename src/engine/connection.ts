@@ -2,6 +2,10 @@ import type { PresenceHandle, PresenceHub, PresenceMember } from './presence';
 import type { Subscription, SyncEngine } from './syncEngine';
 import type { FrameSerializer } from '../serializer';
 import { jsonSerializer } from '../serializer';
+import {
+	toSyncMutationRejection,
+	type SyncMutationRejection
+} from '../reconciliation';
 
 /**
  * Wire protocol for the sync-engine WebSocket. One connection multiplexes many
@@ -99,6 +103,8 @@ export type ServerFrame<T = unknown> =
 			mutationId: number;
 			operationId?: string;
 			message: string;
+			/** Typed in 2.22; absent frames are treated as permanent. */
+			rejection?: SyncMutationRejection;
 	  };
 
 export type SyncConnectionOptions = {
@@ -394,12 +400,13 @@ export const createSyncConnection = ({
 					result
 				});
 			} catch (error) {
+				const rejection = toSyncMutationRejection(error);
 				send({
 					type: 'reject',
 					mutationId: frame.mutationId,
 					operationId: frame.operationId,
-					message:
-						error instanceof Error ? error.message : String(error)
+					message: rejection.message,
+					rejection
 				});
 			}
 			return;

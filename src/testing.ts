@@ -135,6 +135,33 @@ export const inspectSyncLocalStoreConformance = async ({
 		)
 			issues.push('atomic state did not round-trip');
 
+		await store.transaction(accountA, 'readwrite', async (tx) => {
+			const pending = await tx.getMutation('install-a:op-1');
+			if (pending === undefined)
+				throw new Error('missing conformance mutation');
+			await tx.putMutation({
+				...pending,
+				deadLetteredAt: 2,
+				lastError: 'stale row',
+				rejection: {
+					kind: 'conflict',
+					message: 'stale row',
+					code: 'STALE_ROW',
+					details: { version: 8 }
+				},
+				state: 'dead-letter'
+			});
+		});
+		const deadLetter = await store.transaction(accountA, 'readonly', (tx) =>
+			tx.getMutation('install-a:op-1')
+		);
+		if (
+			deadLetter?.state !== 'dead-letter' ||
+			deadLetter.rejection?.kind !== 'conflict' ||
+			deadLetter.rejection.code !== 'STALE_ROW'
+		)
+			issues.push('dead-letter metadata did not round-trip');
+
 		try {
 			await store.transaction(accountB, 'readwrite', async (tx) => {
 				await tx.putCollection('tasks', {

@@ -31,6 +31,16 @@ export type {
 } from './engine/socket';
 export { jsonSerializer } from './serializer';
 export type { FrameSerializer } from './serializer';
+export {
+	SyncMutationRejectedError,
+	SyncMutationRejectionError,
+	toSyncMutationRejection
+} from './reconciliation';
+export type {
+	SyncMutationRejection,
+	SyncMutationRejectionErrorOptions,
+	SyncMutationRejectionKind
+} from './reconciliation';
 export { syncCdc } from './engine/cdc';
 export type { SyncCdcOptions } from './engine/cdc';
 export { syncDevtools } from './devtools';

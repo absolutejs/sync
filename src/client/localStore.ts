@@ -1,4 +1,5 @@
 import type { RowKey } from '../engine/types';
+import type { SyncMutationRejection } from '../reconciliation';
 
 /** Serializable optimistic effect that can be replayed after process death. */
 export type LocalOptimisticOperation =
@@ -19,6 +20,13 @@ export type LocalMutationRecord = {
 	createdAt: number;
 	attempts: number;
 	lastError?: string;
+	/** Missing means pending for compatibility with records written before 2.22. */
+	state?: 'dead-letter' | 'pending';
+	/** Earliest wall-clock time at which an automatic retry may be sent. */
+	nextAttemptAt?: number;
+	/** Typed server outcome retained for remediation and diagnostics. */
+	rejection?: SyncMutationRejection;
+	deadLetteredAt?: number;
 };
 
 /** Server-authoritative collection state saved for offline reads and resume. */

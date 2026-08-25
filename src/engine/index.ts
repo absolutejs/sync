@@ -142,6 +142,16 @@ export {
 	RetriesExhaustedError
 } from './retry';
 export type { ExponentialBackoffOptions, RetryPolicy } from './retry';
+export {
+	SyncMutationRejectedError,
+	SyncMutationRejectionError,
+	toSyncMutationRejection
+} from '../reconciliation';
+export type {
+	SyncMutationRejection,
+	SyncMutationRejectionErrorOptions,
+	SyncMutationRejectionKind
+} from '../reconciliation';
 
 export {
 	CdcConsumerSlowError,

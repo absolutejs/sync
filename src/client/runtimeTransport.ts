@@ -4,6 +4,8 @@ export type SyncClientRuntimeTransport = {
 	durable?: {
 		createId?: () => string;
 		onError?: (error: unknown) => void;
+		maxAttempts?: number;
+		retryBackoff?: (attempt: number) => number;
 		store: SyncLocalStore;
 		namespace: string;
 	};

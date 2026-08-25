@@ -3,7 +3,8 @@ import { IDBFactory } from 'fake-indexeddb';
 import {
 	createIndexedDbSyncLocalStore,
 	createMemorySyncLocalStore,
-	createSyncClient
+	createSyncClient,
+	SyncMutationRejectedError
 } from '../src/client';
 import type { LocalMutationRecord, SyncLocalStore } from '../src/client';
 import { installSyncClientRuntimeTransport } from '../src/client/runtimeTransport';
@@ -467,6 +468,236 @@ describe('createSyncClient durable profile', () => {
 				tx.listMutations()
 			)
 		).toHaveLength(1);
+		client.close();
+	});
+
+	test('retains conflicts as dead letters and supports explicit retry', async () => {
+		const store = createMemorySyncLocalStore();
+		let sequence = 0;
+		const client = createSyncClient({
+			url: 'ws://test/sync/ws',
+			webSocketImpl: Impl,
+			reconnectMs: 0,
+			durable: {
+				store,
+				namespace: 'account-a',
+				createId: () => `id-${++sequence}`
+			}
+		});
+		const orders = client.collection<Order>({ collection: 'orders' });
+		const socket = await waitForSocket();
+		socket.open();
+		await tick();
+		const result = orders.mutate({
+			name: 'orders:update',
+			optimisticOperations: [
+				{ type: 'insert', row: { id: 3, status: 'optimistic' } }
+			]
+		});
+		await waitFor(
+			() => socket.frames().some((frame) => frame.type === 'mutate'),
+			'mutation was not sent'
+		);
+		const sent = socket.frames().find((frame) => frame.type === 'mutate');
+		socket.emit({
+			type: 'reject',
+			mutationId: sent.mutationId,
+			operationId: sent.operationId,
+			message: 'server row is newer',
+			rejection: {
+				kind: 'conflict',
+				message: 'server row is newer',
+				code: 'STALE_ROW',
+				details: { version: 9 }
+			}
+		});
+
+		await expect(result).rejects.toBeInstanceOf(SyncMutationRejectedError);
+		expect(orders.get().data).toEqual([]);
+		expect(client.status()).toEqual(
+			expect.objectContaining({ deadLetters: 1, pending: 0 })
+		);
+		const [deadLetter] = await client.listDeadLetters();
+		expect(deadLetter).toEqual(
+			expect.objectContaining({
+				operationId: sent.operationId,
+				state: 'dead-letter',
+				rejection: expect.objectContaining({
+					kind: 'conflict',
+					code: 'STALE_ROW'
+				})
+			})
+		);
+
+		await client.retryDeadLetter(sent.operationId);
+		expect(orders.get().data).toEqual([{ id: 3, status: 'optimistic' }]);
+		await waitFor(
+			() =>
+				socket.frames().filter((frame) => frame.type === 'mutate')
+					.length === 2,
+			'retried mutation was not sent'
+		);
+		const retried = socket
+			.frames()
+			.filter((frame) => frame.type === 'mutate')
+			.at(-1);
+		expect(retried.operationId).toBe(sent.operationId);
+		socket.emit({
+			type: 'ack',
+			mutationId: retried.mutationId,
+			operationId: retried.operationId
+		});
+		await waitFor(
+			() => client.status().pending === 0,
+			'retried operation did not settle'
+		);
+		expect(await client.listDeadLetters()).toEqual([]);
+		client.close();
+	});
+
+	test('bounds explicitly retryable failures before dead-lettering', async () => {
+		const store = createMemorySyncLocalStore();
+		let sequence = 0;
+		const client = createSyncClient({
+			url: 'ws://test/sync/ws',
+			webSocketImpl: Impl,
+			reconnectMs: 0,
+			durable: {
+				store,
+				namespace: 'account-a',
+				createId: () => `id-${++sequence}`,
+				maxAttempts: 2,
+				retryBackoff: () => 0
+			}
+		});
+		const orders = client.collection<Order>({ collection: 'orders' });
+		const socket = await waitForSocket();
+		socket.open();
+		await tick();
+		const result = orders.mutate({ name: 'orders:create' });
+		await waitFor(
+			() => socket.frames().some((frame) => frame.type === 'mutate'),
+			'first mutation attempt was not sent'
+		);
+		const rejection = {
+			kind: 'retryable' as const,
+			message: 'database temporarily unavailable'
+		};
+		const first = socket.frames().find((frame) => frame.type === 'mutate');
+		socket.emit({
+			type: 'reject',
+			mutationId: first.mutationId,
+			operationId: first.operationId,
+			message: rejection.message,
+			rejection
+		});
+		await waitFor(
+			() =>
+				socket.frames().filter((frame) => frame.type === 'mutate')
+					.length === 2,
+			'second mutation attempt was not sent'
+		);
+		const second = socket
+			.frames()
+			.filter((frame) => frame.type === 'mutate')
+			.at(-1);
+		socket.emit({
+			type: 'reject',
+			mutationId: second.mutationId,
+			operationId: second.operationId,
+			message: rejection.message,
+			rejection
+		});
+
+		await expect(result).rejects.toBeInstanceOf(SyncMutationRejectedError);
+		await tick();
+		expect(
+			socket.frames().filter((frame) => frame.type === 'mutate')
+		).toHaveLength(2);
+		expect((await client.listDeadLetters())[0]?.attempts).toBe(2);
+		client.close();
+	});
+
+	test('flush waits within a finite budget and status observes a successful push', async () => {
+		const store = createMemorySyncLocalStore();
+		let sequence = 0;
+		const client = createSyncClient({
+			url: 'ws://test/sync/ws',
+			webSocketImpl: Impl,
+			reconnectMs: 0,
+			durable: {
+				store,
+				namespace: 'account-a',
+				createId: () => `id-${++sequence}`
+			}
+		});
+		const orders = client.collection<Order>({ collection: 'orders' });
+		const socket = await waitForSocket();
+		socket.open();
+		await tick();
+		const mutation = orders.mutate({ name: 'orders:create' });
+		await waitFor(
+			() => socket.frames().some((frame) => frame.type === 'mutate'),
+			'mutation was not sent'
+		);
+		const sent = socket.frames().find((frame) => frame.type === 'mutate');
+		const flushing = client.flush({ timeoutMs: 100 });
+		socket.emit({
+			type: 'ack',
+			mutationId: sent.mutationId,
+			operationId: sent.operationId
+		});
+		await mutation;
+		expect(await flushing).toEqual({
+			deadLetters: 0,
+			pending: 0,
+			timedOut: false
+		});
+		expect(client.status()).toEqual(
+			expect.objectContaining({
+				connection: 'online',
+				pending: 0,
+				lastSuccessfulPushAt: expect.any(Number)
+			})
+		);
+		client.close();
+	});
+
+	test('restores and explicitly discards a retained dead letter', async () => {
+		const store = createMemorySyncLocalStore();
+		await store.transaction('account-a', 'readwrite', async (tx) => {
+			await tx.setInstallationId('installation-a');
+			await tx.putMutation({
+				args: {},
+				attempts: 1,
+				createdAt: 1,
+				deadLetteredAt: 2,
+				inverse: [],
+				name: 'orders:update',
+				operationId: 'installation-a:operation-a',
+				optimistic: [],
+				rejection: { kind: 'permanent', message: 'denied' },
+				state: 'dead-letter'
+			});
+		});
+		const client = createSyncClient({
+			url: 'ws://test/sync/ws',
+			webSocketImpl: Impl,
+			reconnectMs: 0,
+			durable: { store, namespace: 'account-a' }
+		});
+		await waitForSocket();
+		await waitFor(
+			() => client.status().deadLetters === 1,
+			'dead letter was not restored'
+		);
+		await client.discardDeadLetter('installation-a:operation-a');
+		expect(await client.listDeadLetters()).toEqual([]);
+		expect(
+			await store.transaction('account-a', 'readonly', (tx) =>
+				tx.listMutations()
+			)
+		).toEqual([]);
 		client.close();
 	});
 });
