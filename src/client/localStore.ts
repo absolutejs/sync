@@ -44,6 +44,188 @@ export type LocalCollectionRecord<T = unknown> = {
 
 export type SyncLocalStoreMode = 'readonly' | 'readwrite';
 
+export type SyncLocalMigrationContext = {
+	/** Principal partition that owns the record. Never changes during migration. */
+	namespace: string;
+	/** Collection key or stable mutation operation id. */
+	key: string;
+};
+
+export type SyncLocalMigrationResult<T> = T | null | undefined | void;
+
+/**
+ * One synchronous, deterministic local-data upgrade. A returned value replaces
+ * the record, `null` deletes it, and `undefined` leaves it unchanged. Keeping
+ * transforms synchronous lets IndexedDB and SQLite apply the same plan inside
+ * one native transaction without an unsafe gap where the host may suspend.
+ */
+export type SyncLocalStoreMigration = {
+	/** Version produced by this step. Steps must be contiguous. */
+	toVersion: number;
+	migrateCollection?: (
+		record: LocalCollectionRecord,
+		context: SyncLocalMigrationContext
+	) => SyncLocalMigrationResult<LocalCollectionRecord>;
+	migrateMutation?: (
+		record: LocalMutationRecord,
+		context: SyncLocalMigrationContext
+	) => SyncLocalMigrationResult<LocalMutationRecord>;
+};
+
+/** Versioned logical schema shared by web IndexedDB and native SQLite. */
+export type SyncLocalStoreSchema = {
+	/** Desired schema version. Version 1 is the legacy durable-store shape. */
+	version: number;
+	/** Oldest on-device version this build can upgrade. */
+	minimumCompatibleVersion?: number;
+	migrations?: readonly SyncLocalStoreMigration[];
+};
+
+export type SyncLocalStoreSchemaStatus = {
+	storedVersion: number;
+	targetVersion: number;
+	minimumCompatibleVersion: number;
+	state: 'ready';
+};
+
+export class SyncLocalStoreSchemaError extends Error {
+	readonly code:
+		| 'INVALID_PLAN'
+		| 'MIGRATION_MISSING'
+		| 'SCHEMA_TOO_NEW'
+		| 'SCHEMA_TOO_OLD';
+	readonly storedVersion?: number;
+	readonly targetVersion?: number;
+
+	constructor(
+		code: SyncLocalStoreSchemaError['code'],
+		message: string,
+		versions: { storedVersion?: number; targetVersion?: number } = {}
+	) {
+		super(message);
+		this.name = 'SyncLocalStoreSchemaError';
+		this.code = code;
+		this.storedVersion = versions.storedVersion;
+		this.targetVersion = versions.targetVersion;
+	}
+}
+
+const positiveVersion = (value: number, label: string): number => {
+	if (!Number.isSafeInteger(value) || value < 1)
+		throw new SyncLocalStoreSchemaError(
+			'INVALID_PLAN',
+			`${label} must be a positive safe integer`
+		);
+	return value;
+};
+
+/** Validate a plan and return the exact ordered upgrade path. */
+export const resolveSyncLocalMigrations = (
+	storedVersion: number,
+	schema: SyncLocalStoreSchema = { version: 1 }
+): {
+	minimumCompatibleVersion: number;
+	steps: readonly SyncLocalStoreMigration[];
+	targetVersion: number;
+} => {
+	positiveVersion(storedVersion, 'Stored Sync schema version');
+	const targetVersion = positiveVersion(
+		schema.version,
+		'Target Sync schema version'
+	);
+	const migrations = [...(schema.migrations ?? [])].sort(
+		(a, b) => a.toVersion - b.toVersion
+	);
+	const versions = new Set<number>();
+	for (const migration of migrations) {
+		positiveVersion(migration.toVersion, 'Sync migration toVersion');
+		if (versions.has(migration.toVersion))
+			throw new SyncLocalStoreSchemaError(
+				'INVALID_PLAN',
+				`Sync migration ${migration.toVersion} is declared more than once`
+			);
+		versions.add(migration.toVersion);
+	}
+	const inferredMinimum = migrations[0]
+		? migrations[0].toVersion - 1
+		: targetVersion;
+	const minimumCompatibleVersion = positiveVersion(
+		schema.minimumCompatibleVersion ?? inferredMinimum,
+		'Minimum compatible Sync schema version'
+	);
+	if (minimumCompatibleVersion > targetVersion)
+		throw new SyncLocalStoreSchemaError(
+			'INVALID_PLAN',
+			'Minimum compatible Sync schema version cannot exceed its target'
+		);
+	if (storedVersion > targetVersion)
+		throw new SyncLocalStoreSchemaError(
+			'SCHEMA_TOO_NEW',
+			`Stored Sync schema ${storedVersion} is newer than this runtime's schema ${targetVersion}`,
+			{ storedVersion, targetVersion }
+		);
+	if (storedVersion < minimumCompatibleVersion)
+		throw new SyncLocalStoreSchemaError(
+			'SCHEMA_TOO_OLD',
+			`Stored Sync schema ${storedVersion} is older than the minimum compatible schema ${minimumCompatibleVersion}`,
+			{ storedVersion, targetVersion }
+		);
+
+	const steps: SyncLocalStoreMigration[] = [];
+	for (let version = storedVersion + 1; version <= targetVersion; version++) {
+		const migration = migrations.find(
+			(candidate) => candidate.toVersion === version
+		);
+		if (migration === undefined)
+			throw new SyncLocalStoreSchemaError(
+				'MIGRATION_MISSING',
+				`Sync migration ${version - 1} -> ${version} is missing`,
+				{ storedVersion, targetVersion }
+			);
+		steps.push(migration);
+	}
+	return { minimumCompatibleVersion, steps, targetVersion };
+};
+
+export const migrateSyncLocalCollectionRecord = (
+	record: LocalCollectionRecord,
+	context: SyncLocalMigrationContext,
+	steps: readonly SyncLocalStoreMigration[]
+): LocalCollectionRecord | null => {
+	let current: LocalCollectionRecord | null = structuredClone(record);
+	for (const step of steps) {
+		if (current === null) break;
+		const next: SyncLocalMigrationResult<LocalCollectionRecord> =
+			step.migrateCollection?.(structuredClone(current), context);
+		if (next === null) current = null;
+		else if (next !== undefined) current = structuredClone(next);
+	}
+	return current;
+};
+
+export const migrateSyncLocalMutationRecord = (
+	record: LocalMutationRecord,
+	context: SyncLocalMigrationContext,
+	steps: readonly SyncLocalStoreMigration[]
+): LocalMutationRecord | null => {
+	let current: LocalMutationRecord | null = structuredClone(record);
+	for (const step of steps) {
+		if (current === null) break;
+		const next: SyncLocalMigrationResult<LocalMutationRecord> =
+			step.migrateMutation?.(structuredClone(current), context);
+		if (next === null) current = null;
+		else if (next !== undefined) {
+			if (next.operationId !== context.key)
+				throw new SyncLocalStoreSchemaError(
+					'INVALID_PLAN',
+					'Sync migrations cannot change a mutation operationId'
+				);
+			current = structuredClone(next);
+		}
+	}
+	return current;
+};
+
 /**
  * One atomic view of an account/tenant namespace.
  *
@@ -87,6 +269,8 @@ export type SyncLocalStore = {
 	) => Promise<R>;
 	/** Delete one signed-out principal without affecting any other account. */
 	deleteNamespace: (namespace: string) => Promise<void>;
+	/** Inspect the schema atomically prepared before local reads. */
+	getSchemaStatus?: () => Promise<SyncLocalStoreSchemaStatus>;
 };
 
 export type IndexedDbSyncLocalStoreOptions = {
@@ -94,6 +278,12 @@ export type IndexedDbSyncLocalStoreOptions = {
 	databaseName?: string;
 	/** Override for tests or non-window runtimes. Defaults to global IndexedDB. */
 	indexedDB?: IDBFactory;
+	/** Generated logical data-upgrade plan. Defaults to legacy schema 1. */
+	storageSchema?: SyncLocalStoreSchema;
+};
+
+export type MemorySyncLocalStoreOptions = {
+	storageSchema?: SyncLocalStoreSchema;
 };
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -124,7 +314,19 @@ const cloneNamespace = (source: MemoryNamespace): MemoryNamespace => ({
  * conformance model for durable adapters. Transactions are serialized and
  * roll back on throw.
  */
-export const createMemorySyncLocalStore = (): SyncLocalStore => {
+export const createMemorySyncLocalStore = ({
+	storageSchema = { version: 1 }
+}: MemorySyncLocalStoreOptions = {}): SyncLocalStore => {
+	const resolvedSchema = resolveSyncLocalMigrations(
+		storageSchema.version,
+		storageSchema
+	);
+	const schemaStatus: SyncLocalStoreSchemaStatus = {
+		minimumCompatibleVersion: resolvedSchema.minimumCompatibleVersion,
+		state: 'ready',
+		storedVersion: storageSchema.version,
+		targetVersion: storageSchema.version
+	};
 	const namespaces = new Map<string, MemoryNamespace>();
 	let tail = Promise.resolve();
 	const withLock = async <R>(run: () => Promise<R>): Promise<R> => {
@@ -214,6 +416,7 @@ export const createMemorySyncLocalStore = (): SyncLocalStore => {
 
 	return {
 		transaction,
+		getSchemaStatus: async () => ({ ...schemaStatus }),
 		deleteNamespace: async (namespace) => {
 			await withLock(async () => {
 				namespaces.delete(namespace);
@@ -266,6 +469,31 @@ const deleteIndexRows = (index: IDBIndex, namespace: string): Promise<void> =>
 		};
 	});
 
+const migrateIndexedRows = <T>(
+	request: IDBRequest<IDBCursorWithValue | null>,
+	migrate: (row: T) => T | null
+): Promise<void> =>
+	new Promise((resolve, reject) => {
+		request.onerror = () => reject(request.error);
+		request.onsuccess = () => {
+			const cursor = request.result;
+			if (cursor === null) {
+				resolve();
+				return;
+			}
+			let next: T | null;
+			try {
+				next = migrate(cursor.value as T);
+			} catch (error) {
+				reject(error);
+				return;
+			}
+			const write = next === null ? cursor.delete() : cursor.update(next);
+			write.onerror = () => reject(write.error);
+			write.onsuccess = () => cursor.continue();
+		};
+	});
+
 /**
  * Browser/PWA implementation of {@link SyncLocalStore}. Confirmed collection
  * state, cursors, installation identity, and the mutation outbox share one
@@ -273,7 +501,8 @@ const deleteIndexRows = (index: IDBIndex, namespace: string): Promise<void> =>
  */
 export const createIndexedDbSyncLocalStore = ({
 	databaseName = 'absolutejs-sync-local-v1',
-	indexedDB: factory = globalThis.indexedDB
+	indexedDB: factory = globalThis.indexedDB,
+	storageSchema = { version: 1 }
 }: IndexedDbSyncLocalStoreOptions = {}): SyncLocalStore => {
 	if (factory === undefined) {
 		throw new Error(
@@ -284,18 +513,25 @@ export const createIndexedDbSyncLocalStore = ({
 	let databasePromise: Promise<IDBDatabase> | undefined;
 	const database = () => {
 		databasePromise ??= new Promise<IDBDatabase>((resolve, reject) => {
-			const request = factory.open(databaseName, 1);
+			const request = factory.open(databaseName, 2);
 			request.onupgradeneeded = () => {
 				const db = request.result;
-				db.createObjectStore('metadata');
-				const collections = db.createObjectStore('collections', {
-					keyPath: ['namespace', 'key']
-				});
-				collections.createIndex('namespace', 'namespace');
-				const mutations = db.createObjectStore('mutations', {
-					keyPath: ['namespace', 'operationId']
-				});
-				mutations.createIndex('namespace', 'namespace');
+				if (!db.objectStoreNames.contains('metadata'))
+					db.createObjectStore('metadata');
+				if (!db.objectStoreNames.contains('collections')) {
+					const collections = db.createObjectStore('collections', {
+						keyPath: ['namespace', 'key']
+					});
+					collections.createIndex('namespace', 'namespace');
+				}
+				if (!db.objectStoreNames.contains('mutations')) {
+					const mutations = db.createObjectStore('mutations', {
+						keyPath: ['namespace', 'operationId']
+					});
+					mutations.createIndex('namespace', 'namespace');
+				}
+				if (!db.objectStoreNames.contains('schema'))
+					db.createObjectStore('schema');
 			};
 			request.onsuccess = () => {
 				request.result.onversionchange = () => request.result.close();
@@ -310,6 +546,78 @@ export const createIndexedDbSyncLocalStore = ({
 		return databasePromise;
 	};
 
+	let schemaPromise: Promise<SyncLocalStoreSchemaStatus> | undefined;
+	const prepareSchema = () => {
+		schemaPromise ??= database().then(async (db) => {
+			const native = db.transaction(
+				['schema', 'collections', 'mutations'],
+				'readwrite'
+			);
+			const completed = transactionComplete(native);
+			try {
+				const schemaStore = native.objectStore('schema');
+				const savedVersion = await requestResult<unknown>(
+					schemaStore.get('logicalVersion')
+				);
+				const storedVersion =
+					typeof savedVersion === 'number' ? savedVersion : 1;
+				const resolved = resolveSyncLocalMigrations(
+					storedVersion,
+					storageSchema
+				);
+				if (resolved.steps.length > 0) {
+					await migrateIndexedRows<IndexedCollectionRow>(
+						native.objectStore('collections').openCursor(),
+						(row) => {
+							const { namespace, key, ...record } = row;
+							const migrated = migrateSyncLocalCollectionRecord(
+								record,
+								{ key, namespace },
+								resolved.steps
+							);
+							return migrated === null
+								? null
+								: { ...migrated, key, namespace };
+						}
+					);
+					await migrateIndexedRows<IndexedMutationRow>(
+						native.objectStore('mutations').openCursor(),
+						(row) => {
+							const { namespace, ...record } = row;
+							const migrated = migrateSyncLocalMutationRecord(
+								record,
+								{ key: record.operationId, namespace },
+								resolved.steps
+							);
+							return migrated === null
+								? null
+								: { ...migrated, namespace };
+						}
+					);
+				}
+				await requestResult(
+					schemaStore.put(resolved.targetVersion, 'logicalVersion')
+				);
+				await completed;
+				return {
+					minimumCompatibleVersion: resolved.minimumCompatibleVersion,
+					state: 'ready' as const,
+					storedVersion: resolved.targetVersion,
+					targetVersion: resolved.targetVersion
+				};
+			} catch (error) {
+				try {
+					native.abort();
+				} catch {
+					// A failed request may already have aborted the transaction.
+				}
+				await completed.catch(() => {});
+				throw error;
+			}
+		});
+		return schemaPromise;
+	};
+
 	const transaction: SyncLocalStore['transaction'] = async (
 		namespace,
 		mode,
@@ -318,6 +626,7 @@ export const createIndexedDbSyncLocalStore = ({
 		if (namespace.length === 0) {
 			throw new Error('Sync local-store namespace must not be empty');
 		}
+		await prepareSchema();
 		const db = await database();
 		const native = db.transaction(
 			['metadata', 'collections', 'mutations'],
@@ -416,7 +725,9 @@ export const createIndexedDbSyncLocalStore = ({
 
 	return {
 		transaction,
+		getSchemaStatus: async () => ({ ...(await prepareSchema()) }),
 		deleteNamespace: async (namespace) => {
+			await prepareSchema();
 			const db = await database();
 			const native = db.transaction(
 				['metadata', 'collections', 'mutations'],

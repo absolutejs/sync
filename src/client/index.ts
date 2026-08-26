@@ -57,15 +57,25 @@ export {
 	createMemorySyncLocalStore,
 	createIndexedDbSyncLocalStore,
 	createSyncOperationId,
-	ensureSyncInstallationId
+	ensureSyncInstallationId,
+	migrateSyncLocalCollectionRecord,
+	migrateSyncLocalMutationRecord,
+	resolveSyncLocalMigrations,
+	SyncLocalStoreSchemaError
 } from './localStore';
 export type {
 	LocalCollectionRecord,
 	LocalMutationRecord,
 	LocalOptimisticOperation,
 	IndexedDbSyncLocalStoreOptions,
+	MemorySyncLocalStoreOptions,
+	SyncLocalMigrationContext,
+	SyncLocalMigrationResult,
 	SyncLocalStore,
+	SyncLocalStoreMigration,
 	SyncLocalStoreMode,
+	SyncLocalStoreSchema,
+	SyncLocalStoreSchemaStatus,
 	SyncLocalTransaction
 } from './localStore';
 export * from './runtimeTransport';

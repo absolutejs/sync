@@ -540,7 +540,7 @@ tenant to a shard adds zero standing connections.
 | `localStorageCollectionCache(key)`                             | `localStorage`-backed local-first read cache: confirmed rows survive a reload, resume from the cached version.                                                                                                                                                         |
 | `indexedDbCollectionCache({ key, ... })`                       | IndexedDB-backed local-first read cache — durable, large-capacity. Same resume semantics, async storage.                                                                                                                                                               |
 | `createMemorySyncLocalStore()`                                 | Reference implementation of the next-generation transactional local store: principal namespaces, installation identity, confirmed rows/cursors, and a serializable operation outbox commit atomically.                                                                 |
-| `createIndexedDbSyncLocalStore()`                              | Browser/PWA implementation of the same transaction contract. Multi-collection frames, confirmed cursors, installation identity, and the operation outbox commit atomically in IndexedDB.                                                                               |
+| `createIndexedDbSyncLocalStore()`                              | Browser/PWA implementation of the same transaction contract. Multi-collection frames, confirmed cursors, installation identity, operation outbox, and generated schema migrations commit atomically in IndexedDB.                                                      |
 | `runHeadlessSync()`                                            | One bounded HTTP push/pull transaction for a worker or native runner. It can discover persisted `id`-keyed collection descriptors automatically and refuses redirects.                                                                                                 |
 | `ensureSyncInstallationId(store, namespace)`                   | Atomically creates or returns the stable installation identity used by `createSyncOperationId`.                                                                                                                                                                        |
 
@@ -573,6 +573,35 @@ clients reject acknowledgments that do not echo the exact operation ID. Database
 writes and receipt results share the adapter transaction. HTTP/email/payment
 effects must still be handed to a transactional outbox rather than performed
 directly in a replayable mutation.
+
+Installed data upgrades use a logical schema plan, independent of IndexedDB's
+physical database version. AbsoluteJS can generate this plan; direct users can
+supply the same contract explicitly. Every step runs across all principal
+partitions in one transaction. Returning `null` deletes a record, returning a
+record replaces it, and returning `undefined` preserves it. Migration transforms
+must be synchronous so mobile operating-system suspension cannot split a step.
+
+```ts
+const store = createIndexedDbSyncLocalStore({
+	storageSchema: {
+		version: 2,
+		migrations: [
+			{
+				toVersion: 2,
+				migrateCollection(record) {
+					return {
+						...record,
+						rows: record.rows.map((row) => ({
+							...(row as object),
+							archived: false
+						}))
+					};
+				}
+			}
+		]
+	}
+});
+```
 
 ### Framework bindings — `@absolutejs/sync/{react,vue,svelte,angular}`
 
