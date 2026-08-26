@@ -5,6 +5,7 @@ import {
 	createMemorySyncLocalStore,
 	createSyncOperationId,
 	ensureSyncInstallationId,
+	resolveSyncLocalSchemaComponents,
 	resolveSyncLocalMigrations,
 	SyncLocalStoreSchemaError
 } from '../src/client/localStore';
@@ -290,6 +291,28 @@ test('rejects duplicate component metadata before opening storage', () => {
 			}
 		})
 	).toThrow('declared more than once');
+});
+
+test('installs a new component from its supported compatibility baseline', () => {
+	const resolved = resolveSyncLocalSchemaComponents(
+		{ '@absolutejs/app': 1 },
+		{
+			components: [
+				{ id: '@absolutejs/app', version: 1 },
+				{
+					id: '@absolutejs/new-pack',
+					minimumCompatibleVersion: 3,
+					migrations: [{ toVersion: 4 }, { toVersion: 5 }],
+					version: 5
+				}
+			]
+		}
+	);
+	expect(resolved.components[1]).toMatchObject({
+		id: '@absolutejs/new-pack',
+		steps: [{ toVersion: 4 }, { toVersion: 5 }],
+		targetVersion: 5
+	});
 });
 
 type StoreFactory = () => SyncLocalStore;

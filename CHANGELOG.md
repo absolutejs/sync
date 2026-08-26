@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.26.1] — 2026-08-25
+
+- Initialize newly installed schema components from their declared compatible
+  baseline while continuing to adopt the app's legacy logical-version ledger.
+
 ## [2.26.0] — 2026-08-25
 
 - Compose application and package-owned local schemas with independent stable

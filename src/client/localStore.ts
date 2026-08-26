@@ -247,13 +247,21 @@ export const resolveSyncLocalSchemaComponents = (
 	orphanedComponents: string[];
 } => {
 	const components = normalizeSyncLocalSchemaComponents(schema).map(
-		(component) => ({
-			id: component.id,
-			...resolveSyncLocalMigrations(
-				storedVersions[component.id] ?? 1,
+		(component) => {
+			const current = resolveSyncLocalMigrations(
+				component.version,
 				component
-			)
-		})
+			);
+
+			return {
+				id: component.id,
+				...resolveSyncLocalMigrations(
+					storedVersions[component.id] ??
+						current.minimumCompatibleVersion,
+					component
+				)
+			};
+		}
 	);
 	const active = new Set(components.map((component) => component.id));
 	const orphanedComponents = Object.keys(storedVersions)
@@ -789,11 +797,10 @@ export const createIndexedDbSyncLocalStore = ({
 						storedVersions[id] = version as number;
 					}
 				if (
-					!isSchemaBundle(storageSchema) &&
-					storedVersions['@absolutejs/app'] === undefined
+					storedVersions['@absolutejs/app'] === undefined &&
+					typeof savedVersion === 'number'
 				)
-					storedVersions['@absolutejs/app'] =
-						typeof savedVersion === 'number' ? savedVersion : 1;
+					storedVersions['@absolutejs/app'] = savedVersion;
 				const resolved = resolveSyncLocalSchemaComponents(
 					storedVersions,
 					storageSchema
