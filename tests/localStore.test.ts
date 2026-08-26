@@ -157,24 +157,34 @@ for (const [adapter, create] of [
 						protection: 'required',
 						onProtectionUnavailable: 'memory-only'
 					}
+				],
+				mutations: [
+					{
+						match: 'tasks:*',
+						onProtectionUnavailable: 'memory-only',
+						protection: 'required',
+						sensitivity: 'private'
+					}
 				]
 			}),
 			() => 100
 		);
 		await expect(
-			store.transaction('account', 'readwrite', (tx) =>
-				tx.putCollection('private', {
+			store.transaction('account', 'readwrite', async (tx) => {
+				await tx.putCollection('private', {
 					collection: 'private',
 					rows: [{ id: 1 }],
 					version: 1
-				})
-			)
+				});
+				await tx.putMutation(operation('private-op'));
+			})
 		).resolves.toBeUndefined();
 		await expect(
-			store.transaction('account', 'readonly', (tx) =>
-				tx.getCollection('private')
-			)
-		).resolves.toBeUndefined();
+			store.transaction('account', 'readonly', async (tx) => ({
+				collection: await tx.getCollection('private'),
+				mutations: await tx.listMutations()
+			}))
+		).resolves.toEqual({ collection: undefined, mutations: [] });
 	});
 }
 

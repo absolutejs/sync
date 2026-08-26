@@ -642,9 +642,9 @@ mutation names and deterministic `*` globs. Rules cover sensitivity, durable or
 memory-only persistence, whole-projection expiry, eviction priority, and a
 per-principal logical byte ceiling. Private/secret data is rejected unless it
 requires a protection provider or remains memory-only. A protected collection
-may declare `onProtectionUnavailable: 'memory-only'` so the same pack is
-encrypted on native while a browser without an audited key provider keeps only
-the live in-memory view.
+or mutation may declare `onProtectionUnavailable: 'memory-only'` so the same
+pack is encrypted and durable on native while a browser without an audited key
+provider keeps only the live in-memory view or online-only mutation.
 
 Quota enforcement never truncates a collection into a misleading partial
 result. It evicts complete cached projections in disposable/normal/critical

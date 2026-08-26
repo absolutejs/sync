@@ -143,6 +143,8 @@ export type SyncLocalMutationPolicy = {
 	sensitivity?: 'public' | 'private' | 'secret';
 	persistence?: SyncLocalPersistence;
 	protection?: SyncLocalProtection;
+	/** Fail closed without a protector; optionally keep the live mutation memory-only. */
+	onProtectionUnavailable?: 'error' | 'memory-only';
 };
 
 export type SyncLocalDataPolicy = {
@@ -295,6 +297,14 @@ export const validateSyncLocalDataPolicy = (
 	}
 	for (const [index, rule] of (policy.mutations ?? []).entries()) {
 		validatePolicyMatch(rule.match, `${label}.mutations[${index}]`);
+		if (
+			rule.persistence === 'memory-only' &&
+			rule.protection === 'required'
+		)
+			throw new SyncLocalDataPolicyError(
+				'INVALID_POLICY',
+				`${label}.mutations[${index}] cannot require at-rest protection when it is memory-only.`
+			);
 		if (
 			rule.sensitivity !== undefined &&
 			rule.sensitivity !== 'public' &&
@@ -712,7 +722,9 @@ export const runSyncLocalPolicyTransaction = async <R>(options: {
 	};
 	const collectionPolicy = (record: LocalCollectionRecord, key: string) =>
 		resolveSyncLocalCollectionPolicy(policy, record.collection ?? key);
-	const unavailableMemoryOnly = (rule: SyncLocalCollectionPolicy) =>
+	const unavailableMemoryOnly = (
+		rule: SyncLocalCollectionPolicy | SyncLocalMutationPolicy
+	) =>
 		rule.protection === 'required' &&
 		!options.protected &&
 		rule.onProtectionUnavailable === 'memory-only';
@@ -786,19 +798,16 @@ export const runSyncLocalPolicyTransaction = async <R>(options: {
 		},
 		getMutation: async (operationId) => {
 			const record = await raw.getMutation(operationId);
+			if (!record) return undefined;
+			const rule = resolveSyncLocalMutationPolicy(policy, record.name);
 			if (
-				record &&
-				resolveSyncLocalMutationPolicy(policy, record.name)
-					.persistence === 'memory-only'
+				rule.persistence === 'memory-only' ||
+				unavailableMemoryOnly(rule)
 			) {
 				if (mode === 'readwrite') await raw.deleteMutation(operationId);
 				return undefined;
 			}
-			if (
-				record &&
-				resolveSyncLocalMutationPolicy(policy, record.name)
-					.protection === 'required'
-			)
+			if (rule.protection === 'required')
 				requireProtection('mutation', record.name);
 			return record;
 		},
@@ -809,7 +818,10 @@ export const runSyncLocalPolicyTransaction = async <R>(options: {
 					policy,
 					record.name
 				);
-				if (rule.persistence === 'memory-only') {
+				if (
+					rule.persistence === 'memory-only' ||
+					unavailableMemoryOnly(rule)
+				) {
 					if (mode === 'readwrite')
 						await raw.deleteMutation(record.operationId);
 					continue;
@@ -822,7 +834,10 @@ export const runSyncLocalPolicyTransaction = async <R>(options: {
 		},
 		putMutation: async (record) => {
 			const rule = resolveSyncLocalMutationPolicy(policy, record.name);
-			if (rule.persistence === 'memory-only') {
+			if (
+				rule.persistence === 'memory-only' ||
+				unavailableMemoryOnly(rule)
+			) {
 				await raw.deleteMutation(record.operationId);
 				return;
 			}
