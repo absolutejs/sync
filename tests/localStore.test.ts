@@ -11,7 +11,8 @@ import {
 } from '../src/client/localStore';
 import type {
 	LocalMutationRecord,
-	SyncLocalStore
+	SyncLocalStore,
+	SyncLocalStoreSchemaInput
 } from '../src/client/localStore';
 import { assertSyncLocalStoreConformance } from '../src/testing';
 
@@ -24,6 +25,158 @@ const operation = (operationId: string): LocalMutationRecord => ({
 	createdAt: 1,
 	attempts: 0
 });
+
+const policySchema = (
+	localData: NonNullable<
+		Extract<
+			SyncLocalStoreSchemaInput,
+			{ components: unknown }
+		>['components'][number]['localData']
+	>
+): SyncLocalStoreSchemaInput => ({
+	components: [{ id: '@absolutejs/app', version: 1, localData }]
+});
+
+for (const [adapter, create] of [
+	[
+		'memory',
+		(schema: SyncLocalStoreSchemaInput, now: () => number) =>
+			createMemorySyncLocalStore({ storageSchema: schema, now })
+	],
+	[
+		'IndexedDB',
+		(schema: SyncLocalStoreSchemaInput, now: () => number) =>
+			createIndexedDbSyncLocalStore({
+				databaseName: `absolutejs-sync-policy-${crypto.randomUUID()}`,
+				indexedDB: new IDBFactory(),
+				storageSchema: schema,
+				now
+			})
+	]
+] as const) {
+	test(`${adapter} enforces memory-only and whole-snapshot expiry`, async () => {
+		let time = 100;
+		const store = create(
+			policySchema({
+				collections: [
+					{ match: 'secret', persistence: 'memory-only' },
+					{ match: 'feed', maxAgeMs: 10 }
+				]
+			}),
+			() => time
+		);
+		await store.transaction('account', 'readwrite', async (tx) => {
+			await tx.putCollection('secret', {
+				collection: 'secret',
+				rows: [{ id: 1 }],
+				version: 1
+			});
+			await tx.putCollection('feed', {
+				collection: 'feed',
+				rows: [{ id: 2 }],
+				version: 1
+			});
+		});
+		time = 111;
+		const values = await store.transaction(
+			'account',
+			'readwrite',
+			async (tx) => ({
+				secret: await tx.getCollection('secret'),
+				feed: await tx.getCollection('feed')
+			})
+		);
+		expect(values).toEqual({ secret: undefined, feed: undefined });
+	});
+
+	test(`${adapter} evicts complete caches before pending mutations`, async () => {
+		const store = create(
+			policySchema({
+				maxBytesPerNamespace: 280,
+				collections: [
+					{ match: 'critical', evictionPriority: 'critical' },
+					{ match: 'throwaway', evictionPriority: 'disposable' }
+				]
+			}),
+			() => 100
+		);
+		await store.transaction('account', 'readwrite', async (tx) => {
+			await tx.putMutation(operation('install:op'));
+			await tx.putCollection('critical', {
+				collection: 'critical',
+				rows: [{ id: 1, text: 'keep' }],
+				version: 1
+			});
+			await tx.putCollection('throwaway', {
+				collection: 'throwaway',
+				rows: [{ id: 2, text: 'x'.repeat(100) }],
+				version: 1
+			});
+		});
+		const state = await store.transaction(
+			'account',
+			'readonly',
+			async (tx) => ({
+				collections: await tx.listCollections(),
+				mutations: await tx.listMutations()
+			})
+		);
+		expect(state.collections.map((entry) => entry.key)).toEqual([
+			'critical'
+		]);
+		expect(state.mutations.map((entry) => entry.operationId)).toEqual([
+			'install:op'
+		]);
+	});
+
+	test(`${adapter} fails closed when required protection is unavailable`, async () => {
+		const store = create(
+			policySchema({
+				collections: [{ match: 'private', protection: 'required' }]
+			}),
+			() => 100
+		);
+		await expect(
+			store.transaction('account', 'readwrite', (tx) =>
+				tx.putCollection('private', {
+					collection: 'private',
+					rows: [],
+					version: 1
+				})
+			)
+		).rejects.toMatchObject({ code: 'PROTECTION_REQUIRED' });
+	});
+
+	test(`${adapter} degrades protected caches to memory-only when declared`, async () => {
+		const store = create(
+			policySchema({
+				collections: [
+					{
+						match: 'private',
+						sensitivity: 'private',
+						protection: 'required',
+						onProtectionUnavailable: 'memory-only'
+					}
+				]
+			}),
+			() => 100
+		);
+		await expect(
+			store.transaction('account', 'readwrite', (tx) =>
+				tx.putCollection('private', {
+					collection: 'private',
+					rows: [{ id: 1 }],
+					version: 1
+				})
+			)
+		).resolves.toBeUndefined();
+		await expect(
+			store.transaction('account', 'readonly', (tx) =>
+				tx.getCollection('private')
+			)
+		).resolves.toBeUndefined();
+	});
+}
 
 test('validates contiguous schema plans and compatibility bounds', () => {
 	expect(
@@ -170,6 +323,61 @@ test('IndexedDB rolls back every row and its version when migration throws', asy
 		undefined,
 		undefined
 	]);
+});
+
+test('IndexedDB seals records and requires the matching protector to reopen them', async () => {
+	const indexedDB = new IDBFactory();
+	const databaseName = `absolutejs-sync-protected-${crypto.randomUUID()}`;
+	const protection = {
+		prepare: async () => ({
+			id: 'test-protector-v1',
+			open: (value: string) => atob(value).split('').reverse().join(''),
+			seal: (value: string) => btoa(value.split('').reverse().join(''))
+		})
+	};
+	const storageSchema = policySchema({
+		collections: [
+			{
+				match: 'private',
+				sensitivity: 'private',
+				protection: 'required'
+			}
+		]
+	});
+	const protectedStore = createIndexedDbSyncLocalStore({
+		databaseName,
+		indexedDB,
+		protection,
+		storageSchema
+	});
+	await protectedStore.transaction('account', 'readwrite', (tx) =>
+		tx.putCollection('private', {
+			collection: 'private',
+			rows: [{ id: 1, secret: 'ciphertext-only' }],
+			version: 1
+		})
+	);
+	const unavailable = createIndexedDbSyncLocalStore({
+		databaseName,
+		indexedDB,
+		storageSchema
+	});
+	await expect(
+		unavailable.transaction('account', 'readonly', (tx) =>
+			tx.getCollection('private')
+		)
+	).rejects.toMatchObject({ code: 'PROTECTION_REQUIRED' });
+	const reopened = createIndexedDbSyncLocalStore({
+		databaseName,
+		indexedDB,
+		protection,
+		storageSchema
+	});
+	await expect(
+		reopened.transaction('account', 'readonly', (tx) =>
+			tx.getCollection('private')
+		)
+	).resolves.toMatchObject({ rows: [{ secret: 'ciphertext-only' }] });
 });
 
 test('IndexedDB composes JSON pack migrations with independent version ledgers', async () => {

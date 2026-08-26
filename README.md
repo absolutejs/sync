@@ -637,6 +637,22 @@ The adapter stores component versions separately. Removing a pack retains its
 ledger as orphaned metadata, so reinstalling it cannot accidentally replay an
 old migration against already-upgraded data.
 
+Component metadata can also declare `localData` rules for exact collection or
+mutation names and deterministic `*` globs. Rules cover sensitivity, durable or
+memory-only persistence, whole-projection expiry, eviction priority, and a
+per-principal logical byte ceiling. Private/secret data is rejected unless it
+requires a protection provider or remains memory-only. A protected collection
+may declare `onProtectionUnavailable: 'memory-only'` so the same pack is
+encrypted on native while a browser without an audited key provider keeps only
+the live in-memory view.
+
+Quota enforcement never truncates a collection into a misleading partial
+result. It evicts complete cached projections in disposable/normal/critical
+order, oldest first, and never evicts pending mutations. If the outbox alone
+exceeds the ceiling, the transaction fails with `QUOTA_EXCEEDED` and rolls back.
+`createIndexedDbSyncLocalStore({ protection })` accepts a prepared synchronous
+record codec; without one, encryption-required persistence fails closed.
+
 ### Framework bindings — `@absolutejs/sync/{react,vue,svelte,angular}`
 
 Idiomatic wrappers over `createSyncCollection`, one per framework, so a live
