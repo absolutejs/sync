@@ -171,6 +171,127 @@ test('IndexedDB rolls back every row and its version when migration throws', asy
 	]);
 });
 
+test('IndexedDB composes JSON pack migrations with independent version ledgers', async () => {
+	const indexedDB = new IDBFactory();
+	const databaseName = `absolutejs-sync-components-${crypto.randomUUID()}`;
+	const legacy = createIndexedDbSyncLocalStore({ databaseName, indexedDB });
+	await legacy.transaction('account-a', 'readwrite', async (tx) => {
+		await tx.putCollection('tasks:open', {
+			collection: 'tasks',
+			rows: [{ id: 1, title: 'ship it' }],
+			version: 1
+		});
+		await tx.putCollection('alerts', {
+			collection: 'notifications',
+			rows: [{ id: 2, title: 'keep me' }],
+			version: 1
+		});
+	});
+
+	const metadata = JSON.parse(
+		JSON.stringify({
+			components: [
+				{ id: '@absolutejs/app', version: 1 },
+				{
+					id: '@example/sync-pack-labels',
+					migrations: [
+						{
+							operations: [
+								{
+									collection: 'tasks',
+									from: 'title',
+									to: 'label',
+									type: 'rename-field'
+								}
+							],
+							toVersion: 2
+						}
+					],
+					version: 2
+				},
+				{
+					id: '@example/sync-pack-tasks',
+					migrations: [
+						{
+							operations: [
+								{
+									collection: 'tasks',
+									field: 'archived',
+									type: 'set-default',
+									value: false
+								}
+							],
+							toVersion: 2
+						}
+					],
+					version: 2
+				}
+			]
+		})
+	);
+	const upgraded = createIndexedDbSyncLocalStore({
+		databaseName,
+		indexedDB,
+		storageSchema: metadata
+	});
+	await expect(upgraded.getSchemaStatus?.()).resolves.toEqual({
+		components: [
+			{
+				id: '@absolutejs/app',
+				minimumCompatibleVersion: 1,
+				storedVersion: 1,
+				targetVersion: 1
+			},
+			{
+				id: '@example/sync-pack-labels',
+				minimumCompatibleVersion: 1,
+				storedVersion: 2,
+				targetVersion: 2
+			},
+			{
+				id: '@example/sync-pack-tasks',
+				minimumCompatibleVersion: 1,
+				storedVersion: 2,
+				targetVersion: 2
+			}
+		],
+		minimumCompatibleVersion: 1,
+		state: 'ready',
+		storedVersion: 1,
+		targetVersion: 1
+	});
+	const migrated = await upgraded.transaction('account-a', 'readonly', (tx) =>
+		tx.getCollection('tasks:open')
+	);
+	expect(migrated?.rows).toEqual([
+		{ archived: false, id: 1, label: 'ship it' }
+	]);
+
+	const withoutLabels = createIndexedDbSyncLocalStore({
+		databaseName,
+		indexedDB,
+		storageSchema: {
+			components: [metadata.components[0], metadata.components[2]]
+		}
+	});
+	await expect(withoutLabels.getSchemaStatus?.()).resolves.toMatchObject({
+		orphanedComponents: ['@example/sync-pack-labels']
+	});
+});
+
+test('rejects duplicate component metadata before opening storage', () => {
+	expect(() =>
+		createMemorySyncLocalStore({
+			storageSchema: {
+				components: [
+					{ id: '@example/tasks', version: 1 },
+					{ id: '@example/tasks', version: 1 }
+				]
+			}
+		})
+	).toThrow('declared more than once');
+});
+
 type StoreFactory = () => SyncLocalStore;
 
 const adapters: Array<[string, StoreFactory]> = [

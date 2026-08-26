@@ -52,6 +52,34 @@ export type SyncLocalMigrationContext = {
 };
 
 export type SyncLocalMigrationResult<T> = T | null | undefined | void;
+export type SyncLocalJsonValue =
+	| boolean
+	| null
+	| number
+	| string
+	| SyncLocalJsonValue[]
+	| { [key: string]: SyncLocalJsonValue };
+
+/** JSON-safe operations that package metadata and service workers can carry. */
+export type SyncLocalCollectionMigrationOperation =
+	| { collection: string; type: 'delete-collection' }
+	| {
+			collection: string;
+			field: string;
+			type: 'remove-field';
+	  }
+	| {
+			collection: string;
+			field: string;
+			type: 'set-default';
+			value: SyncLocalJsonValue;
+	  }
+	| {
+			collection: string;
+			from: string;
+			to: string;
+			type: 'rename-field';
+	  };
 
 /**
  * One synchronous, deterministic local-data upgrade. A returned value replaces
@@ -62,6 +90,8 @@ export type SyncLocalMigrationResult<T> = T | null | undefined | void;
 export type SyncLocalStoreMigration = {
 	/** Version produced by this step. Steps must be contiguous. */
 	toVersion: number;
+	/** Serializable operations generated from application/pack metadata. */
+	operations?: readonly SyncLocalCollectionMigrationOperation[];
 	migrateCollection?: (
 		record: LocalCollectionRecord,
 		context: SyncLocalMigrationContext
@@ -81,11 +111,33 @@ export type SyncLocalStoreSchema = {
 	migrations?: readonly SyncLocalStoreMigration[];
 };
 
+export type SyncLocalStoreSchemaComponent = SyncLocalStoreSchema & {
+	/** Stable package/application identity, normally an npm package name. */
+	id: string;
+};
+
+export type SyncLocalStoreSchemaBundle = {
+	components: readonly SyncLocalStoreSchemaComponent[];
+};
+
+export type SyncLocalStoreSchemaInput =
+	| SyncLocalStoreSchema
+	| SyncLocalStoreSchemaBundle;
+
+export type SyncLocalStoreComponentStatus = {
+	id: string;
+	minimumCompatibleVersion: number;
+	storedVersion: number;
+	targetVersion: number;
+};
+
 export type SyncLocalStoreSchemaStatus = {
 	storedVersion: number;
 	targetVersion: number;
 	minimumCompatibleVersion: number;
 	state: 'ready';
+	components?: SyncLocalStoreComponentStatus[];
+	orphanedComponents?: string[];
 };
 
 export class SyncLocalStoreSchemaError extends Error {
@@ -117,6 +169,150 @@ const positiveVersion = (value: number, label: string): number => {
 			`${label} must be a positive safe integer`
 		);
 	return value;
+};
+
+const isSchemaBundle = (
+	schema: SyncLocalStoreSchemaInput
+): schema is SyncLocalStoreSchemaBundle => 'components' in schema;
+
+export const normalizeSyncLocalSchemaComponents = (
+	schema: SyncLocalStoreSchemaInput = { version: 1 }
+): SyncLocalStoreSchemaComponent[] => {
+	const components = isSchemaBundle(schema)
+		? [...schema.components]
+		: [{ ...schema, id: '@absolutejs/app' }];
+	const ids = new Set<string>();
+	for (const component of components) {
+		if (
+			typeof component.id !== 'string' ||
+			component.id.trim() !== component.id ||
+			component.id.length === 0
+		)
+			throw new SyncLocalStoreSchemaError(
+				'INVALID_PLAN',
+				'Sync schema component id must be non-empty and trimmed'
+			);
+		if (ids.has(component.id))
+			throw new SyncLocalStoreSchemaError(
+				'INVALID_PLAN',
+				`Sync schema component "${component.id}" is declared more than once`
+			);
+		ids.add(component.id);
+	}
+	return components.sort((a, b) => a.id.localeCompare(b.id));
+};
+
+export type ResolvedSyncLocalSchemaComponent = {
+	id: string;
+	minimumCompatibleVersion: number;
+	steps: readonly SyncLocalStoreMigration[];
+	targetVersion: number;
+};
+
+export const createSyncLocalSchemaStatus = (
+	components: readonly ResolvedSyncLocalSchemaComponent[],
+	orphanedComponents: readonly string[] = [],
+	includeComponents = true
+): SyncLocalStoreSchemaStatus => {
+	const app = components.find(
+		(component) => component.id === '@absolutejs/app'
+	);
+	return {
+		...(includeComponents
+			? {
+					components: components.map((component) => ({
+						id: component.id,
+						minimumCompatibleVersion:
+							component.minimumCompatibleVersion,
+						storedVersion: component.targetVersion,
+						targetVersion: component.targetVersion
+					}))
+				}
+			: {}),
+		minimumCompatibleVersion: app?.minimumCompatibleVersion ?? 1,
+		...(orphanedComponents.length > 0
+			? { orphanedComponents: [...orphanedComponents] }
+			: {}),
+		state: 'ready',
+		storedVersion: app?.targetVersion ?? 1,
+		targetVersion: app?.targetVersion ?? 1
+	};
+};
+
+export const resolveSyncLocalSchemaComponents = (
+	storedVersions: Readonly<Record<string, number>>,
+	schema: SyncLocalStoreSchemaInput = { version: 1 }
+): {
+	components: ResolvedSyncLocalSchemaComponent[];
+	orphanedComponents: string[];
+} => {
+	const components = normalizeSyncLocalSchemaComponents(schema).map(
+		(component) => ({
+			id: component.id,
+			...resolveSyncLocalMigrations(
+				storedVersions[component.id] ?? 1,
+				component
+			)
+		})
+	);
+	const active = new Set(components.map((component) => component.id));
+	const orphanedComponents = Object.keys(storedVersions)
+		.filter((id) => !active.has(id))
+		.sort();
+	return { components, orphanedComponents };
+};
+
+const migrationCollectionName = (
+	record: LocalCollectionRecord,
+	context: SyncLocalMigrationContext
+) => record.collection ?? context.key;
+
+const migrateRow = (
+	row: unknown,
+	operation: Exclude<
+		SyncLocalCollectionMigrationOperation,
+		{ type: 'delete-collection' }
+	>
+) => {
+	if (typeof row !== 'object' || row === null || Array.isArray(row))
+		throw new SyncLocalStoreSchemaError(
+			'INVALID_PLAN',
+			`Sync ${operation.type} requires object rows`
+		);
+	const next = { ...row } as Record<string, unknown>;
+	if (operation.type === 'set-default') {
+		if (!Object.hasOwn(next, operation.field))
+			next[operation.field] = structuredClone(operation.value);
+	} else if (operation.type === 'remove-field') {
+		delete next[operation.field];
+	} else if (Object.hasOwn(next, operation.from)) {
+		if (Object.hasOwn(next, operation.to))
+			throw new SyncLocalStoreSchemaError(
+				'INVALID_PLAN',
+				`Sync rename-field cannot overwrite existing field "${operation.to}"`
+			);
+		next[operation.to] = next[operation.from];
+		delete next[operation.from];
+	}
+	return next;
+};
+
+const applyDeclarativeCollectionOperations = (
+	record: LocalCollectionRecord,
+	context: SyncLocalMigrationContext,
+	operations: readonly SyncLocalCollectionMigrationOperation[]
+): LocalCollectionRecord | null => {
+	let current = structuredClone(record);
+	for (const operation of operations) {
+		if (operation.collection !== migrationCollectionName(current, context))
+			continue;
+		if (operation.type === 'delete-collection') return null;
+		current = {
+			...current,
+			rows: current.rows.map((row) => migrateRow(row, operation))
+		};
+	}
+	return current;
 };
 
 /** Validate a plan and return the exact ordered upgrade path. */
@@ -194,6 +390,12 @@ export const migrateSyncLocalCollectionRecord = (
 ): LocalCollectionRecord | null => {
 	let current: LocalCollectionRecord | null = structuredClone(record);
 	for (const step of steps) {
+		if (current === null) break;
+		current = applyDeclarativeCollectionOperations(
+			current,
+			context,
+			step.operations ?? []
+		);
 		if (current === null) break;
 		const next: SyncLocalMigrationResult<LocalCollectionRecord> =
 			step.migrateCollection?.(structuredClone(current), context);
@@ -279,11 +481,11 @@ export type IndexedDbSyncLocalStoreOptions = {
 	/** Override for tests or non-window runtimes. Defaults to global IndexedDB. */
 	indexedDB?: IDBFactory;
 	/** Generated logical data-upgrade plan. Defaults to legacy schema 1. */
-	storageSchema?: SyncLocalStoreSchema;
+	storageSchema?: SyncLocalStoreSchemaInput;
 };
 
 export type MemorySyncLocalStoreOptions = {
-	storageSchema?: SyncLocalStoreSchema;
+	storageSchema?: SyncLocalStoreSchemaInput;
 };
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -317,16 +519,21 @@ const cloneNamespace = (source: MemoryNamespace): MemoryNamespace => ({
 export const createMemorySyncLocalStore = ({
 	storageSchema = { version: 1 }
 }: MemorySyncLocalStoreOptions = {}): SyncLocalStore => {
-	const resolvedSchema = resolveSyncLocalMigrations(
-		storageSchema.version,
+	const targetComponents = normalizeSyncLocalSchemaComponents(storageSchema);
+	const resolvedSchema = resolveSyncLocalSchemaComponents(
+		Object.fromEntries(
+			targetComponents.map((component) => [
+				component.id,
+				component.version
+			])
+		),
 		storageSchema
 	);
-	const schemaStatus: SyncLocalStoreSchemaStatus = {
-		minimumCompatibleVersion: resolvedSchema.minimumCompatibleVersion,
-		state: 'ready',
-		storedVersion: storageSchema.version,
-		targetVersion: storageSchema.version
-	};
+	const schemaStatus = createSyncLocalSchemaStatus(
+		resolvedSchema.components,
+		[],
+		isSchemaBundle(storageSchema)
+	);
 	const namespaces = new Map<string, MemoryNamespace>();
 	let tail = Promise.resolve();
 	const withLock = async <R>(run: () => Promise<R>): Promise<R> => {
@@ -559,13 +766,42 @@ export const createIndexedDbSyncLocalStore = ({
 				const savedVersion = await requestResult<unknown>(
 					schemaStore.get('logicalVersion')
 				);
-				const storedVersion =
-					typeof savedVersion === 'number' ? savedVersion : 1;
-				const resolved = resolveSyncLocalMigrations(
-					storedVersion,
+				const savedComponents = await requestResult<unknown>(
+					schemaStore.get('componentVersions')
+				);
+				const storedVersions: Record<string, number> = {};
+				if (
+					typeof savedComponents === 'object' &&
+					savedComponents !== null &&
+					!Array.isArray(savedComponents)
+				)
+					for (const [id, version] of Object.entries(
+						savedComponents
+					)) {
+						if (
+							!Number.isSafeInteger(version) ||
+							(version as number) < 1
+						)
+							throw new SyncLocalStoreSchemaError(
+								'INVALID_PLAN',
+								`Stored Sync component "${id}" has an invalid version`
+							);
+						storedVersions[id] = version as number;
+					}
+				if (
+					!isSchemaBundle(storageSchema) &&
+					storedVersions['@absolutejs/app'] === undefined
+				)
+					storedVersions['@absolutejs/app'] =
+						typeof savedVersion === 'number' ? savedVersion : 1;
+				const resolved = resolveSyncLocalSchemaComponents(
+					storedVersions,
 					storageSchema
 				);
-				if (resolved.steps.length > 0) {
+				const steps = resolved.components.flatMap(
+					(component) => component.steps
+				);
+				if (steps.length > 0) {
 					await migrateIndexedRows<IndexedCollectionRow>(
 						native.objectStore('collections').openCursor(),
 						(row) => {
@@ -573,7 +809,7 @@ export const createIndexedDbSyncLocalStore = ({
 							const migrated = migrateSyncLocalCollectionRecord(
 								record,
 								{ key, namespace },
-								resolved.steps
+								steps
 							);
 							return migrated === null
 								? null
@@ -587,7 +823,7 @@ export const createIndexedDbSyncLocalStore = ({
 							const migrated = migrateSyncLocalMutationRecord(
 								record,
 								{ key: record.operationId, namespace },
-								resolved.steps
+								steps
 							);
 							return migrated === null
 								? null
@@ -595,16 +831,25 @@ export const createIndexedDbSyncLocalStore = ({
 						}
 					);
 				}
+				const nextVersions = { ...storedVersions };
+				for (const component of resolved.components)
+					nextVersions[component.id] = component.targetVersion;
 				await requestResult(
-					schemaStore.put(resolved.targetVersion, 'logicalVersion')
+					schemaStore.put(nextVersions, 'componentVersions')
 				);
+				const app = resolved.components.find(
+					(component) => component.id === '@absolutejs/app'
+				);
+				if (app)
+					await requestResult(
+						schemaStore.put(app.targetVersion, 'logicalVersion')
+					);
 				await completed;
-				return {
-					minimumCompatibleVersion: resolved.minimumCompatibleVersion,
-					state: 'ready' as const,
-					storedVersion: resolved.targetVersion,
-					targetVersion: resolved.targetVersion
-				};
+				return createSyncLocalSchemaStatus(
+					resolved.components,
+					resolved.orphanedComponents,
+					isSchemaBundle(storageSchema)
+				);
 			} catch (error) {
 				try {
 					native.abort();

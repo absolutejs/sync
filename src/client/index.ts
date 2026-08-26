@@ -56,10 +56,13 @@ export type {
 export {
 	createMemorySyncLocalStore,
 	createIndexedDbSyncLocalStore,
+	createSyncLocalSchemaStatus,
 	createSyncOperationId,
 	ensureSyncInstallationId,
 	migrateSyncLocalCollectionRecord,
 	migrateSyncLocalMutationRecord,
+	normalizeSyncLocalSchemaComponents,
+	resolveSyncLocalSchemaComponents,
 	resolveSyncLocalMigrations,
 	SyncLocalStoreSchemaError
 } from './localStore';
@@ -69,12 +72,18 @@ export type {
 	LocalOptimisticOperation,
 	IndexedDbSyncLocalStoreOptions,
 	MemorySyncLocalStoreOptions,
+	ResolvedSyncLocalSchemaComponent,
+	SyncLocalCollectionMigrationOperation,
+	SyncLocalJsonValue,
 	SyncLocalMigrationContext,
 	SyncLocalMigrationResult,
 	SyncLocalStore,
 	SyncLocalStoreMigration,
 	SyncLocalStoreMode,
 	SyncLocalStoreSchema,
+	SyncLocalStoreSchemaBundle,
+	SyncLocalStoreSchemaComponent,
+	SyncLocalStoreSchemaInput,
 	SyncLocalStoreSchemaStatus,
 	SyncLocalTransaction
 } from './localStore';

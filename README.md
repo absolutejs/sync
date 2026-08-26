@@ -603,6 +603,40 @@ const store = createIndexedDbSyncLocalStore({
 });
 ```
 
+AbsoluteJS-generated plans use a component bundle so the application and every
+Sync pack advance independently. Pack metadata uses JSON-safe migration
+operations, allowing the identical plan to cross a service-worker boundary and
+run in native SQLite without evaluating package code:
+
+```ts
+const storageSchema = {
+	components: [
+		{ id: '@absolutejs/app', version: 1 },
+		{
+			id: '@example/sync-pack-tasks',
+			version: 2,
+			migrations: [
+				{
+					toVersion: 2,
+					operations: [
+						{
+							type: 'set-default',
+							collection: 'tasks',
+							field: 'archived',
+							value: false
+						}
+					]
+				}
+			]
+		}
+	]
+} satisfies SyncLocalStoreSchemaBundle;
+```
+
+The adapter stores component versions separately. Removing a pack retains its
+ledger as orphaned metadata, so reinstalling it cannot accidentally replay an
+old migration against already-upgraded data.
+
 ### Framework bindings — `@absolutejs/sync/{react,vue,svelte,angular}`
 
 Idiomatic wrappers over `createSyncCollection`, one per framework, so a live
