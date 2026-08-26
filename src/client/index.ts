@@ -82,6 +82,8 @@ export type {
 	ResolvedSyncLocalSchemaComponent,
 	SyncLocalCollectionMigrationOperation,
 	SyncLocalCollectionPolicy,
+	SyncLocalConflictPolicy,
+	SyncLocalConflictStrategy,
 	SyncLocalDataPolicy,
 	SyncLocalEvictionPriority,
 	SyncLocalJsonValue,

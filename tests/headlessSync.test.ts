@@ -172,6 +172,8 @@ describe('headless HTTP sync', () => {
 		});
 		expect(result).toEqual({
 			acknowledged: 1,
+			conflictsDiscarded: 0,
+			conflictsRetried: 0,
 			deadLettered: 0,
 			pulled: 1,
 			retryScheduled: 0
@@ -293,5 +295,70 @@ describe('headless HTTP sync', () => {
 			attempts: 1,
 			lastError: 'invalid'
 		});
+	});
+
+	test('applies captured client-wins and server-wins conflict policies headlessly', async () => {
+		const store = createMemorySyncLocalStore();
+		await store.transaction('principal', 'readwrite', async (tx) => {
+			for (const [operationId, strategy] of [
+				['install:client', 'client-wins'],
+				['install:server', 'server-wins']
+			] as const)
+				await tx.putMutation({
+					args: {},
+					attempts: 0,
+					conflictPolicy: { strategy },
+					createdAt: 1,
+					inverse: [],
+					name: 'conflict',
+					operationId,
+					optimistic: []
+				});
+		});
+		const result = await runHeadlessSync({
+			endpoint: 'https://api.example/sync/background',
+			fetch: async (_url, init) => {
+				const request = JSON.parse(init.body);
+				return {
+					json: async () => ({
+						mutations: request.mutations.map(
+							(mutation: { operationId: string }) => ({
+								operationId: mutation.operationId,
+								rejection: {
+									kind: 'conflict',
+									message: 'changed'
+								},
+								status: 'reject'
+							})
+						),
+						pulls: [],
+						version: 1
+					}),
+					ok: true,
+					status: 200
+				};
+			},
+			namespace: 'principal',
+			store
+		});
+		expect(result).toEqual({
+			acknowledged: 0,
+			conflictsDiscarded: 1,
+			conflictsRetried: 1,
+			deadLettered: 0,
+			pulled: 0,
+			retryScheduled: 0
+		});
+		const records = await store.transaction('principal', 'readonly', (tx) =>
+			tx.listMutations()
+		);
+		expect(records).toHaveLength(1);
+		expect(records[0]).toEqual(
+			expect.objectContaining({
+				conflictAttempts: 1,
+				operationId: 'install:client',
+				state: 'pending'
+			})
+		);
 	});
 });

@@ -27,6 +27,12 @@ export type LocalMutationRecord = {
 	/** Typed server outcome retained for remediation and diagnostics. */
 	rejection?: SyncMutationRejection;
 	deadLetteredAt?: number;
+	/** Conflict behavior captured when the intent entered the outbox. */
+	conflictPolicy?: SyncLocalConflictPolicy;
+	/** Automatic conflict retries already attempted for this unchanged intent. */
+	conflictAttempts?: number;
+	/** Previous intent replaced by an explicit argument-changing rebase. */
+	supersedesOperationId?: string;
 };
 
 /** Server-authoritative collection state saved for offline reads and resume. */
@@ -123,6 +129,17 @@ export type SyncLocalStoreSchemaComponent = SyncLocalStoreSchema & {
 export type SyncLocalProtection = 'none' | 'required';
 export type SyncLocalPersistence = 'durable' | 'memory-only';
 export type SyncLocalEvictionPriority = 'critical' | 'normal' | 'disposable';
+export type SyncLocalConflictStrategy =
+	| 'client-wins'
+	| 'manual'
+	| 'server-wins';
+
+/** JSON-safe conflict behavior that can run in foreground or headless hosts. */
+export type SyncLocalConflictPolicy = {
+	strategy: SyncLocalConflictStrategy;
+	/** Automatic retries of an unchanged client-wins intent. Defaults to one. */
+	maxAttempts?: number;
+};
 
 export type SyncLocalCollectionPolicy = {
 	/** Exact collection name, or one trailing `*` prefix wildcard. */
@@ -145,6 +162,8 @@ export type SyncLocalMutationPolicy = {
 	protection?: SyncLocalProtection;
 	/** Fail closed without a protector; optionally keep the live mutation memory-only. */
 	onProtectionUnavailable?: 'error' | 'memory-only';
+	/** Manual by default. Automatic strategies must be explicitly declared. */
+	conflict?: SyncLocalConflictPolicy;
 };
 
 export type SyncLocalDataPolicy = {
@@ -297,6 +316,33 @@ export const validateSyncLocalDataPolicy = (
 	}
 	for (const [index, rule] of (policy.mutations ?? []).entries()) {
 		validatePolicyMatch(rule.match, `${label}.mutations[${index}]`);
+		if (
+			rule.conflict !== undefined &&
+			rule.conflict.strategy !== 'client-wins' &&
+			rule.conflict.strategy !== 'manual' &&
+			rule.conflict.strategy !== 'server-wins'
+		)
+			throw new SyncLocalDataPolicyError(
+				'INVALID_POLICY',
+				`${label}.mutations[${index}].conflict.strategy is invalid.`
+			);
+		if (
+			rule.conflict?.maxAttempts !== undefined &&
+			(!Number.isSafeInteger(rule.conflict.maxAttempts) ||
+				rule.conflict.maxAttempts < 1)
+		)
+			throw new SyncLocalDataPolicyError(
+				'INVALID_POLICY',
+				`${label}.mutations[${index}].conflict.maxAttempts must be a positive safe integer.`
+			);
+		if (
+			rule.conflict?.maxAttempts !== undefined &&
+			rule.conflict.strategy !== 'client-wins'
+		)
+			throw new SyncLocalDataPolicyError(
+				'INVALID_POLICY',
+				`${label}.mutations[${index}].conflict.maxAttempts is only valid for client-wins.`
+			);
 		if (
 			rule.persistence === 'memory-only' &&
 			rule.protection === 'required'
@@ -673,6 +719,8 @@ export const migrateSyncLocalMutationRecord = (
  * changes, so a crash cannot leave the two halves out of sync.
  */
 export type SyncLocalTransaction = {
+	/** Effective generated rule, when the adapter was created with a policy bundle. */
+	resolveMutationPolicy?: (name: string) => SyncLocalMutationPolicy;
 	getInstallationId: () => Promise<string | undefined>;
 	setInstallationId: (installationId: string) => Promise<void>;
 	getCollection: <T = unknown>(
@@ -738,6 +786,8 @@ export const runSyncLocalPolicyTransaction = async <R>(options: {
 	};
 	const tx: SyncLocalTransaction = {
 		...raw,
+		resolveMutationPolicy: (name) =>
+			resolveSyncLocalMutationPolicy(policy, name),
 		getCollection: async <T>(key: string) => {
 			const record = await raw.getCollection<T>(key);
 			if (record === undefined) return undefined;
@@ -809,7 +859,9 @@ export const runSyncLocalPolicyTransaction = async <R>(options: {
 			}
 			if (rule.protection === 'required')
 				requireProtection('mutation', record.name);
-			return record;
+			return rule.conflict && record.conflictPolicy === undefined
+				? { ...record, conflictPolicy: structuredClone(rule.conflict) }
+				: record;
 		},
 		listMutations: async () => {
 			const records: LocalMutationRecord[] = [];
@@ -828,7 +880,14 @@ export const runSyncLocalPolicyTransaction = async <R>(options: {
 				}
 				if (rule.protection === 'required')
 					requireProtection('mutation', record.name);
-				records.push(record);
+				records.push(
+					rule.conflict && record.conflictPolicy === undefined
+						? {
+								...record,
+								conflictPolicy: structuredClone(rule.conflict)
+							}
+						: record
+				);
 			}
 			return records;
 		},
@@ -843,7 +902,14 @@ export const runSyncLocalPolicyTransaction = async <R>(options: {
 			}
 			if (rule.protection === 'required')
 				requireProtection('mutation', record.name);
-			await raw.putMutation(record);
+			await raw.putMutation(
+				rule.conflict && record.conflictPolicy === undefined
+					? {
+							...record,
+							conflictPolicy: structuredClone(rule.conflict)
+						}
+					: record
+			);
 		}
 	};
 	const result = await options.run(tx);

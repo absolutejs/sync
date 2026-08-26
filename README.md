@@ -543,6 +543,8 @@ tenant to a shard adds zero standing connections.
 | `createIndexedDbSyncLocalStore()`                              | Browser/PWA implementation of the same transaction contract. Multi-collection frames, confirmed cursors, installation identity, operation outbox, and generated schema migrations commit atomically in IndexedDB.                                                      |
 | `runHeadlessSync()`                                            | One bounded HTTP push/pull transaction for a worker or native runner. It can discover persisted `id`-keyed collection descriptors automatically and refuses redirects.                                                                                                 |
 | `ensureSyncInstallationId(store, namespace)`                   | Atomically creates or returns the stable installation identity used by `createSyncOperationId`.                                                                                                                                                                        |
+| `inspectSyncRuntime()`                                         | Aggregate redacted queue, conflict, dead-letter, and last-success diagnostics across every live multiplexed client. Mutation arguments and rejection details are excluded.                                                                                             |
+| `retry/discard/rebaseSyncRuntimeDeadLetter()`                  | Framework-neutral remediation controls. Retry preserves an unchanged intent ID; rebase creates a new traceable intent because its arguments changed.                                                                                                                   |
 
 The multiplexed client has an additive durable profile. The namespace must come
 from trusted Auth state and must change when the active account or tenant changes.
@@ -652,6 +654,45 @@ order, oldest first, and never evicts pending mutations. If the outbox alone
 exceeds the ceiling, the transaction fails with `QUOTA_EXCEEDED` and rolls back.
 `createIndexedDbSyncLocalStore({ protection })` accepts a prepared synchronous
 record codec; without one, encryption-required persistence fails closed.
+
+Mutation rules can also declare a JSON-safe conflict strategy. `manual` is the
+default and retains a dead letter. `server-wins` rolls back local optimism and
+accepts the confirmed server view. `client-wins` retries the unchanged intent
+under the same operation ID, with one automatic attempt by default and an
+explicit `maxAttempts` ceiling. A failed server transaction stores no receipt,
+so preserving that ID is the exactly-once-safe retry. Changing arguments is a
+new intent: use `client.rebaseDeadLetter(operationId, nextArgs)` (or the runtime
+helper), which atomically replaces the dead letter and records
+`supersedesOperationId`.
+
+```ts
+const storageSchema: SyncLocalStoreSchemaBundle = {
+	components: [
+		{
+			id: '@example/sync-pack-favorites',
+			version: 1,
+			localData: {
+				mutations: [
+					{
+						match: 'favorites:*',
+						conflict: {
+							strategy: 'client-wins',
+							maxAttempts: 1
+						}
+					}
+				]
+			}
+		}
+	]
+};
+```
+
+The strategy is captured with each queued record so foreground WebSocket,
+service-worker HTTP, and native background runners apply the same bounded
+decision even after an application update. Runtime inspection exposes only
+operation identity, mutation name, timestamps, attempt counts, and public
+rejection code/message; it never exposes mutation arguments or rejection
+details by default.
 
 ### Framework bindings — `@absolutejs/sync/{react,vue,svelte,angular}`
 

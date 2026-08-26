@@ -186,6 +186,38 @@ for (const [adapter, create] of [
 			}))
 		).resolves.toEqual({ collection: undefined, mutations: [] });
 	});
+
+	test(`${adapter} captures deterministic conflict policy with each intent`, async () => {
+		const store = create(
+			policySchema({
+				mutations: [
+					{
+						conflict: {
+							maxAttempts: 2,
+							strategy: 'client-wins'
+						},
+						match: 'tasks:*'
+					}
+				]
+			}),
+			() => 100
+		);
+		await store.transaction('account', 'readwrite', async (tx) => {
+			const conflictPolicy =
+				tx.resolveMutationPolicy?.('tasks:update').conflict;
+			await tx.putMutation({
+				...operation('install:policy'),
+				...(conflictPolicy ? { conflictPolicy } : {})
+			});
+		});
+		await expect(
+			store.transaction('account', 'readonly', (tx) =>
+				tx.getMutation('install:policy')
+			)
+		).resolves.toMatchObject({
+			conflictPolicy: { maxAttempts: 2, strategy: 'client-wins' }
+		});
+	});
 }
 
 test('validates contiguous schema plans and compatibility bounds', () => {

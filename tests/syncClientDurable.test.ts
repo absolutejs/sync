@@ -556,6 +556,200 @@ describe('createSyncClient durable profile', () => {
 		client.close();
 	});
 
+	test('automatically retries an explicitly client-wins conflict with the same intent id', async () => {
+		const store = createMemorySyncLocalStore({
+			storageSchema: {
+				components: [
+					{
+						id: '@absolutejs/app',
+						localData: {
+							mutations: [
+								{
+									conflict: {
+										maxAttempts: 1,
+										strategy: 'client-wins'
+									},
+									match: 'orders:update'
+								}
+							]
+						},
+						version: 1
+					}
+				]
+			}
+		});
+		const client = createSyncClient({
+			durable: {
+				createId: () => 'intent-a',
+				namespace: 'account-a',
+				store
+			},
+			reconnectMs: 0,
+			url: 'ws://test/sync/ws',
+			webSocketImpl: Impl
+		});
+		const orders = client.collection<Order>({ collection: 'orders' });
+		const socket = await waitForSocket();
+		socket.open();
+		const result = orders.mutate({
+			args: { id: 3, status: 'mine' },
+			name: 'orders:update'
+		});
+		await waitFor(
+			() =>
+				socket.frames().filter((frame) => frame.type === 'mutate')
+					.length === 1,
+			'first client-wins mutation was not sent'
+		);
+		const first = socket.frames().find((frame) => frame.type === 'mutate');
+		socket.emit({
+			message: 'row advanced',
+			mutationId: first.mutationId,
+			operationId: first.operationId,
+			rejection: { kind: 'conflict', message: 'row advanced' },
+			type: 'reject'
+		});
+		await waitFor(
+			() =>
+				socket.frames().filter((frame) => frame.type === 'mutate')
+					.length === 2,
+			'client-wins conflict was not retried'
+		);
+		const retried = socket
+			.frames()
+			.filter((frame) => frame.type === 'mutate')
+			.at(-1);
+		expect(retried.operationId).toBe(first.operationId);
+		socket.emit({
+			mutationId: retried.mutationId,
+			operationId: retried.operationId,
+			result: { ok: true },
+			type: 'ack'
+		});
+		await expect(result).resolves.toEqual({ ok: true });
+		expect(client.status()).toEqual(
+			expect.objectContaining({
+				automaticResolutions: 1,
+				conflicts: 0,
+				deadLetters: 0
+			})
+		);
+		client.close();
+	});
+
+	test('automatically accepts server state only when server-wins is declared', async () => {
+		const store = createMemorySyncLocalStore({
+			storageSchema: {
+				components: [
+					{
+						id: '@absolutejs/app',
+						localData: {
+							mutations: [
+								{
+									conflict: { strategy: 'server-wins' },
+									match: 'orders:refresh'
+								}
+							]
+						},
+						version: 1
+					}
+				]
+			}
+		});
+		const client = createSyncClient({
+			durable: { namespace: 'account-a', store },
+			reconnectMs: 0,
+			url: 'ws://test/sync/ws',
+			webSocketImpl: Impl
+		});
+		const orders = client.collection<Order>({ collection: 'orders' });
+		const socket = await waitForSocket();
+		socket.open();
+		const result = orders.mutate({ name: 'orders:refresh' });
+		await waitFor(
+			() => socket.frames().some((frame) => frame.type === 'mutate'),
+			'server-wins mutation was not sent'
+		);
+		const sent = socket.frames().find((frame) => frame.type === 'mutate');
+		socket.emit({
+			message: 'server is newer',
+			mutationId: sent.mutationId,
+			operationId: sent.operationId,
+			rejection: { kind: 'conflict', message: 'server is newer' },
+			type: 'reject'
+		});
+		await expect(result).rejects.toBeInstanceOf(SyncMutationRejectedError);
+		await waitFor(
+			() => client.status().pending === 0,
+			'server-wins operation did not settle'
+		);
+		expect(await client.listDeadLetters()).toEqual([]);
+		expect(client.status().automaticResolutions).toBe(1);
+		client.close();
+	});
+
+	test('rebases a manual dead letter as a new argument-changing intent', async () => {
+		const store = createMemorySyncLocalStore();
+		let sequence = 0;
+		const client = createSyncClient({
+			durable: {
+				createId: () => `id-${++sequence}`,
+				namespace: 'account-a',
+				store
+			},
+			reconnectMs: 0,
+			url: 'ws://test/sync/ws',
+			webSocketImpl: Impl
+		});
+		const orders = client.collection<Order>({ collection: 'orders' });
+		const socket = await waitForSocket();
+		socket.open();
+		const original = orders.mutate({
+			args: { version: 1 },
+			name: 'orders:update'
+		});
+		await waitFor(
+			() => socket.frames().some((frame) => frame.type === 'mutate'),
+			'manual conflict mutation was not sent'
+		);
+		const sent = socket.frames().find((frame) => frame.type === 'mutate');
+		socket.emit({
+			message: 'stale',
+			mutationId: sent.mutationId,
+			operationId: sent.operationId,
+			rejection: { kind: 'conflict', message: 'stale' },
+			type: 'reject'
+		});
+		await expect(original).rejects.toBeInstanceOf(
+			SyncMutationRejectedError
+		);
+		const rebasedId = await client.rebaseDeadLetter(sent.operationId, {
+			version: 2
+		});
+		expect(rebasedId).not.toBe(sent.operationId);
+		await waitFor(
+			() =>
+				socket.frames().filter((frame) => frame.type === 'mutate')
+					.length === 2,
+			'rebased mutation was not sent'
+		);
+		const rebased = socket
+			.frames()
+			.filter((frame) => frame.type === 'mutate')
+			.at(-1);
+		expect(rebased).toEqual(
+			expect.objectContaining({
+				args: { version: 2 },
+				operationId: rebasedId
+			})
+		);
+		const stored = await store.transaction('account-a', 'readonly', (tx) =>
+			tx.getMutation(rebasedId)
+		);
+		expect(stored?.supersedesOperationId).toBe(sent.operationId);
+		client.close();
+	});
+
 	test('bounds explicitly retryable failures before dead-lettering', async () => {
 		const store = createMemorySyncLocalStore();
 		let sequence = 0;

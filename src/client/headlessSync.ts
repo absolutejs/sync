@@ -56,6 +56,8 @@ export type RunHeadlessSyncOptions = {
 
 export type HeadlessSyncRunResult = {
 	acknowledged: number;
+	conflictsDiscarded: number;
+	conflictsRetried: number;
 	deadLettered: number;
 	pulled: number;
 	retryScheduled: number;
@@ -271,6 +273,8 @@ export const runHeadlessSync = async ({
 	);
 	const result: HeadlessSyncRunResult = {
 		acknowledged: 0,
+		conflictsDiscarded: 0,
+		conflictsRetried: 0,
 		deadLettered: 0,
 		pulled: 0,
 		retryScheduled: 0
@@ -292,6 +296,32 @@ export const runHeadlessSync = async ({
 							kind: 'retryable',
 							message: 'Missing mutation response.'
 						};
+			if (
+				rejection.kind === 'conflict' &&
+				current.conflictPolicy?.strategy === 'server-wins'
+			) {
+				await tx.deleteMutation(sent.operationId);
+				result.conflictsDiscarded += 1;
+				continue;
+			}
+			if (
+				rejection.kind === 'conflict' &&
+				current.conflictPolicy?.strategy === 'client-wins' &&
+				(current.conflictAttempts ?? 0) <
+					(current.conflictPolicy.maxAttempts ?? 1)
+			) {
+				const retry: LocalMutationRecord = {
+					...current,
+					conflictAttempts: (current.conflictAttempts ?? 0) + 1,
+					lastError: rejection.message,
+					rejection,
+					state: 'pending'
+				};
+				delete retry.nextAttemptAt;
+				await tx.putMutation(retry);
+				result.conflictsRetried += 1;
+				continue;
+			}
 			if (
 				rejection.kind !== 'retryable' ||
 				current.attempts >= maxAttempts

@@ -12,6 +12,7 @@ import type {
 	LocalCollectionRecord,
 	LocalMutationRecord,
 	LocalOptimisticOperation,
+	SyncLocalConflictPolicy,
 	SyncLocalStore
 } from './localStore';
 import { jsonSerializer, type FrameSerializer } from '../serializer';
@@ -19,7 +20,10 @@ import {
 	createReconnectBackoff,
 	hasReconnectHealthyFrameType
 } from './reconnectBackoff';
-import { getSyncClientRuntimeTransport } from './runtimeTransport';
+import {
+	getSyncClientRuntimeTransport,
+	registerSyncRuntimeClient
+} from './runtimeTransport';
 import type {
 	SyncClientConnectionStatus,
 	SyncClientStatus,
@@ -139,6 +143,8 @@ export type SyncClient = {
 	listDeadLetters: () => Promise<LocalMutationRecord[]>;
 	/** Move a dead letter back to the pending outbox and retry it. */
 	retryDeadLetter: (operationId: string) => Promise<void>;
+	/** Replace a dead letter with a new argument-changing intent and operation ID. */
+	rebaseDeadLetter: (operationId: string, args: unknown) => Promise<string>;
 	/** Permanently discard one dead letter. */
 	discardDeadLetter: (operationId: string) => Promise<void>;
 	/** Reconnect and wait within a finite budget for the current outbox to settle. */
@@ -162,6 +168,9 @@ type PendingMutation = {
 	createdAt: number;
 	nextAttemptAt?: number;
 	sending?: boolean;
+	conflictPolicy?: SyncLocalConflictPolicy;
+	conflictAttempts?: number;
+	supersedesOperationId?: string;
 };
 
 type Entry = {
@@ -306,7 +315,9 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	let immediateReconnect = false;
 	let clientStatus: SyncClientStatus = {
+		automaticResolutions: 0,
 		connection: 'connecting',
+		conflicts: 0,
 		deadLetters: 0,
 		pending: 0
 	};
@@ -320,14 +331,28 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 					: Math.min(oldest, mutation.createdAt),
 			undefined
 		);
+		const retained = [...deadLetters.values()];
+		const oldestDeadLetterAt = retained.reduce<number | undefined>(
+			(oldest, record) => {
+				const at = record.deadLetteredAt ?? record.createdAt;
+				return oldest === undefined ? at : Math.min(oldest, at);
+			},
+			undefined
+		);
 		clientStatus = {
 			...clientStatus,
 			...patch,
 			pending: pending.length,
 			deadLetters: deadLetters.size,
+			conflicts: retained.filter(
+				(record) => record.rejection?.kind === 'conflict'
+			).length,
+			...(oldestDeadLetterAt === undefined ? {} : { oldestDeadLetterAt }),
 			...(oldestPendingAt === undefined ? {} : { oldestPendingAt })
 		};
 		if (oldestPendingAt === undefined) delete clientStatus.oldestPendingAt;
+		if (oldestDeadLetterAt === undefined)
+			delete clientStatus.oldestDeadLetterAt;
 		for (const listener of statusListeners) listener(snapshotStatus());
 	};
 
@@ -591,6 +616,80 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			.catch(() => {});
 	};
 
+	const resolveConflictedPending = (
+		mutation: PendingMutation,
+		rejection: SyncMutationRejection
+	): boolean => {
+		const policy = mutation.conflictPolicy;
+		if (!policy || policy.strategy === 'manual') return false;
+		const lastConflictAt = Date.now();
+		if (policy.strategy === 'server-wins') {
+			void queueLocalWrite(() =>
+				durable === undefined || mutation.operationId === undefined
+					? Promise.resolve()
+					: durable.store.transaction(
+							durable.namespace,
+							'readwrite',
+							(tx) => tx.deleteMutation(mutation.operationId!)
+						)
+			)
+				.then(() => {
+					updateStatus({
+						automaticResolutions:
+							clientStatus.automaticResolutions + 1,
+						lastConflictAt,
+						lastError: rejection.message
+					});
+					finishPending(
+						mutation.mutationId,
+						undefined,
+						new SyncMutationRejectedError(
+							rejection,
+							mutation.operationId
+						)
+					);
+				})
+				.catch(() => {});
+			return true;
+		}
+		const conflictAttempts = mutation.conflictAttempts ?? 0;
+		if (conflictAttempts >= (policy.maxAttempts ?? 1)) return false;
+		mutation.conflictAttempts = conflictAttempts + 1;
+		mutation.nextAttemptAt = undefined;
+		void queueLocalWrite(() =>
+			durable === undefined || mutation.operationId === undefined
+				? Promise.resolve()
+				: durable.store.transaction(
+						durable.namespace,
+						'readwrite',
+						async (tx) => {
+							const record = await tx.getMutation(
+								mutation.operationId!
+							);
+							if (record === undefined) return;
+							await tx.putMutation({
+								...record,
+								attempts: mutation.attempts,
+								conflictAttempts: mutation.conflictAttempts,
+								lastError: rejection.message,
+								rejection,
+								state: 'pending'
+							});
+						}
+					)
+		)
+			.then(() => {
+				updateStatus({
+					automaticResolutions: clientStatus.automaticResolutions + 1,
+					lastConflictAt,
+					lastError: rejection.message
+				});
+				sendMutate(mutation);
+			})
+			.catch(() => {});
+		return true;
+	};
+
 	const applyFrame = (frame: ServerFrame) => {
 		updateStatus({ connection: 'online' });
 		if (frame.type === 'snapshot') {
@@ -691,6 +790,13 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				kind: 'permanent',
 				message: String(frame.message)
 			};
+			if (
+				rejection.kind === 'conflict' &&
+				mutation !== undefined &&
+				resolveConflictedPending(mutation, rejection)
+			) {
+				return;
+			}
 			if (rejection.kind === 'retryable' && mutation !== undefined) {
 				retryRejectedPending(mutation, rejection);
 			} else {
@@ -813,7 +919,10 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 				inverse: record.inverse,
 				attempts: record.attempts,
 				createdAt: record.createdAt,
-				nextAttemptAt: record.nextAttemptAt
+				conflictAttempts: record.conflictAttempts,
+				conflictPolicy: record.conflictPolicy,
+				nextAttemptAt: record.nextAttemptAt,
+				supersedesOperationId: record.supersedesOperationId
 			};
 			pending.push(mutation);
 			mutationOwner.set(mutation.mutationId, mutation);
@@ -1070,7 +1179,8 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 						operationId: string | undefined,
 						optimisticOperations: LocalOptimisticOperation[],
 						inverse: LocalOptimisticOperation[],
-						createdAt = Date.now()
+						createdAt = Date.now(),
+						conflictPolicy?: SyncLocalConflictPolicy
 					) => {
 						mutationSeq += 1;
 						const mutation: PendingMutation = {
@@ -1086,6 +1196,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 							inverse,
 							attempts: 0,
 							createdAt,
+							conflictPolicy,
 							resolve: (result) => resolve(result as R),
 							reject
 						};
@@ -1121,29 +1232,40 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 							durable.createId
 						);
 						const createdAt = Date.now();
-						const record: LocalMutationRecord = {
-							operationId,
-							owner: entry.localKey,
-							name: mutateOptions.name,
-							args: mutateOptions.args,
-							optimistic: optimisticOperations,
-							inverse,
-							createdAt,
-							attempts: 0,
-							state: 'pending'
-						};
-						await queueLocalWrite(() =>
+						const stored = await queueLocalWrite(() =>
 							durable.store.transaction(
 								durable.namespace,
 								'readwrite',
-								(tx) => tx.putMutation(record)
+								async (tx) => {
+									const conflictPolicy =
+										tx.resolveMutationPolicy?.(
+											mutateOptions.name
+										)?.conflict;
+									const record: LocalMutationRecord = {
+										operationId,
+										owner: entry.localKey,
+										name: mutateOptions.name,
+										args: mutateOptions.args,
+										optimistic: optimisticOperations,
+										inverse,
+										createdAt,
+										attempts: 0,
+										state: 'pending',
+										...(conflictPolicy
+											? { conflictPolicy }
+											: {})
+									};
+									await tx.putMutation(record);
+									return record;
+								}
 							)
 						);
 						addPending(
 							operationId,
 							optimisticOperations,
 							inverse,
-							createdAt
+							createdAt,
+							stored.conflictPolicy
 						);
 					})().catch(reject);
 				}),
@@ -1211,6 +1333,8 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 			args: record.args,
 			attempts: 0,
 			createdAt: record.createdAt,
+			conflictAttempts: record.conflictAttempts,
+			conflictPolicy: record.conflictPolicy,
 			inverse: record.inverse,
 			mutationId: mutationSeq,
 			name: record.name,
@@ -1223,6 +1347,75 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		recomputeMutationEntries(mutation);
 		updateStatus();
 		sendMutate(mutation);
+	};
+
+	const rebaseDeadLetter = async (
+		operationId: string,
+		args: unknown
+	): Promise<string> => {
+		if (durable === undefined)
+			throw new Error(
+				'Dead-letter rebase requires a durable Sync client'
+			);
+		await durableReady;
+		if (closed)
+			throw new Error('Cannot rebase a dead letter on a closed client');
+		const nextOperationId = createSyncOperationId(
+			installationId!,
+			durable.createId
+		);
+		const record = await queueLocalWrite(() =>
+			durable.store.transaction(
+				durable.namespace,
+				'readwrite',
+				async (tx) => {
+					const current = await tx.getMutation(operationId);
+					if (current?.state !== 'dead-letter')
+						throw new Error(
+							`Unknown Sync dead letter "${operationId}"`
+						);
+					const next: LocalMutationRecord = {
+						...current,
+						args,
+						attempts: 0,
+						conflictAttempts: 0,
+						createdAt: Date.now(),
+						operationId: nextOperationId,
+						state: 'pending',
+						supersedesOperationId: operationId
+					};
+					delete next.deadLetteredAt;
+					delete next.lastError;
+					delete next.nextAttemptAt;
+					delete next.rejection;
+					await tx.deleteMutation(operationId);
+					await tx.putMutation(next);
+					return next;
+				}
+			)
+		);
+		deadLetters.delete(operationId);
+		mutationSeq += 1;
+		const mutation: PendingMutation = {
+			args: record.args,
+			attempts: 0,
+			conflictAttempts: 0,
+			conflictPolicy: record.conflictPolicy,
+			createdAt: record.createdAt,
+			inverse: record.inverse,
+			mutationId: mutationSeq,
+			name: record.name,
+			operationId: record.operationId,
+			optimisticOperations: record.optimistic,
+			ownerKey: record.owner ?? record.optimistic[0]?.collection ?? '',
+			supersedesOperationId: operationId
+		};
+		pending.push(mutation);
+		mutationOwner.set(mutation.mutationId, mutation);
+		recomputeMutationEntries(mutation);
+		updateStatus();
+		sendMutate(mutation);
+		return nextOperationId;
 	};
 
 	const discardDeadLetter = async (operationId: string): Promise<void> => {
@@ -1292,6 +1485,7 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 	};
 
 	let removeRuntimeClient: (() => void) | undefined;
+	let removeInspectionClient: (() => void) | undefined;
 	const close = () => {
 		if (closed) return;
 		closed = true;
@@ -1308,6 +1502,8 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		statusListeners.clear();
 		removeRuntimeClient?.();
 		removeRuntimeClient = undefined;
+		removeInspectionClient?.();
+		removeInspectionClient = undefined;
 	};
 
 	const disconnect = () => {
@@ -1346,12 +1542,14 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		disconnect,
 		flush,
 		listDeadLetters,
+		rebaseDeadLetter,
 		reconnect,
 		retryDeadLetter,
 		status: snapshotStatus,
 		subscribeStatus
 	};
 	removeRuntimeClient = runtime?.registerClient?.(client) ?? undefined;
+	removeInspectionClient = registerSyncRuntimeClient(client);
 
 	return client;
 };
