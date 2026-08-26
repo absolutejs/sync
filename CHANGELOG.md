@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.30.0] — 2026-08-26
+
+### Added
+
+- `createSharedSyncSubscriber` (`@absolutejs/sync/client`) and a `shared: true`
+  option on `createSyncSubscriber` / `createLiveQuery`: every shared subscriber on
+  a page multiplexes over ONE EventSource per endpoint, carrying the union of
+  their topics and re-opening only when that set changes. Browsers allow six
+  concurrent HTTP/1.1 connections per host and an SSE stream holds one for its
+  whole life, so a view with a handful of private live queries could stall every
+  other request. On a topic-change reconnect only newly joined members receive
+  the open frame (already-hydrated queries do not refetch); a transport reconnect
+  re-opens everyone.
+
 ## [2.29.1] — 2026-08-26
 
 ### Fixed
@@ -1159,14 +1173,14 @@ docs page called out, with no breaking changes to the v0.1 surface.
   args. Per-call cost is one `JSObjectCallAsFunction` (FFI) or one
   postMessage (Worker) — no per-call eval, no per-call `setGlobal`.
 
-                                The previous 1.7.2/1.7.3 design used a shared "current actions" slot
-                                with a router Reference installed on a reused context, plus a
-                                promise queue to serialize calls into that slot. 1.7.4 throws all of
-                                that out:
-                                - Each mutation is compiled to a `Callable` once at registration.
-                                  Source becomes `function(args, ctx, __dispatch) { ... return
+                                  The previous 1.7.2/1.7.3 design used a shared "current actions" slot
+                                  with a router Reference installed on a reused context, plus a
+                                  promise queue to serialize calls into that slot. 1.7.4 throws all of
+                                  that out:
+                                  - Each mutation is compiled to a `Callable` once at registration.
+                                    Source becomes `function(args, ctx, __dispatch) { ... return
 
-                      userFn(args, ctx, actions); }`where`actions`is an in-VM shim
+                        userFn(args, ctx, actions); }`where`actions`is an in-VM shim
 
     over`\_\_dispatch`. - Per call: build a fresh dispatch `Reference`closed over this
     call's`actions`, invoke `callable.call([args, ctx, dispatch])`. - No shared slot → no serialization queue. Concurrent same-mutation
@@ -1175,10 +1189,10 @@ docs page called out, with no breaking changes to the v0.1 surface.
     is reused; per-call work doesn't create JSC metadata that needs
     GCing.
 
-                                  Behavioural notes: handler errors still propagate as `Error` objects
-                                  with `.message` and `.name`. Timeouts still terminate the isolate
-                                  on Worker; on FFI they throw `TimeoutError` and the isolate stays
-                                  alive (next call respawns the context). No public API changes.
+                                    Behavioural notes: handler errors still propagate as `Error` objects
+                                    with `.message` and `.name`. Timeouts still terminate the isolate
+                                    on Worker; on FFI they throw `TimeoutError` and the isolate stays
+                                    alive (next call respawns the context). No public API changes.
 
 ### Bumped
 
@@ -1346,14 +1360,14 @@ change`, and the JSON-serialized `LoggedChange` as `data`. Consumers
   through as `event: error` SSE events so the client can distinguish
   them from changes.
 
-                                                            ```ts
-                                                            import { syncCdc } from '@absolutejs/sync';
-                                                            new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
-                                                            ```
+                                                                ```ts
+                                                                import { syncCdc } from '@absolutejs/sync';
+                                                                new Elysia().use(syncSocket({ engine })).use(syncCdc({ engine }));
+                                                                ```
 
-                                                            New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
-                                                            `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
-                                                            `MissedChangesError`, `CdcConsumerSlowError`.
+                                                                New exports from `@absolutejs/sync` and `@absolutejs/sync/engine`:
+                                                                `syncCdc`, `SyncCdcOptions`, `LoggedChange`, `StreamChangesOptions`,
+                                                                `MissedChangesError`, `CdcConsumerSlowError`.
 
 ### Changed
 

@@ -165,6 +165,11 @@ orders.subscribe((state) => render(state.data)); // refetches on every order cha
 // orders.close() when the view unmounts
 ```
 
+Pass `shared: true` (to `createLiveQuery` or `createSyncSubscriber`) so every live
+query on the page rides one multiplexed SSE connection per endpoint instead of a
+private stream each — browsers cap HTTP/1.1 connections per host at six, and an
+open stream holds one for its whole life.
+
 `createLiveQuery` is a small observable store: `get()` for the current
 `{ data, error, loading, fetching }`, `subscribe(listener)` for changes (plugs
 straight into React's `useSyncExternalStore`), plus `refetch()` and `close()`. It

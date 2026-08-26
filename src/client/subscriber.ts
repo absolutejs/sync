@@ -1,4 +1,5 @@
 import type { ReactiveEvent } from '../reactiveHub';
+import { createSharedSyncSubscriber } from './sharedSubscriber';
 
 export type SyncSubscriberOptions = {
 	/** Topics to subscribe to. A trailing `*` matches by prefix server-side. */
@@ -16,6 +17,12 @@ export type SyncSubscriberOptions = {
 	 * for non-browser runtimes.
 	 */
 	eventSourceImpl?: typeof EventSource;
+	/**
+	 * Share one EventSource per endpoint with every other shared subscriber on
+	 * the page (see {@link createSharedSyncSubscriber}). Defaults to `false`:
+	 * a private connection per subscriber.
+	 */
+	shared?: boolean;
 };
 
 export type SyncSubscriber = {
@@ -30,15 +37,21 @@ export type SyncSubscriber = {
  * payload) instead of polling. EventSource reconnects automatically on transient
  * network drops.
  */
-export const createSyncSubscriber = ({
-	topics,
-	onEvent,
-	url = '/sync',
-	onOpen,
-	onError,
-	withCredentials,
-	eventSourceImpl
-}: SyncSubscriberOptions): SyncSubscriber => {
+export const createSyncSubscriber = (
+	options: SyncSubscriberOptions
+): SyncSubscriber => {
+	if (options.shared) {
+		return createSharedSyncSubscriber(options);
+	}
+	const {
+		topics,
+		onEvent,
+		url = '/sync',
+		onOpen,
+		onError,
+		withCredentials,
+		eventSourceImpl
+	} = options;
 	const Impl = eventSourceImpl ?? globalThis.EventSource;
 	if (!Impl) {
 		throw new Error(

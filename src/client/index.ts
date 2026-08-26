@@ -1,6 +1,7 @@
 export type { ReactiveEvent } from '../reactiveHub';
 
 export { createSyncSubscriber } from './subscriber';
+export { createSharedSyncSubscriber } from './sharedSubscriber';
 export type { SyncSubscriber, SyncSubscriberOptions } from './subscriber';
 
 export { createLiveQuery, jsonFetcher } from './liveQuery';

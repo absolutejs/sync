@@ -48,6 +48,14 @@ export type LiveQueryOptions<T> = {
 	debounceMs?: number;
 	/** Called when a fetch rejects (stale data is retained). */
 	onError?: (error: unknown) => void;
+	/**
+	 * Share one SSE connection per endpoint with every other shared query on
+	 * the page instead of opening a private one. Recommended in browsers —
+	 * an SSE stream holds one of the six per-host HTTP/1.1 connections for
+	 * its whole life, so a page with several private streams stalls every
+	 * other request. Defaults to `false` for backwards compatibility.
+	 */
+	shared?: boolean;
 };
 
 export type LiveQuery<T> = {
@@ -165,7 +173,8 @@ export const createLiveQuery = <T>(
 		onEvent,
 		url: options.url,
 		withCredentials: options.withCredentials,
-		eventSourceImpl: options.eventSourceImpl
+		eventSourceImpl: options.eventSourceImpl,
+		shared: options.shared
 	});
 
 	if (!options.manual && !hasSeed) {
