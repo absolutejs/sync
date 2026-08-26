@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.29.1] — 2026-08-26
+
+### Fixed
+
+- `sync` plugin: `resolveTopics` now receives cookies parsed from the raw `Cookie`
+  header, with Elysia's typed cookie map layered on top. Elysia 2 materializes
+  undeclared cookies lazily, so on the schema-less `/sync` route the typed map
+  could be empty and session-gated topic authorization silently resolved to
+  nothing.
+
 ## [2.26.1] — 2026-08-25
 
 - Initialize newly installed schema components from their declared compatible

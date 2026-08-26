@@ -178,6 +178,25 @@ describe('sync plugin', () => {
 		expect(parseData(open).payload).toEqual({ topics: ['private'] });
 	});
 
+	test('decodes cookie values read from the raw Cookie header', async () => {
+		const hub = createReactiveHub();
+		const app = new Elysia().use(
+			sync({
+				hub,
+				resolveTopics: ({ cookies }) =>
+					cookies.staff === 'a b.c=d' ? ['staff'] : []
+			})
+		);
+
+		const response = await app.handle(
+			new Request('http://localhost/sync', {
+				headers: { cookie: 'theme=dark; staff=a%20b.c%3Dd' }
+			})
+		);
+		const [open] = await readFrames(response, 1);
+		expect(parseData(open).payload).toEqual({ topics: ['staff'] });
+	});
+
 	test('a connection with no topics subscribes to nothing but still opens', async () => {
 		const hub = createReactiveHub();
 		const app = new Elysia().use(sync({ hub, heartbeatMs: 10_000 }));

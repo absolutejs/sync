@@ -27,6 +27,25 @@ export type SyncPluginOptions = {
 	heartbeatMs?: number;
 };
 
+const parseCookieHeader = (header: string | null) => {
+	const cookies: Record<string, string> = {};
+	if (!header) return cookies;
+	for (const part of header.split(';')) {
+		const index = part.indexOf('=');
+		if (index === -1) continue;
+		const name = part.slice(0, index).trim();
+		if (!name) continue;
+		const raw = part.slice(index + 1).trim();
+		try {
+			cookies[name] = decodeURIComponent(raw);
+		} catch {
+			cookies[name] = raw;
+		}
+	}
+
+	return cookies;
+};
+
 const defaultResolveTopics = (context: SyncRequestContext) =>
 	(context.query.topics ?? '')
 		.split(',')
@@ -49,12 +68,14 @@ export const sync = ({
 	const app = new Elysia({ name: '@absolutejs/sync' }).get(
 		path,
 		async (context) => {
-			const cookies = Object.fromEntries(
-				Object.entries(context.cookie).map(([name, cookie]) => [
-					name,
-					cookie.value
-				])
+			// Elysia 2 materializes undeclared cookies lazily, so the typed
+			// cookie map can be empty on this schema-less route. Seed from the
+			// raw Cookie header and let any declared cookie override it.
+			const cookies: Record<string, unknown> = parseCookieHeader(
+				context.request.headers.get('cookie')
 			);
+			for (const [name, cookie] of Object.entries(context.cookie))
+				if (cookie?.value !== undefined) cookies[name] = cookie.value;
 			const topics = await resolveTopics({
 				cookies,
 				query: context.query as Record<string, string | undefined>,
