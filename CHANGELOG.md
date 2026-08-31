@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.31.0
+
+- Allow platform integrations to provision a WebSocket implementation through
+  the existing client runtime transport. This enables credential-isolating
+  native socket bridges without changing application `createSyncClient` calls.
+
 ## [2.30.0] — 2026-08-26
 
 ### Added

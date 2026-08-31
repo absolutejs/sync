@@ -103,6 +103,23 @@ describe('createSyncClient durable profile', () => {
 		}
 	});
 
+	test('uses a runtime-provisioned WebSocket implementation', async () => {
+		const uninstall = installSyncClientRuntimeTransport({
+			webSocketImpl: Impl
+		});
+		try {
+			const client = createSyncClient({
+				reconnectMs: 0,
+				url: 'ws://native-bridge/sync/ws'
+			});
+			const socket = await waitForSocket();
+			expect(socket.url).toBe('ws://native-bridge/sync/ws');
+			client.close();
+		} finally {
+			uninstall();
+		}
+	});
+
 	test('hydrates cached rows before subscribing and resumes from the cursor', async () => {
 		const store = createIndexedDbSyncLocalStore({
 			databaseName: `sync-client-${crypto.randomUUID()}`,

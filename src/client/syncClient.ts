@@ -288,7 +288,8 @@ export const createSyncClient = (options: SyncClientOptions): SyncClient => {
 		durable?.retryBackoff ??
 		((attempt: number) => Math.min(30_000, 500 * 2 ** (attempt - 1)));
 	const serializer: FrameSerializer = options.serializer ?? jsonSerializer;
-	const Impl = options.webSocketImpl ?? globalThis.WebSocket;
+	const Impl =
+		options.webSocketImpl ?? runtime?.webSocketImpl ?? globalThis.WebSocket;
 	if (!Impl) {
 		throw new Error(
 			'createSyncClient requires WebSocket. Run in a browser or pass webSocketImpl.'

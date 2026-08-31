@@ -46,6 +46,8 @@ export type SyncClientRuntimeTransport = {
 	/** Enroll clients in host lifecycle handling without page-level wiring. */
 	registerClient?: (client: SyncRuntimeClient) => void | (() => void);
 	socketTicket?: () => Promise<string>;
+	/** Host-provided socket implementation, used by native/WebView bridges. */
+	webSocketImpl?: typeof WebSocket;
 };
 
 export type SyncRuntimeClient = {
