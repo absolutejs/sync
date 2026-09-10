@@ -153,7 +153,8 @@
 		"typecheck": "tsc --noEmit",
 		"format": "prettier --write \"./**/*.{ts,json,md}\"",
 		"release": "bun run format && bun run build && bun publish",
-		"check:package": "absolute-changelog check"
+		"check:package": "absolute-changelog check",
+		"prepublishOnly": "absolute-changelog check"
 	},
 	"keywords": [
 		"absolutejs",
@@ -226,7 +227,7 @@
 	},
 	"devDependencies": {
 		"@absolutejs/absolute": "^0.20.0-beta.0",
-		"@absolutejs/changelog": "^0.1.2",
+		"@absolutejs/changelog": "^0.2.0",
 		"@absolutejs/isolated-jsc": "0.12.2",
 		"@angular/core": "21.2.18",
 		"@elysia/cron": "2.0.0-beta.1",
