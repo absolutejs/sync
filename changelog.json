@@ -6,6 +6,16 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Republish socket authentication fix after npm served metadata but returned 404 for the 2.32.1 tarball"
+				}
+			],
+			"date": "2026-09-24",
+			"version": "2.32.2"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Close rejected or stalled socket context authentication without leaking internal errors"
 				}
 			],
