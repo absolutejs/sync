@@ -453,3 +453,48 @@ describe('syncSocket (Elysia WebSocket)', () => {
 		void app.stop(false);
 	});
 });
+
+test('failed and stalled context resolution closes without exposing errors or subscribing', async () => {
+	for (const stalled of [false, true]) {
+		const engine = createSyncEngine();
+		const frames: AnyFrame[] = [];
+		const app = new Elysia()
+			.use(
+				syncSocket({
+					engine,
+					authenticationTimeoutMs: 30,
+					resolveContext: () =>
+						stalled
+							? new Promise(() => {})
+							: Promise.reject(
+									new Error('private credential detail')
+								)
+				})
+			)
+			.listen(0);
+		const ws = connect(app.server!.port!, frames);
+		try {
+			const closed = new Promise<CloseEvent>((resolve) =>
+				ws.addEventListener('close', resolve)
+			);
+			ws.addEventListener('open', () =>
+				ws.send(
+					JSON.stringify({
+						type: 'subscribe',
+						id: 'x',
+						collection: 'orders'
+					})
+				)
+			);
+			const event = await eventWithin(closed, 'failed context');
+			expect(event.code).toBe(4401);
+			expect(event.reason).toBe(
+				stalled ? 'Authentication Timeout' : 'Authentication Failed'
+			);
+			expect(frames).toEqual([]);
+		} finally {
+			ws.close();
+			await app.stop(true);
+		}
+	}
+});

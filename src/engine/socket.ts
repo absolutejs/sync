@@ -479,15 +479,22 @@ export const syncSocket = ({
 					}, authenticationTimeoutMs);
 					return;
 				}
-				const ctx = resolveContext
-					? // Elysia 2 hands the route context straight to the handler; the
-						// upgrade data that used to sit under `ws.data` is now spread on
-						// it, and `data` itself holds internal connection state instead.
-						await resolveContext(
-							ws as unknown as Record<string, unknown>
-						)
-					: {};
-				await tracked.activate(ctx);
+				tracked.authenticationTimer = setTimeout(() => {
+					if (!tracked.connection)
+						bunWs.close?.(4401, 'Authentication Timeout');
+				}, authenticationTimeoutMs);
+				try {
+					const ctx = resolveContext
+						? await resolveContext(
+								ws as unknown as Record<string, unknown>
+							)
+						: {};
+					await tracked.activate(ctx);
+				} catch {
+					bunWs.close?.(4401, 'Authentication Failed');
+				} finally {
+					clearTimeout(tracked.authenticationTimer);
+				}
 			},
 			async message(ws, message) {
 				const tracked = connections.get(ws.id);

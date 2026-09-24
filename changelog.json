@@ -5,6 +5,16 @@
 		{
 			"changes": [
 				{
+					"kind": "fixed",
+					"summary": "Close rejected or stalled socket context authentication without leaking internal errors"
+				}
+			],
+			"date": "2026-09-24",
+			"version": "2.32.1"
+		},
+		{
+			"changes": [
+				{
 					"kind": "added",
 					"summary": "Postgres transactional mutation receipts and payload-free committed table revision source"
 				}
