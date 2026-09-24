@@ -833,3 +833,31 @@ the short version: live queries, optimistic writes, and conflict-free editing
 ## License
 
 MIT
+
+### Transactional Postgres receipts and table revisions
+
+`@absolutejs/sync/postgres` exports `createPostgresMutationRunner` and
+`postgresMutationReceiptsMigration`. Run the migration once, then pass a database
+`transaction(run)` and parameterized `query(tx, sql, params)` implementation. The
+runner serializes each principal/operation pair with a transaction advisory lock,
+checks a canonical JSON argument fingerprint and commits the result receipt in
+**the same transaction** as the callback's business writes. Wire it to
+`durableMutations.run`; derive `durableMutations.scope` from the authenticated
+principal. Arguments and results must be JSON values (an undefined result is also
+supported); serialize dates explicitly. Retain receipts for the full possible
+client replay horizon. Authorization must still be checked on every invocation.
+
+`postgresTableRevisionsMigration(tables)` installs statement triggers and a
+bounded table-revision registry. `createPostgresTableRevisionSource({ read,
+listen?, reconcileMs?, onError? })` reads `{ table, revision: string }` metadata
+and uses optional LISTEN wakeups plus periodic reconciliation for missed signals.
+Use an unpooled connection for LISTEN where required by your database provider.
+No source row payloads or credentials enter the feed. Declare all domain and
+permission tables in a collection's `tables` dependencies, and recheck current
+access in `hydrate`. This adapter is for **refetch collections only**: it emits
+revision markers, not domain rows. The engine computes and delivers row diffs;
+it does not ask browsers to poll. For large collections use a row-level CDC
+adapter and scoped incremental matching instead. Revisions serialize concurrent
+writes per table; transactions touching several tables should use consistent
+write order and normal database deadlock handling. Migrations belong to deployment,
+never application request handling. Provide `onError` for operational visibility.

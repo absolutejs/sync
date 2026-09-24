@@ -170,3 +170,14 @@ export const postgresNotifyTrigger = (
 
 	return [functionSql, ...triggerSql].join('\n\n');
 };
+
+export {
+	createPostgresMutationRunner,
+	postgresMutationReceiptsMigration
+} from './receipts';
+export type { PostgresReceiptDatabase } from './receipts';
+export {
+	postgresTableRevisionsMigration,
+	createPostgresTableRevisionSource
+} from './revisions';
+export type { PostgresTableRevisionSourceOptions } from './revisions';
