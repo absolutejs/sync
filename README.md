@@ -861,3 +861,9 @@ adapter and scoped incremental matching instead. Revisions serialize concurrent
 writes per table; transactions touching several tables should use consistent
 write order and normal database deadlock handling. Migrations belong to deployment,
 never application request handling. Provide `onError` for operational visibility.
+
+PostgreSQL revision feeds accept both `tasks` and schema-qualified names such as
+`management_assistant_runtime.runs`. Use the same exact name in collection
+`tables` dependencies. Existing unqualified names keep their revision keys;
+when qualifying an existing dependency, update its migration and subscription
+together. Do not list both `tasks` and `public.tasks` for the same table.

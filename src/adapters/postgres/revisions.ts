@@ -1,30 +1,47 @@
 import type { ChangeSource, EmitChange } from '../../engine/types';
 
 const identifier = (value: string) => {
-	if (!/^[a-z_][a-z0-9_]*$/i.test(value))
+	if (!/^[a-z_][a-z0-9_]{0,62}$/i.test(value))
 		throw new TypeError('Invalid PostgreSQL identifier');
 	return '"' + value + '"';
+};
+const qualifiedIdentifier = (value: string) => {
+	const parts = value.split('.');
+	if (parts.length > 2) throw new TypeError('Expected table or schema.table');
+	return parts.map(identifier).join('.');
 };
 /** Bounded, payload-free change feed for collections using hydrate/refetch.
  * Revisions commit with the source writes. Each table's counter is row-locked,
  * so a later commit cannot hide an earlier uncommitted revision. Does not expose
  * source row values (particularly important for auth/credential tables).
+ * Names may be `table` or `schema.table`; subscribe using the same exact name.
+ * Unqualified names retain their existing revision keys.
  */
 export function postgresTableRevisionsMigration(tables: string[]) {
+	const aliases = new Map<string, string>();
+	for (const table of tables) {
+		qualifiedIdentifier(table);
+		const canonical = table.includes('.') ? table : 'public.' + table;
+		const previous = aliases.get(canonical);
+		if (previous && previous !== table)
+			throw new TypeError('Use one revision key per PostgreSQL table');
+		aliases.set(canonical, table);
+	}
 	return `CREATE TABLE IF NOT EXISTS absolute_sync_table_revisions (table_name text PRIMARY KEY, revision bigint NOT NULL DEFAULT 0);
 CREATE OR REPLACE FUNCTION absolute_sync_bump_table_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE revision_key text := COALESCE(TG_ARGV[0], TG_TABLE_NAME);
 BEGIN
- INSERT INTO absolute_sync_table_revisions(table_name, revision) VALUES (TG_TABLE_NAME, 1)
+ INSERT INTO absolute_sync_table_revisions(table_name, revision) VALUES (revision_key, 1)
  ON CONFLICT (table_name) DO UPDATE SET revision = absolute_sync_table_revisions.revision + 1;
- PERFORM pg_notify('absolute_sync_revisions', TG_TABLE_NAME);
+ PERFORM pg_notify('absolute_sync_revisions', revision_key);
  RETURN NULL;
 END; $$;
 ${[...new Set(tables)]
 	.map(
 		(
 			table
-		) => `DROP TRIGGER IF EXISTS absolute_sync_table_revision ON ${identifier(table)};
-CREATE TRIGGER absolute_sync_table_revision AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON ${identifier(table)} FOR EACH STATEMENT EXECUTE FUNCTION absolute_sync_bump_table_revision();`
+		) => `DROP TRIGGER IF EXISTS absolute_sync_table_revision ON ${qualifiedIdentifier(table)};
+CREATE TRIGGER absolute_sync_table_revision AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON ${qualifiedIdentifier(table)} FOR EACH STATEMENT EXECUTE FUNCTION absolute_sync_bump_table_revision('${table}');`
 	)
 	.join('\n')}`;
 }
