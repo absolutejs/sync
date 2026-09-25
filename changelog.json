@@ -6,6 +6,16 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Support schema-qualified PostgreSQL revision feeds without colliding subscription keys"
+				}
+			],
+			"date": "2026-09-25",
+			"version": "2.32.4"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Republish socket authentication fix after npm served metadata but returned 404 for the 2.32.1 tarball"
 				}
 			],
