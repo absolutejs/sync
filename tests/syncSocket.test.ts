@@ -291,6 +291,31 @@ describe('syncSocket (Elysia WebSocket)', () => {
 		void app.stop(false);
 	});
 
+	test('serves two sockets on different paths in one app', async () => {
+		const engine = createSyncEngine();
+		const app = new Elysia()
+			.use(syncSocket({ engine, resolveContext: () => ({ userId: 5 }) }))
+			.use(
+				syncSocket({
+					authenticate: () => ({ userId: 5 }),
+					authenticationTimeoutMs: 20,
+					engine,
+					path: '/sync/other'
+				})
+			)
+			.listen(0);
+		const port = app.server?.port ?? 0;
+		const other = new WebSocket(`ws://localhost:${port}/sync/other`);
+		const closed = new Promise<CloseEvent>((resolve) =>
+			other.addEventListener('close', resolve)
+		);
+		// The second socket exists and applies its own ticket policy.
+		const event = await eventWithin(closed, 'second socket');
+		expect(event.code).toBe(4401);
+		expect(event.reason).toBe('Authentication Timeout');
+		void app.stop(false);
+	});
+
 	test('times out sockets that never provide an authentication frame', async () => {
 		const engine = createSyncEngine();
 		const app = new Elysia()
