@@ -368,7 +368,9 @@ export const syncSocket = ({
 		}
 	};
 
-	const app = new Elysia({ name: '@absolutejs/sync/socket' })
+	// Seeded by path: Elysia drops a second plugin with the same name, so
+	// without it an app can't serve two sockets (e.g. browser and terminal).
+	const app = new Elysia({ name: '@absolutejs/sync/socket', seed: path })
 		// Elysia 2 no longer bundles WebSocket support; without this the
 		// route below is silently never served.
 		.use(websocket())
