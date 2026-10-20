@@ -5,6 +5,19 @@
 		{
 			"changes": [
 				{
+					"kind": "added",
+					"summary": "Server reactions without timers: createPostgresSignalReaction (from @absolutejs/sync/postgres) runs durable work on NOTIFY and catches up on (re)connect; the table revision source accepts reconcileMs: false",
+					"symbols": [
+						"PostgresTableRevisionSourceOptions"
+					]
+				}
+			],
+			"date": "2026-10-20",
+			"version": "2.33.0"
+		},
+		{
+			"changes": [
+				{
 					"kind": "fixed",
 					"summary": "Serve more than one syncSocket in an app: each socket plugin is seeded by its path, so Elysia no longer drops the second as a duplicate"
 				}
