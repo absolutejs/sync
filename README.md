@@ -862,6 +862,46 @@ writes per table; transactions touching several tables should use consistent
 write order and normal database deadlock handling. Migrations belong to deployment,
 never application request handling. Provide `onError` for operational visibility.
 
+Pass `reconcileMs: false` to drop the periodic re-read entirely when your
+`listen` also calls `wake` whenever the connection is (re)established (Bun SQL:
+`sql.listen(channel, wake, wake)`): a reconnect is then the catch-up, and nothing
+runs on a timer.
+
+### Server reactions without timers
+
+`createPostgresSignalReaction({ channel, listen, claim, run, onFailure?, batch?,
+onError? })` runs server work because something happened — a webhook, a write —
+never on a schedule. Write the pending work durably in the same transaction as
+its cause (e.g. a row with `state = 'pending'`) and `NOTIFY channel`. The
+reaction wakes on the notification, claims work with `claim(limit)` (hand each
+piece to one process: `FOR UPDATE SKIP LOCKED`), runs it and claims again until
+nothing is left. `listen` must also wake on every (re)connect, which is how work
+that arrived while a process was down or disconnected runs as soon as it listens
+again. Delivery is at-least-once, so `run` must be idempotent and record its own
+completion; a failure goes to `onFailure` (record the attempt, release or give
+up) and waits for the next signal instead of spinning. Connect it like any
+source, `engine.connectSource(reaction)`; the writes `run` makes reach
+subscribers through the revision triggers. External effects that must happen
+exactly once (an email, a payment) belong in such a pending row with the
+provider's idempotency key, not in a fire-and-forget call.
+
+```ts
+const costRuns = createPostgresSignalReaction({
+	channel: 'ci_runs',
+	listen: (channel, wake) => listenerSql.listen(channel, wake, wake),
+	claim: (limit) => sql`UPDATE ci_runs SET state = 'claimed'
+		WHERE id IN (SELECT id FROM ci_runs WHERE state = 'pending'
+		ORDER BY id LIMIT ${limit} FOR UPDATE SKIP LOCKED) RETURNING *`,
+	run: async (run) => {
+		const jobs = await github.jobs(run.repo, run.run_id);
+		await sql`UPDATE ci_runs SET cost = ${cost(jobs)}, state = 'done' WHERE id = ${run.id}`;
+	},
+	onFailure: (run) =>
+		sql`UPDATE ci_runs SET state = 'pending', attempts = attempts + 1 WHERE id = ${run.id}`
+});
+engine.connectSource(costRuns);
+```
+
 PostgreSQL revision feeds accept both `tasks` and schema-qualified names such as
 `management_assistant_runtime.runs`. Use the same exact name in collection
 `tables` dependencies. Existing unqualified names keep their revision keys;

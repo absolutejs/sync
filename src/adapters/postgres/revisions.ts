@@ -49,12 +49,18 @@ CREATE TRIGGER absolute_sync_table_revision AFTER INSERT OR UPDATE OR DELETE OR 
 export type PostgresTableRevisionSourceOptions = {
 	/** Return ALL tracked table revisions; never page/limit this small metadata set. */
 	read: () => Promise<{ table: string; revision: string }[]>;
-	/** Optional low-latency wakeup; periodic reconciliation repairs missed signals. */
+	/** Low-latency wakeup. Call `wake` for each notification AND whenever the
+	 *  listening connection is (re)established — e.g. Bun SQL's
+	 *  `sql.listen(channel, wake, wake)` — so a reconnect catches up on what it
+	 *  missed. */
 	listen?: (
 		channel: string,
 		wake: () => void
 	) => Promise<() => void | Promise<void>>;
-	reconcileMs?: number;
+	/** Periodic re-read that repairs missed signals. `false` turns it off: with
+	 *  a `listen` that wakes on every (re)connect, catch-up happens on
+	 *  reconnect and nothing runs on a timer. Default 5000. */
+	reconcileMs?: number | false;
 	onError?: (error: unknown) => void;
 };
 /** Only use with refetch collections: emitted rows are revision markers, not
@@ -72,7 +78,11 @@ export function createPostgresTableRevisionSource(
 	let emit: EmitChange;
 	const seen = new Map<string, string>();
 	const interval = options.reconcileMs ?? 5000;
-	if (!Number.isFinite(interval) || interval < 100)
+	if (interval === false && !options.listen)
+		throw new TypeError(
+			'reconcileMs: false needs a listen that wakes on (re)connect'
+		);
+	if (interval !== false && (!Number.isFinite(interval) || interval < 100))
 		throw new TypeError('reconcileMs must be at least 100');
 	const report = (error: unknown) => options.onError?.(error);
 	const drain = async () => {
@@ -101,7 +111,8 @@ export function createPostgresTableRevisionSource(
 			report(error);
 		} finally {
 			running = false;
-			if (!stopped) timer = setTimeout(() => void drain(), interval);
+			if (!stopped && interval !== false)
+				timer = setTimeout(() => void drain(), interval);
 		}
 	};
 	return {

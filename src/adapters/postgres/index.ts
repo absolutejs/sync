@@ -181,3 +181,5 @@ export {
 	createPostgresTableRevisionSource
 } from './revisions';
 export type { PostgresTableRevisionSourceOptions } from './revisions';
+export { createPostgresSignalReaction } from './reaction';
+export type { PostgresSignalReactionOptions } from './reaction';
