@@ -5,6 +5,28 @@
 		{
 			"changes": [
 				{
+					"detail": "Elysia 2.0.0-rc.0 renamed every lifecycle hook to its `on` form and removed `setup`/`cleanup`. sync's peer ranges (`elysia ^2.0.0-beta.6`, `@elysia/cron ^2.0.0-beta.1`) accepted it untested. sync now builds and tests against Elysia 2.0.0-rc.0 and requires `^2.0.0-rc.0` for both; the plugins whose types carry Elysia's are listed below. No sync API changed shape.",
+					"kind": "breaking",
+					"migration": {
+						"instruction": "Upgrade `elysia` and every `@elysia/*` package (including `@elysia/cron`) to 2.0.0-rc.0 or later 2.x, then rename lifecycle hooks in your app: request → onRequest, beforeHandle → onBeforeHandle, afterHandle → onAfterHandle, afterResponse → onAfterResponse, error → onError, parse → onParse, transform → onTransform; setup/cleanup → onStart/onStop.",
+						"manual": true
+					},
+					"summary": "Requires Elysia 2.0.0-rc.0 and @elysia/cron 2.0.0-rc.0",
+					"symbols": [
+						"createPlatformSyncRuntime",
+						"scheduled",
+						"syncCdc",
+						"syncDevtools",
+						"syncSocket"
+					]
+				}
+			],
+			"date": "2026-10-22",
+			"version": "3.0.0"
+		},
+		{
+			"changes": [
+				{
 					"kind": "added",
 					"summary": "Server reactions without timers: createPostgresSignalReaction (from @absolutejs/sync/postgres) runs durable work on NOTIFY and catches up on (re)connect; the table revision source accepts reconcileMs: false",
 					"symbols": [
