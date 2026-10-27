@@ -233,16 +233,15 @@ export type SyncSocketOptions = {
 	/**
 	 * Fired when the per-connection WS buffer crosses `maxBufferedBytes`, OR
 	 * when `ws.send()` returns `-1` (Bun's backpressure signal). The signal
-	 * re-arms once the WS reports `drain`. Pair with `closeOnSlow: true` to
-	 * kick slow clients automatically, or use this hook to charge the
-	 * tenant extra via `@absolutejs/metering`.
+	 * re-arms once the WS reports `drain`. `closeOnSlow` only closes sockets above
+	 * the configured byte limit; temporary backpressure is recoverable.
 	 *
 	 * Added in 1.14.0.
 	 */
 	onSlow?: (event: SlowConnectionEvent) => void | Promise<void>;
 	/**
-	 * Close the WS the first time a connection crosses `maxBufferedBytes`
-	 * (or the `-1` send threshold). Default `false`. Client will reconnect
+	 * Close the WS when a connection crosses `maxBufferedBytes`. Temporary
+	 * `-1` sends remain connected and recover on drain. Default `false`. Client will reconnect
 	 * and re-hydrate.
 	 *
 	 * Added in 1.14.0.
@@ -376,15 +375,19 @@ export const syncSocket = ({
 		.use(websocket())
 		.ws(path, {
 			async open(ws) {
-				// Permissive shape: we read `getBufferedAmount` + `close` if the
-				// runtime supports them (Bun's ServerWebSocket does) — fall back
-				// silently for test fakes. Accepts both string and Uint8Array
-				// payloads (binary serializers via 1.16.0).
-				const bunWs = ws as unknown as {
-					id: string;
-					send: (data: string | Uint8Array | ArrayBuffer) => number;
-					getBufferedAmount?: () => number;
-					close?: (code?: number, reason?: string) => void;
+				const bunWs = ws;
+				// Elysia exposes buffer inspection on the underlying runtime socket,
+				// not on its context wrapper. Narrow the capability explicitly.
+				const readBufferedAmount = () => {
+					const raw: unknown = Reflect.get(ws, 'raw');
+					if (
+						isRecord(raw) &&
+						typeof raw.getBufferedAmount === 'function'
+					) {
+						const amount: unknown = raw.getBufferedAmount();
+						if (typeof amount === 'number') return amount;
+					}
+					return 0;
 				};
 				if (controllerState?.draining) {
 					bunWs.close?.(1012, 'Service Restart');
@@ -435,7 +438,7 @@ export const syncSocket = ({
 									? payload
 									: (payload as Uint8Array)
 							);
-							const buffered = bunWs.getBufferedAmount?.() ?? 0;
+							const buffered = readBufferedAmount();
 							const overBuffer = buffered > threshold;
 							const backpressure = ret === -1;
 							if (
@@ -445,14 +448,17 @@ export const syncSocket = ({
 								tracked.slowSignaled = true;
 								fireSlow({
 									bufferedAmount: buffered,
-									reason: backpressure
-										? 'send-backpressure'
-										: 'buffer-threshold',
+									reason: overBuffer
+										? 'buffer-threshold'
+										: 'send-backpressure',
 									stats: connection.stats(),
 									wsId: bunWs.id
 								});
-								if (closeOnSlow) bunWs.close?.();
 							}
+							// A queued -1 can recover on drain. Enforce the byte limit
+							// even if a prior pressure notification has already fired.
+							if (closeOnSlow && overBuffer)
+								bunWs.close(1013, 'Sync buffer limit exceeded');
 							return ret;
 						}
 					});

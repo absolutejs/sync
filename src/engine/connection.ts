@@ -285,6 +285,8 @@ export const createSyncConnection = ({
 	serializer = jsonSerializer
 }: SyncConnectionOptions): SyncConnection => {
 	const subscriptions = new Map<string, Subscription<unknown>>();
+	const subscriptionOwners = new Map<string, symbol>();
+	let closed = false;
 	// This connection's presence memberships (one per room), torn down on close.
 	const presenceRooms = new Map<string, PresenceHandle<unknown>>();
 
@@ -294,6 +296,7 @@ export const createSyncConnection = ({
 	let framesSent = 0;
 	let slowSendsRecent = 0;
 	const send = (frame: ServerFrame) => {
+		if (closed) return;
 		const ret = rawSend(frame);
 		if (ret === -1) {
 			slowSendsRecent += 1;
@@ -356,6 +359,7 @@ export const createSyncConnection = ({
 		diffVersion: number,
 		cursor?: string
 	) => {
+		if (closed) return;
 		// A new version means a new batch — flush the previous one first.
 		if (pending.length > 0 && pendingVersion !== diffVersion) {
 			flush();
@@ -369,6 +373,7 @@ export const createSyncConnection = ({
 	};
 
 	const handle = async (raw: unknown) => {
+		if (closed) return;
 		const frame = parseFrame(raw, serializer);
 		if (frame === undefined) {
 			send({ type: 'error', message: 'Malformed sync frame' });
@@ -413,6 +418,8 @@ export const createSyncConnection = ({
 		}
 
 		if (frame.type === 'unsubscribe') {
+			subscriptionOwners.delete(frame.id);
+			pending = pending.filter((diff) => diff.id !== frame.id);
 			subscriptions.get(frame.id)?.unsubscribe();
 			subscriptions.delete(frame.id);
 			return;
@@ -462,7 +469,7 @@ export const createSyncConnection = ({
 			return;
 		}
 
-		if (subscriptions.has(frame.id)) {
+		if (subscriptionOwners.has(frame.id)) {
 			send({
 				type: 'error',
 				id: frame.id,
@@ -471,6 +478,10 @@ export const createSyncConnection = ({
 			return;
 		}
 
+		const owner = Symbol(frame.id);
+		subscriptionOwners.set(frame.id, owner);
+		const ownsSubscription = () =>
+			!closed && subscriptionOwners.get(frame.id) === owner;
 		try {
 			const subscription = await engine.subscribe({
 				collection: frame.collection,
@@ -478,6 +489,7 @@ export const createSyncConnection = ({
 				ctx,
 				since: frame.since,
 				onDiff: (diff, diffVersion, cursor) => {
+					if (!ownsSubscription()) return;
 					bufferDiff(
 						{
 							id: frame.id,
@@ -490,6 +502,10 @@ export const createSyncConnection = ({
 					);
 				}
 			});
+			if (!ownsSubscription()) {
+				subscription.unsubscribe();
+				return;
+			}
 			subscriptions.set(frame.id, subscription);
 			// No await between subscribe resolving and this send, so the initial
 			// reply always precedes any diff for this subscription.
@@ -514,6 +530,8 @@ export const createSyncConnection = ({
 				});
 			}
 		} catch (error) {
+			if (!ownsSubscription()) return;
+			subscriptionOwners.delete(frame.id);
 			send({
 				type: 'error',
 				id: frame.id,
@@ -523,6 +541,12 @@ export const createSyncConnection = ({
 	};
 
 	const close = () => {
+		if (closed) return;
+		closed = true;
+		subscriptionOwners.clear();
+		pending = [];
+		pendingVersion = undefined;
+		pendingCursor = undefined;
 		for (const subscription of subscriptions.values()) {
 			subscription.unsubscribe();
 		}

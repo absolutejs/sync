@@ -523,3 +523,83 @@ test('failed and stalled context resolution closes without exposing errors or su
 		}
 	}
 });
+
+test('temporary backpressure remains connected; subsequent byte-limit crossing still closes', async () => {
+	const engine = createSyncEngine();
+	engine.register(
+		defineCollection<{ id: number }>({
+			name: 'items',
+			key: (row) => row.id,
+			match: () => true,
+			hydrate: () => [{ id: 1 }]
+		})
+	);
+	let buffered = 16;
+	const pressure: number[] = [];
+	const controller = createSyncSocketController();
+	const app = new Elysia()
+		.use(
+			syncSocket({
+				engine,
+				controller,
+				maxBufferedBytes: 1024,
+				closeOnSlow: true,
+				resolveContext: (socket) => {
+					// Exercise the Elysia wrapper / raw transport boundary with deterministic
+					// pressure, without relying on OS TCP buffer sizes.
+					const raw = socket.raw;
+					if (typeof raw !== 'object' || raw === null)
+						throw new Error('Missing raw socket');
+					Object.defineProperty(raw, 'getBufferedAmount', {
+						value: () => buffered,
+						configurable: true
+					});
+					Object.defineProperty(socket, 'send', {
+						value: () => -1,
+						configurable: true
+					});
+					return {};
+				},
+				onSlow: (event) => {
+					pressure.push(event.bufferedAmount);
+				}
+			})
+		)
+		.listen(0);
+	const client = connect(app.server!.port!, []);
+	try {
+		await eventWithin(
+			new Promise<void>((resolve) =>
+				client.addEventListener('open', () => resolve(), { once: true })
+			),
+			'open'
+		);
+		client.send(
+			JSON.stringify({
+				type: 'subscribe',
+				id: 'one',
+				collection: 'items'
+			})
+		);
+		await waitFor(() => pressure.length === 1);
+		expect(pressure).toEqual([16]);
+		expect(controller.connectionCount()).toBe(1);
+		buffered = 2048;
+		const closed = new Promise<CloseEvent>((resolve) =>
+			client.addEventListener('close', resolve, { once: true })
+		);
+		client.send(
+			JSON.stringify({
+				type: 'subscribe',
+				id: 'two',
+				collection: 'items'
+			})
+		);
+		expect((await eventWithin(closed, 'buffer close')).code).toBe(1013);
+		await waitFor(() => controller.connectionCount() === 0);
+		expect(engine.metrics().subscriptions.total).toBe(0);
+	} finally {
+		client.close();
+		await app.stop(true);
+	}
+});

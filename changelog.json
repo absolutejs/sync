@@ -5,6 +5,23 @@
 		{
 			"changes": [
 				{
+					"kind": "fixed",
+					"summary": "Read WebSocket buffer usage from the underlying Elysia transport and allow queued temporary backpressure to drain without reconnecting; enforce configured byte limits independently of notifications",
+					"symbols": [
+						"SyncSocketOptions"
+					]
+				},
+				{
+					"kind": "fixed",
+					"summary": "Release late subscriptions after connection close or unsubscribe, reject duplicate in-flight subscription IDs, and prevent sends after close"
+				}
+			],
+			"date": "2026-10-27",
+			"version": "3.0.1"
+		},
+		{
+			"changes": [
+				{
 					"detail": "Elysia 2.0.0-rc.0 renamed every lifecycle hook to its `on` form and removed `setup`/`cleanup`. sync's peer ranges (`elysia ^2.0.0-beta.6`, `@elysia/cron ^2.0.0-beta.1`) accepted it untested. sync now builds and tests against Elysia 2.0.0-rc.0 and requires `^2.0.0-rc.0` for both; the plugins whose types carry Elysia's are listed below. No sync API changed shape.",
 					"kind": "breaking",
 					"migration": {
