@@ -217,6 +217,12 @@ export type SyncSocketOptions = {
 	) => unknown | Promise<unknown>;
 	/** Time allowed for the first authentication frame. Defaults to 10 seconds. */
 	authenticationTimeoutMs?: number;
+	/** Maximum queued frames while authentication/context resolution is pending.
+	 * Defaults to 128. Must be a positive safe integer. */
+	maxPendingAuthFrames?: number;
+	/** Maximum serialized bytes queued before authentication completes.
+	 * Defaults to 1 MiB. Must be a positive safe integer. */
+	maxPendingAuthBytes?: number;
 	/**
 	 * Automatically mounted finite HTTP transport for native/PWA background
 	 * work. Set `false` to opt out. Defaults to the managed background path.
@@ -268,6 +274,7 @@ type TrackedConnection = {
 	// @absolutejs/sync client does) loses it whenever auth is slow (a DB lookup).
 	connection: SyncConnection | null;
 	pending: unknown[];
+	pendingBytes: number;
 	slowSignaled: boolean;
 };
 
@@ -288,6 +295,8 @@ type TrackedConnection = {
 export const syncSocket = ({
 	authenticate,
 	authenticationTimeoutMs = 10_000,
+	maxPendingAuthFrames = 128,
+	maxPendingAuthBytes = 1024 * 1024,
 	engine,
 	controller,
 	path = '/sync/ws',
@@ -299,6 +308,12 @@ export const syncSocket = ({
 	closeOnSlow = false,
 	serializer = jsonSerializer
 }: SyncSocketOptions) => {
+	for (const limit of [maxPendingAuthFrames, maxPendingAuthBytes]) {
+		if (!Number.isSafeInteger(limit) || limit <= 0)
+			throw new RangeError(
+				'Sync pending authentication limits must be positive safe integers'
+			);
+	}
 	const connections = new Map<string, TrackedConnection>();
 	const controllerState = controller
 		? controllerStates.get(controller)
@@ -308,6 +323,16 @@ export const syncSocket = ({
 			'syncSocket controller must be created with createSyncSocketController()'
 		);
 	}
+	const retireConnection = (id: string) => {
+		const tracked = connections.get(id);
+		if (!tracked) return;
+		connections.delete(id);
+		controllerState?.sockets.delete(id);
+		clearTimeout(tracked.authenticationTimer);
+		tracked.pending = [];
+		tracked.pendingBytes = 0;
+		tracked.connection?.close();
+	};
 	const threshold = maxBufferedBytes ?? Infinity;
 	const headlessOptions = headless === false ? undefined : (headless ?? {});
 	const headlessContext = async (context: SyncRouteContext) => {
@@ -374,7 +399,7 @@ export const syncSocket = ({
 		// route below is silently never served.
 		.use(websocket())
 		.ws(path, {
-			async open(ws) {
+			open(ws) {
 				const bunWs = ws;
 				// Elysia exposes buffer inspection on the underlying runtime socket,
 				// not on its context wrapper. Narrow the capability explicitly.
@@ -402,6 +427,7 @@ export const syncSocket = ({
 					activate: async () => undefined,
 					connection: null,
 					pending: [],
+					pendingBytes: 0,
 					slowSignaled: false
 				};
 				connections.set(bunWs.id, tracked);
@@ -426,6 +452,7 @@ export const syncSocket = ({
 						: undefined);
 
 				tracked.activate = async (ctx) => {
+					if (connections.get(bunWs.id) !== tracked) return;
 					const connection = createSyncConnection({
 						engine,
 						ctx,
@@ -469,6 +496,7 @@ export const syncSocket = ({
 					tracked.connection = connection;
 					const buffered = tracked.pending;
 					tracked.pending = [];
+					tracked.pendingBytes = 0;
 					for (const frame of buffered)
 						await connection.handle(frame);
 				};
@@ -482,27 +510,35 @@ export const syncSocket = ({
 				}
 				if (tracked.authenticate) {
 					tracked.authenticationTimer = setTimeout(() => {
-						if (!tracked.connection)
+						if (!tracked.connection) {
+							retireConnection(bunWs.id);
 							bunWs.close?.(4401, 'Authentication Timeout');
+						}
 					}, authenticationTimeoutMs);
 					return;
 				}
 				tracked.authenticationTimer = setTimeout(() => {
-					if (!tracked.connection)
+					if (!tracked.connection) {
+						retireConnection(bunWs.id);
 						bunWs.close?.(4401, 'Authentication Timeout');
+					}
 				}, authenticationTimeoutMs);
-				try {
-					const ctx = resolveContext
-						? await resolveContext(
-								ws as unknown as Record<string, unknown>
-							)
-						: {};
-					await tracked.activate(ctx);
-				} catch {
-					bunWs.close?.(4401, 'Authentication Failed');
-				} finally {
-					clearTimeout(tracked.authenticationTimer);
-				}
+				// Resolve in the background so the transport delivers pending frames
+				// to our bounded queue instead of retaining them behind an async open.
+				void (async () => {
+					try {
+						const ctx = resolveContext
+							? await resolveContext(
+									ws as unknown as Record<string, unknown>
+								)
+							: {};
+						await tracked.activate(ctx);
+					} catch {
+						bunWs.close?.(4401, 'Authentication Failed');
+					} finally {
+						clearTimeout(tracked.authenticationTimer);
+					}
+				})();
 			},
 			async message(ws, message) {
 				const tracked = connections.get(ws.id);
@@ -549,6 +585,28 @@ export const syncSocket = ({
 						}
 					})();
 				} else {
+					const bytes =
+						typeof message === 'string'
+							? Buffer.byteLength(message)
+							: ArrayBuffer.isView(message)
+								? message.byteLength
+								: message instanceof ArrayBuffer
+									? message.byteLength
+									: Buffer.byteLength(
+											JSON.stringify(message) ?? ''
+										);
+					if (
+						tracked.pending.length >= maxPendingAuthFrames ||
+						tracked.pendingBytes + bytes > maxPendingAuthBytes
+					) {
+						retireConnection(ws.id);
+						ws.close(
+							1009,
+							'Sync authentication queue limit exceeded'
+						);
+						return;
+					}
+					tracked.pendingBytes += bytes;
 					tracked.pending.push(message);
 				}
 			},
@@ -559,13 +617,7 @@ export const syncSocket = ({
 				if (tracked) tracked.slowSignaled = false;
 			},
 			close(ws) {
-				const tracked = connections.get(ws.id);
-				if (tracked) {
-					clearTimeout(tracked.authenticationTimer);
-					tracked.connection?.close();
-					connections.delete(ws.id);
-					controllerState?.sockets.delete(ws.id);
-				}
+				retireConnection(ws.id);
 			}
 		});
 

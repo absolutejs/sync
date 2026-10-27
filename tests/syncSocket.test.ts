@@ -603,3 +603,95 @@ test('temporary backpressure remains connected; subsequent byte-limit crossing s
 		await app.stop(true);
 	}
 });
+
+test('bounds pending authentication frames and bytes and never activates a retired socket', async () => {
+	for (const ticket of [false, true]) {
+		for (const byteLimit of [false, true]) {
+			let finishAuth: (value: unknown) => void = () => {};
+			const auth = new Promise<unknown>((resolve) => {
+				finishAuth = resolve;
+			});
+			let hydrated = 0;
+			const engine = createSyncEngine();
+			engine.register(
+				defineCollection<{ id: number }>({
+					name: 'orders',
+					hydrate: () => {
+						hydrated++;
+						return [];
+					},
+					match: () => true
+				})
+			);
+			const controller = createSyncSocketController();
+			const frames: AnyFrame[] = [];
+			const app = new Elysia()
+				.use(
+					syncSocket({
+						engine,
+						controller,
+						...(ticket
+							? { authenticate: () => auth }
+							: { resolveContext: () => auth }),
+						maxPendingAuthFrames: 2,
+						maxPendingAuthBytes: byteLimit ? 64 : 4096
+					})
+				)
+				.listen(0);
+			const ws = connect(app.server!.port!, frames);
+			try {
+				const closed = new Promise<CloseEvent>((resolve) =>
+					ws.addEventListener('close', resolve)
+				);
+				await eventWithin(
+					new Promise<Event>((resolve) =>
+						ws.addEventListener('open', resolve)
+					),
+					'open'
+				);
+				if (ticket)
+					ws.send(
+						JSON.stringify({ type: 'authenticate', ticket: 'test' })
+					);
+				for (let index = 0; index < (byteLimit ? 1 : 3); index++) {
+					ws.send(
+						JSON.stringify({
+							type: 'subscribe',
+							id: String(index),
+							collection: 'orders',
+							params: byteLimit ? { value: 'é'.repeat(64) } : {}
+						})
+					);
+				}
+				const event = await eventWithin(closed, 'queue limit');
+				expect(event.code).toBe(1009);
+				expect(controller.connectionCount()).toBe(0);
+				finishAuth({});
+				await Bun.sleep(20);
+				expect(hydrated).toBe(0);
+				expect(frames).toEqual([]);
+			} finally {
+				finishAuth({});
+				ws.close();
+				await app.stop(true);
+			}
+		}
+	}
+});
+
+test('rejects unbounded or invalid pending authentication limits', () => {
+	for (const limit of [0, -1, Infinity, NaN, 1.5]) {
+		expect(() =>
+			syncSocket({
+				engine: createSyncEngine(),
+				maxPendingAuthBytes: limit
+			})
+		).toThrow(RangeError);
+		expect(() =>
+			syncSocket({
+				engine: createSyncEngine(),
+				maxPendingAuthFrames: limit
+			})
+		).toThrow(RangeError);
+	}
+});

@@ -6,6 +6,20 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Bound pending authentication queues and retire timed-out sockets before late context resolution",
+					"symbols": [
+						"syncSocket",
+						"SyncSocketOptions"
+					]
+				}
+			],
+			"date": "2026-10-27",
+			"version": "3.0.2"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Read WebSocket buffer usage from the underlying Elysia transport and allow queued temporary backpressure to drain without reconnecting; enforce configured byte limits independently of notifications",
 					"symbols": [
 						"SyncSocketOptions"
