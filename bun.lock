@@ -12,7 +12,7 @@
       "devDependencies": {
         "@absolutejs/absolute": "^0.20.0-beta.0",
         "@absolutejs/changelog": "^0.6.0",
-        "@absolutejs/isolated-jsc": "0.14.0",
+        "@absolutejs/isolated-jsc": "0.15.0",
         "@angular/core": "21.2.18",
         "@elysia/cron": "2.0.0-rc.0",
         "@elysia/eden": "2.0.0-rc.0",
@@ -30,7 +30,7 @@
         "vue": "3.5.40",
       },
       "peerDependencies": {
-        "@absolutejs/isolated-jsc": ">=0.12.2 <0.15.0",
+        "@absolutejs/isolated-jsc": ">=0.12.2 <1.0.0",
         "@angular/core": ">=21.2.18 <22",
         "@elysia/cron": "^2.0.0-rc.0",
         "@modelcontextprotocol/sdk": ">=1.29.0 <2",
@@ -62,7 +62,7 @@
 
     "@absolutejs/handoff": ["@absolutejs/handoff@0.1.0", "", { "dependencies": { "@absolutejs/manifest": "0.7.2", "@sinclair/typebox": "0.34.52" } }, "sha512-P9Wr2oyYBcj7mriCV4h9zRlLGijee/7DW8USVkl/m4ovql7zpITy547jy6j8+HC5v5Ocs+TVcMYmrROEEBupNg=="],
 
-    "@absolutejs/isolated-jsc": ["@absolutejs/isolated-jsc@0.14.0", "", { "dependencies": { "@absolutejs/telemetry": "^0.3.0" }, "bin": { "isolated-jsc": "dist/doctor.js", "isolated-jsc-doctor": "dist/doctor.js" } }, "sha512-k0bL4acRMSfo7fJiHOnCGU2TJAU8RTeceWafNbl96D0geBOgscqj4aQv8+Ju3TfXJ0kakAn4LjcrgCJqUb3bDg=="],
+    "@absolutejs/isolated-jsc": ["@absolutejs/isolated-jsc@0.15.0", "", { "dependencies": { "@absolutejs/telemetry": "^0.3.0" }, "bin": { "isolated-jsc": "dist/doctor.js", "isolated-jsc-doctor": "dist/doctor.js" } }, "sha512-LCKw2iSLs4/X5xbJ6+PU9jxywjFnuBLyC2WDuRufIK0Go/tTb7c+QABPPqnWuufe8/G3g3S3VFVGTReksMEc4g=="],
 
     "@absolutejs/manifest": ["@absolutejs/manifest@0.9.0", "", { "peerDependencies": { "@sinclair/typebox": ">=0.34.0 <0.35.0" }, "bin": { "absolute-manifest": "dist/cli.js" } }, "sha512-naNDdwNoWQgJ3HuFbAu1UcOVR7SGpLBJz/seO8MMX32vrxk6esgzY7OB1CL8YDOegtI/EqQfcvnulnP66A9aGg=="],
 
