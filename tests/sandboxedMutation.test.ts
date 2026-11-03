@@ -11,6 +11,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import * as jsc from 'bun:jsc';
 import { defineCollection } from '../src/engine/collection';
 import { defineMutation } from '../src/engine/mutation';
 import { createSyncEngine } from '../src/engine/syncEngine';
@@ -35,6 +36,42 @@ const rejection = async (promise: Promise<unknown>): Promise<unknown> => {
 };
 
 describe('sandboxed mutations', () => {
+	test('requireLockdown runs locked down on patched Bun and refuses otherwise', async () => {
+		const runtimeHasLockdown =
+			typeof (jsc as { lockdown?: unknown }).lockdown === 'function';
+		const engine = createSyncEngine();
+		engine.register(itemsCollection('lockdown_items'));
+		engine.registerMutation(
+			defineMutation({
+				name: 'probeLockdown',
+				sandboxedHandler: `async () => ({
+					bun: (0, eval)('typeof Bun'),
+					load: await import('node:child_process').then(
+						() => 'loaded',
+						(error) => error.name
+					)
+				})`,
+				sandbox: {
+					backend: 'worker',
+					requireLockdown: true,
+					timeout: 5000
+				}
+			})
+		);
+
+		if (runtimeHasLockdown) {
+			expect(await engine.runMutation('probeLockdown', {}, {})).toEqual({
+				bun: 'undefined',
+				load: 'TypeError'
+			});
+		} else {
+			const error = await rejection(
+				engine.runMutation('probeLockdown', {}, {})
+			);
+			expect((error as Error).name).toBe('LockdownUnavailableError');
+		}
+	});
+
 	test('sandboxed handler executes via actions.change and emits diffs', async () => {
 		const engine = createSyncEngine();
 		engine.register(itemsCollection('items'));
