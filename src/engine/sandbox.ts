@@ -184,8 +184,23 @@ export type SandboxConfig = {
 	 *
 	 * Pin to `'ffi'` to bypass the auto-probe when you know libJSC is
 	 * reachable (e.g. CI with a known image).
+	 *
+	 * On stock Bun the Worker backend does not contain a handler that tries
+	 * to escape: it can reach the `Bun` global through indirect eval and load
+	 * any module with `import()`. See {@link requireLockdown}.
 	 */
 	backend?: 'auto' | 'ffi' | 'worker';
+	/**
+	 * Refuse to run the handler on a Worker-backend isolate the runtime
+	 * cannot lock down. With isolated-jsc 0.13+ on AbsoluteJS patched Bun
+	 * 1.4.4+absolute.2 or later, Worker isolates call `lockdown()` from
+	 * `bun:jsc`, which removes `Bun` and makes `import()` reject; on stock
+	 * Bun they cannot, and with this set the first call throws
+	 * `LockdownUnavailableError` instead of running unlocked. Set it for
+	 * handlers written by people you do not trust. Ignored by the FFI
+	 * backend. Default `false`.
+	 */
+	requireLockdown?: boolean;
 	/**
 	 * **Escape hatch.** Map of host functions the sandboxed handler may
 	 * call as `unsafeHost.fnName(...args)`. The name is deliberately
@@ -378,6 +393,7 @@ const compile = async (
 		allowWorkerFallback: true,
 		backend: config.backend ?? 'auto',
 		memoryLimit: config.memoryLimit ?? 32,
+		requireLockdown: config.requireLockdown,
 		timeout: timeoutMs
 	});
 	const runner = createIsolatedRunner({
