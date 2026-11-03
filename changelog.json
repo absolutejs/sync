@@ -5,6 +5,17 @@
 		{
 			"changes": [
 				{
+					"detail": "The optional `@absolutejs/isolated-jsc` peer range now allows 0.14. With 0.14, the `cpuMs` that sandboxed-handler metrics report is the isolate thread's CPU time instead of the wall-clock duration, so a handler waiting on a host call is no longer charged for the wait.",
+					"kind": "changed",
+					"summary": "Sandboxed handlers accept isolated-jsc 0.14"
+				}
+			],
+			"date": "2026-11-03",
+			"version": "3.1.1"
+		},
+		{
+			"changes": [
+				{
 					"detail": "Sandboxed mutation handlers take `requireLockdown`, passed through to isolated-jsc 0.13+. On the Worker backend, stock Bun lets a handler reach the `Bun` global through indirect eval and load any module with `import()`; AbsoluteJS patched Bun 1.4.4+absolute.2 closes both with `lockdown()`. With `requireLockdown: true`, the handler refuses to run on a Worker isolate that is not locked down and throws `LockdownUnavailableError` instead. Default `false`, so nothing changes unless you set it. The `@absolutejs/isolated-jsc` peer range now allows 0.13; older versions ignore the option.",
 					"kind": "added",
 					"summary": "Sandboxed handlers can require a locked-down isolate",
