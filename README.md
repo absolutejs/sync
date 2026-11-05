@@ -854,7 +854,12 @@ and uses optional LISTEN wakeups plus periodic reconciliation for missed signals
 Use an unpooled connection for LISTEN where required by your database provider.
 No source row payloads or credentials enter the feed. Declare all domain and
 permission tables in a collection's `tables` dependencies, and recheck current
-access in `hydrate`. This adapter is for **refetch collections only**: it emits
+access in `hydrate`. For Drizzle collections, set `drizzleCollection({ mode: 'refetch', ... })`
+to omit the incremental matcher while retaining the same scoped query and
+authorization. This also keeps projected/private columns out of emitted rows.
+The default remains `mode: 'incremental'` for full domain-row change feeds.
+
+This adapter is for **refetch collections only**: it emits
 revision markers, not domain rows. The engine computes and delivers row diffs;
 it does not ask browsers to poll. For large collections use a row-level CDC
 adapter and scoped incremental matching instead. Revisions serialize concurrent
