@@ -11,6 +11,8 @@ import { resolveKeyColumn } from './topics';
 export type DrizzleCollectionOptions<T, P = void, Ctx = CollectionContext> = {
 	/** Collection name clients subscribe to. */
 	name: string;
+	/** Use refetch for metadata-only revision feeds or projected rows. Default incremental requires complete domain rows. */
+	mode?: 'incremental' | 'refetch';
 	/** The Drizzle table this collection reads (drives change routing + key). */
 	table: Table;
 	/** The query filter, written once — powers both hydrate and the matcher. */
@@ -55,12 +57,15 @@ export const drizzleCollection = <T, P = void, Ctx = CollectionContext>(
 		tables: [getTableName(options.table)],
 		hydrate: (params, ctx) =>
 			options.find(options.where(params, ctx), params, ctx),
-		match: (row, params, ctx) =>
-			matchesDrizzleWhere(
-				options.table,
-				options.where(params, ctx),
-				row as Record<string, unknown>
-			),
+		match:
+			options.mode === 'refetch'
+				? undefined
+				: (row, params, ctx) =>
+						matchesDrizzleWhere(
+							options.table,
+							options.where(params, ctx),
+							row as Record<string, unknown>
+						),
 		key,
 		authorize: options.authorize
 	};

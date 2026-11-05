@@ -251,3 +251,49 @@ describe('drizzleCollection', () => {
 		]);
 	});
 });
+
+test('refetch mode turns metadata-only changes into scoped projected row diffs', async () => {
+	const rows = [user({ id: 1, teamId: 5 }), user({ id: 2, teamId: 9 })];
+	const engine = createSyncEngine();
+	const collection = drizzleCollection<
+		{ id: number; name: string | null },
+		void,
+		{ teamId: number }
+	>({
+		name: 'projectedUsers',
+		table: users,
+		mode: 'refetch',
+		where: (_, ctx) => eq(users.teamId, ctx.teamId),
+		find: (_where, _, ctx) =>
+			rows
+				.filter((row) => row.teamId === ctx.teamId)
+				.map(({ id, name }) => ({ id, name })),
+		authorize: (_, ctx) => ctx.teamId === 5
+	});
+	expect(collection.match).toBeUndefined();
+	engine.register(collection);
+	const diffs: ViewDiff<unknown>[] = [];
+	const sub = await engine.subscribe({
+		collection: 'projectedUsers',
+		params: undefined,
+		ctx: { teamId: 5 },
+		onDiff: (diff) => diffs.push(diff)
+	});
+	rows[0]!.name = 'Updated';
+	rows[1]!.name = 'Private';
+	await engine.applyChange('users', {
+		op: 'update',
+		row: { id: 'users', revision: '2' }
+	});
+	expect(diffs).toHaveLength(1);
+	expect(JSON.stringify(diffs)).toContain('Updated');
+	expect(JSON.stringify(diffs)).not.toContain('Private');
+	expect(JSON.stringify(diffs)).not.toContain('teamId');
+	expect(
+		await engine.hydrate('projectedUsers', undefined, { teamId: 5 })
+	).toEqual([{ id: 1, name: 'Updated' }]);
+	await expect(
+		engine.hydrate('projectedUsers', undefined, { teamId: 9 })
+	).rejects.toThrow();
+	sub.unsubscribe();
+});
