@@ -22,6 +22,8 @@ export const useCollaborativeText = <State = TextState>(
 ) => {
 	const [state, setState] = useState<CollaborativeTextState>({
 		ready: false,
+		refused: null,
+		unsent: 0,
 		status: 'connecting',
 		text: ''
 	});

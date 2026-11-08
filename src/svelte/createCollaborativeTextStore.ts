@@ -20,6 +20,8 @@ export const createCollaborativeTextStore = <State = TextState>(
 	let controller: CollaborativeText | null = null;
 	let current: CollaborativeTextState = {
 		ready: false,
+		refused: null,
+		unsent: 0,
 		status: 'connecting',
 		text: ''
 	};

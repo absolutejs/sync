@@ -5,6 +5,21 @@
 		{
 			"changes": [
 				{
+					"detail": "`CollaborativeTextState` now has `unsent`, the number of local edits the server has not acknowledged yet (sent and awaiting an ack, or held until the document hydrates), and `refused`, why the server refused the last edit it refused, until a later edit is confirmed. An editor can show \"saving\" while `unsent` is above zero and \"saved\" once it is zero, instead of claiming saved as soon as someone types. `createCollaborativeText` also accepts `webSocketImpl`, like `createSyncCollection`.",
+					"kind": "added",
+					"summary": "Collaborative text reports edits the server has not confirmed",
+					"symbols": [
+						"CollaborativeTextState",
+						"createCollaborativeText"
+					]
+				}
+			],
+			"date": "2026-11-08",
+			"version": "3.3.0"
+		},
+		{
+			"changes": [
+				{
 					"kind": "added",
 					"summary": "Drizzle collections support explicit refetch mode for metadata-only Postgres revision feeds and projected rows",
 					"symbols": [
