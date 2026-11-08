@@ -34,6 +34,8 @@ export type CollaborativeTextOptions<State = TextState> = {
 	 * — it must match the backend the server registered for this field.
 	 */
 	create?: (replica: string) => CrdtText<State>;
+	/** WebSocket implementation (defaults to the global one). */
+	webSocketImpl?: typeof WebSocket;
 };
 
 export type CollaborativeTextState = {
@@ -47,6 +49,18 @@ export type CollaborativeTextState = {
 	 * before hydration are buffered and reconciled after the first snapshot.
 	 */
 	ready: boolean;
+	/**
+	 * Edits made here that the server hasn't confirmed yet: sent and awaiting
+	 * an acknowledgement, or held until the document hydrates. An editor can
+	 * show "saving" while this is above zero and "saved" once it is zero.
+	 */
+	unsent: number;
+	/**
+	 * Why the server refused the last edit it refused, until a later edit is
+	 * confirmed. Refused edits are not retried, so the text on screen may
+	 * hold changes the server doesn't have.
+	 */
+	refused: string | null;
 };
 
 export type CollaborativeText = {
@@ -80,9 +94,12 @@ export const createCollaborativeText = <State = TextState>(
 
 	let current: CollaborativeTextState = {
 		ready: false,
+		refused: null,
 		status: 'connecting',
-		text: ''
+		text: '',
+		unsent: 0
 	};
+	let closed = false;
 	let pendingText: string | null = null;
 	const subscribers = new Set<(state: CollaborativeTextState) => void>();
 	const emit = () => {
@@ -95,21 +112,40 @@ export const createCollaborativeText = <State = TextState>(
 		collection: options.collection,
 		key: (row) => row[keyField] as RowKey,
 		params: options.params,
-		url: options.url
+		url: options.url,
+		webSocketImpl: options.webSocketImpl
 	});
+
+	const settle = (refused?: string) => {
+		if (closed) return;
+		current = {
+			...current,
+			refused: refused === undefined ? null : refused,
+			unsent: Math.max(0, current.unsent - 1)
+		};
+		emit();
+	};
 
 	const broadcast = (next: string) => {
 		crdt.setText(next);
-		current = { ...current, text: next };
+		current = { ...current, text: next, unsent: current.unsent + 1 };
 		emit();
 		// Upload only this edit's ops when the backend supports delta-state
 		// (O(edit)); otherwise the full state. The server merges either the
 		// same way (union) and keeps full state for late-joiner hydration.
 		const payload = crdt.takeDelta ? crdt.takeDelta() : crdt.state();
-		void collection.mutate({
-			args: { [keyField]: options.id, [options.field]: payload },
-			name: mutation
-		});
+		collection
+			.mutate({
+				args: { [keyField]: options.id, [options.field]: payload },
+				name: mutation
+			})
+			.then(
+				() => settle(),
+				(error: unknown) =>
+					settle(
+						error instanceof Error ? error.message : String(error)
+					)
+			);
 	};
 
 	const apply = (state: {
@@ -127,11 +163,13 @@ export const createCollaborativeText = <State = TextState>(
 			text = crdt.text();
 		}
 		const ready = current.ready || fieldState !== undefined;
-		current = { ready, status: state.status, text };
+		current = { ...current, ready, status: state.status, text };
 		emit();
 		if (ready && pendingText !== null) {
 			const buffered = pendingText;
 			pendingText = null;
+			// It was counted while held; broadcasting counts it again.
+			current = { ...current, unsent: current.unsent - 1 };
 			broadcast(buffered);
 		}
 	};
@@ -150,8 +188,14 @@ export const createCollaborativeText = <State = TextState>(
 		},
 		setText(next) {
 			if (!current.ready) {
+				// Only the latest held text is sent, so it counts once.
+				const held = pendingText !== null;
 				pendingText = next;
-				current = { ...current, text: next };
+				current = {
+					...current,
+					text: next,
+					unsent: held ? current.unsent : current.unsent + 1
+				};
 				emit();
 				return;
 			}
@@ -160,6 +204,7 @@ export const createCollaborativeText = <State = TextState>(
 		anchorAt: (index) => crdt.anchorAt?.(index) ?? null,
 		indexOfAnchor: (anchor) => crdt.indexOfAnchor?.(anchor) ?? 0,
 		close() {
+			closed = true;
 			unsubscribe();
 			collection.close();
 			subscribers.clear();
