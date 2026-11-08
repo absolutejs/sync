@@ -9,6 +9,7 @@
 					"kind": "added",
 					"summary": "Collaborative text reports edits the server has not confirmed",
 					"symbols": [
+						"CollaborativeTextOptions",
 						"CollaborativeTextState",
 						"createCollaborativeText"
 					]
