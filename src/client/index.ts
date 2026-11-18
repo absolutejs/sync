@@ -1,6 +1,7 @@
 export type { ReactiveEvent } from '../reactiveHub';
+export { SYNC_OPEN_TOPIC } from '../reactiveHub';
 
-export { createSyncSubscriber } from './subscriber';
+export { createSyncSubscriber, isSyncOpenEvent } from './subscriber';
 export { createSharedSyncSubscriber } from './sharedSubscriber';
 export type { SyncSubscriber, SyncSubscriberOptions } from './subscriber';
 

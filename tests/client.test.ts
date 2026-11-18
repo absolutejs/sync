@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { createSyncSubscriber } from '../src/client/index';
+import {
+	createSyncSubscriber,
+	isSyncOpenEvent,
+	SYNC_OPEN_TOPIC
+} from '../src/client/index';
 import type { ReactiveEvent } from '../src/reactiveHub';
 
 /** Minimal EventSource stand-in so the client can be driven deterministically. */
@@ -146,5 +150,31 @@ describe('createSyncSubscriber', () => {
 		} finally {
 			globalThis.EventSource = saved;
 		}
+	});
+});
+
+describe('isSyncOpenEvent', () => {
+	test('tells the open frame from a publish, so opening is not a change', () => {
+		const changes: ReactiveEvent[] = [];
+		createSyncSubscriber({
+			topics: ['orders'],
+			onEvent: (event) => {
+				if (!isSyncOpenEvent(event)) changes.push(event);
+			},
+			eventSourceImpl: FakeImpl
+		});
+		const source = lastInstance();
+		source.emit(
+			JSON.stringify({
+				at: 1,
+				payload: { topics: ['orders'] },
+				topic: SYNC_OPEN_TOPIC
+			})
+		);
+		source.emit(
+			JSON.stringify({ at: 2, payload: { id: 'o1' }, topic: 'orders' })
+		);
+
+		expect(changes.map((event) => event.topic)).toEqual(['orders']);
 	});
 });
