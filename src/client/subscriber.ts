@@ -1,10 +1,16 @@
-import type { ReactiveEvent } from '../reactiveHub';
+import { type ReactiveEvent, SYNC_OPEN_TOPIC } from '../reactiveHub';
 import { createSharedSyncSubscriber } from './sharedSubscriber';
 
 export type SyncSubscriberOptions = {
 	/** Topics to subscribe to. A trailing `*` matches by prefix server-side. */
 	topics: string[];
-	/** Called for every reactive event pushed from the server. */
+	/**
+	 * Called for every reactive event pushed from the server, including the
+	 * open frame the server sends when a connection (re)opens, whose topic
+	 * is {@link SYNC_OPEN_TOPIC}. That frame says the stream is live, not
+	 * that anything changed: check {@link isSyncOpenEvent} before treating
+	 * an event as a change (a reconnect is the time to catch up).
+	 */
 	onEvent: (event: ReactiveEvent) => void;
 	/** SSE endpoint mounted by the {@link sync} plugin. Defaults to `/sync`. */
 	url?: string;
@@ -24,6 +30,14 @@ export type SyncSubscriberOptions = {
 	 */
 	shared?: boolean;
 };
+
+/**
+ * Whether an event is the server's open frame (a connection opened or
+ * reopened) rather than a publish on a subscribed topic. Refetching on it
+ * refetches every subscriber's data once per page load for nothing.
+ */
+export const isSyncOpenEvent = (event: ReactiveEvent) =>
+	event.topic === SYNC_OPEN_TOPIC;
 
 export type SyncSubscriber = {
 	close: () => void;
