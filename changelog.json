@@ -5,6 +5,17 @@
 		{
 			"changes": [
 				{
+					"detail": "The Elysia 2.0.0-rc.0 note is now entries a project can have applied: Elysia and every `@elysia/*` move to `^2.0.0-rc.0`, and every lifecycle hook called on an Elysia app is renamed to its `on` name. Only `setup`/`cleanup` becoming `onStart`/`onStop` is still for a person, since they now run at a different moment.",
+					"kind": "changed",
+					"summary": "Upgrading past Elysia 2.0.0-rc.0 can be applied rather than followed by hand"
+				}
+			],
+			"date": "2026-11-19",
+			"version": "3.4.1"
+		},
+		{
+			"changes": [
+				{
 					"detail": "`@absolutejs/sync/client` now exports `SYNC_OPEN_TOPIC` and `isSyncOpenEvent(event)`. A subscriber's `onEvent` receives the open frame the server sends when a connection opens or reopens; it says the stream is live, not that anything changed. A subscriber that refetches on every event refetched each page's data once per load for nothing. Check `isSyncOpenEvent` first, and catch up on a reopen (the second open frame, or `onOpen` after the first). `createLiveQuery` and the shared subscriber already handle it.",
 					"kind": "added",
 					"summary": "isSyncOpenEvent tells the open frame from a change",
@@ -121,10 +132,60 @@
 					"detail": "Elysia 2.0.0-rc.0 renamed every lifecycle hook to its `on` form and removed `setup`/`cleanup`. sync's peer ranges (`elysia ^2.0.0-beta.6`, `@elysia/cron ^2.0.0-beta.1`) accepted it untested. sync now builds and tests against Elysia 2.0.0-rc.0 and requires `^2.0.0-rc.0` for both; the plugins whose types carry Elysia's are listed below. No sync API changed shape.",
 					"kind": "breaking",
 					"migration": {
-						"instruction": "Upgrade `elysia` and every `@elysia/*` package (including `@elysia/cron`) to 2.0.0-rc.0 or later 2.x, then rename lifecycle hooks in your app: request → onRequest, beforeHandle → onBeforeHandle, afterHandle → onAfterHandle, afterResponse → onAfterResponse, error → onError, parse → onParse, transform → onTransform; setup/cleanup → onStart/onStop.",
-						"manual": true
+						"dependencies": {
+							"names": [
+								"elysia",
+								"@elysia/*"
+							],
+							"range": "^2.0.0-rc.0"
+						},
+						"instruction": "Upgrade `elysia` and every `@elysia/*` package to 2.0.0-rc.0 or later 2.x."
 					},
 					"summary": "Requires Elysia 2.0.0-rc.0 and @elysia/cron 2.0.0-rc.0",
+					"symbols": [
+						"createPlatformSyncRuntime",
+						"scheduled",
+						"syncCdc",
+						"syncDevtools",
+						"syncSocket"
+					]
+				},
+				{
+					"kind": "breaking",
+					"migration": {
+						"instruction": "Rename Elysia's lifecycle hooks to their `on` names: `.request()` → `.onRequest()`, `.beforeHandle()` → `.onBeforeHandle()`, `.afterHandle()` → `.onAfterHandle()`, `.afterResponse()` → `.onAfterResponse()`, `.error()` → `.onError()`, `.parse()` → `.onParse()`, `.transform()` → `.onTransform()`.",
+						"methods": {
+							"owner": {
+								"export": "Elysia",
+								"module": "elysia"
+							},
+							"renames": {
+								"request": "onRequest",
+								"beforeHandle": "onBeforeHandle",
+								"afterHandle": "onAfterHandle",
+								"afterResponse": "onAfterResponse",
+								"error": "onError",
+								"parse": "onParse",
+								"transform": "onTransform"
+							}
+						}
+					},
+					"summary": "Elysia's lifecycle hooks use their `on` names",
+					"symbols": [
+						"createPlatformSyncRuntime",
+						"scheduled",
+						"syncCdc",
+						"syncDevtools",
+						"syncSocket"
+					]
+				},
+				{
+					"kind": "breaking",
+					"migration": {
+						"instruction": "Replace `.setup()` with `.onStart()` and `.cleanup()` with `.onStop()`: they now run when the server starts and stops. Check what yours do, since they no longer run at the same moment.",
+						"manual": true
+					},
+					"summary": "Elysia's `setup` and `cleanup` hooks are `onStart` and `onStop`",
 					"symbols": [
 						"createPlatformSyncRuntime",
 						"scheduled",
